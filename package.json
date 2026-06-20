@@ -16,6 +16,6 @@
     "js-chess-engine": "^2.4.6"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   }
 }
