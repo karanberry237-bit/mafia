@@ -1049,7 +1049,7 @@ function startDeadMansSwitch(guild) {
   if (deadManInterval) { clearTimeout(deadManInterval); deadManInterval = null; }
   const fire = async () => {
     const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
-    if (genChannel) await genChannel.send(DEAD_MANS_MESSAGES[Math.floor(Math.random() * DEAD_MANS_MESSAGES.length)]).catch(() => {});
+    // Dead man message removed
     deadManInterval = setTimeout(fire, timerConfig.deadman);
   };
   deadManInterval = setTimeout(fire, timerConfig.deadman);
@@ -1097,13 +1097,7 @@ function startPsychologicalWarfare(guild) {
 
     try {
       if (roll < summonThreshold) {
-        const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
-        if (!genChannel) return;
-        await guild.members.fetch();
-        const outsiders = guild.members.cache.filter(m => !m.user.bot && m.id !== MASTER_ID && !familyRoster.has(m.id));
-        if (outsiders.size === 0) return;
-        const target = outsiders.random();
-        const msg = CRYPTIC_SUMMONS[Math.floor(Math.random() * CRYPTIC_SUMMONS.length)].replace("{user}", `<@${target.id}>`);
+        return; // Psych warfare summon disabled
         await genChannel.send(msg).catch(() => {});
       }
       else if (roll < lockdownThreshold) {
