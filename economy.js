@@ -1,4 +1,5 @@
 const { createClient } = require("@supabase/supabase-js");
+const ws = require("ws");
 
 // ── Currency System ───────────────────────────────────────────────────────────
 // NOTE: internal `key` values (copper/silver/gold/stellar) are kept as-is because
