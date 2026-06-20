@@ -71,12 +71,13 @@ async function checkGambleCooldown(userId) {
   return null;
 }
 const { createClient } = require("@supabase/supabase-js");
+const ws = require("ws");
 
 process.on('unhandledRejection', (error) => console.error('Unhandled promise rejection:', error));
 process.on('uncaughtException', (error) => console.error('Uncaught Exception:', error));
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, { realtime: { transport: ws } });
 eco.initEconomy(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 bank.initBank(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
