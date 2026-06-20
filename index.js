@@ -1167,6 +1167,46 @@ async function triggerFakeRaidAlert(guild) {
 }
 
 // ── Exile System ──────────────────────────────────────────────────────────────
+// Apply permission overwrites across all applicable channels for one member.
+// Runs in small concurrent batches instead of firing every channel at once —
+// on a large guild, firing hundreds of permissionOverwrites.edit calls
+// simultaneously trips Discord's rate limits, and the old code's
+// .catch(() => {}) silently dropped those failures, so some channels never
+// actually got locked even though the exile "succeeded".
+async function applyExilePermissions(guild, member, { locking }) {
+  const channels = [...guild.channels.cache.values()].filter(
+    c => c.permissionOverwrites && c.id !== EXILE_CHANNEL_ID
+  );
+  const BATCH_SIZE = 5;
+  let failures = 0;
+  for (let i = 0; i < channels.length; i += BATCH_SIZE) {
+    const batch = channels.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(channel =>
+        locking
+          ? channel.permissionOverwrites.edit(member, { ViewChannel: false, SendMessages: false })
+          : channel.permissionOverwrites.delete(member)
+      )
+    );
+    for (const r of results) if (r.status === "rejected") {
+      failures++;
+      console.error("[EXILE PERMS]", r.reason?.message || r.reason);
+    }
+  }
+  // Exile channel itself: explicit allow when locking, just delete when releasing.
+  const exileChannel = guild.channels.cache.get(EXILE_CHANNEL_ID);
+  if (exileChannel) {
+    try {
+      if (locking) await exileChannel.permissionOverwrites.edit(member, { ViewChannel: true, SendMessages: true });
+      else await exileChannel.permissionOverwrites.delete(member);
+    } catch (e) {
+      failures++;
+      console.error("[EXILE PERMS] exile channel", e.message);
+    }
+  }
+  return { total: channels.length + 1, failures };
+}
+
 async function exileUser(guild, targetId, durationMs = null) {
   const member = await guild.members.fetch(targetId).catch(() => null);
   if (!member) return "🔫 Can't find that member.";
@@ -1176,12 +1216,7 @@ async function exileUser(guild, targetId, durationMs = null) {
   if (durationMs) tempExiles.set(targetId, { expiresAt: Date.now() + durationMs });
   saveData();
   await member.roles.set([], "Exiled").catch(() => {});
-  const promises = [];
-  for (const [, channel] of guild.channels.cache) {
-    if (channel.id === EXILE_CHANNEL_ID) promises.push(channel.permissionOverwrites.edit(member, { ViewChannel: true, SendMessages: true }).catch(() => {}));
-    else promises.push(channel.permissionOverwrites.edit(member, { ViewChannel: false, SendMessages: false }).catch(() => {}));
-  }
-  await Promise.allSettled(promises);
+  const { total, failures } = await applyExilePermissions(guild, member, { locking: true });
   const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
   const durationText = durationMs ? ` for **${formatTime(durationMs)}**` : "";
   if (genChannel) await genChannel.send(`⛓️ **BY ORDER OF DON CLINT** 🔫\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n<@${targetId}> has been **EXILED** from the Family${durationText}.\nStripped of all rank and confined to the exile chamber.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*👁️ The Family remembers.*`).catch(() => {});
@@ -1192,6 +1227,10 @@ async function exileUser(guild, targetId, durationMs = null) {
       if (exileStore.has(targetId)) await unexileUser(guild, targetId, true);
     }, durationMs);
   }
+  if (failures > 0) {
+    const adminCh = guild.channels.cache.get(LOCKDOWN_CHANNEL_ID);
+    if (adminCh) await adminCh.send(`⚠️ [EXILE] <@${targetId}> exiled, but **${failures}/${total}** channel permission updates failed (likely rate-limited or overwrite cap). They may still have access to some channels — check manually.`).catch(() => {});
+  }
   return null;
 }
 
@@ -1201,26 +1240,32 @@ async function unexileUser(guild, targetId, auto = false) {
   const member = await guild.members.fetch(targetId).catch(() => null);
   if (!member) return "🔫 Can't find that member.";
   await member.roles.set(data.roles, "Unexiled").catch(() => {});
-  const promises = [];
-  for (const [, channel] of guild.channels.cache) promises.push(channel.permissionOverwrites.delete(member).catch(() => {}));
-  await Promise.allSettled(promises);
+  const { total, failures } = await applyExilePermissions(guild, member, { locking: false });
   exileStore.delete(targetId);
   tempExiles.delete(targetId);
   saveData();
   const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
   if (genChannel) await genChannel.send(`✅ **${auto ? "EXILE EXPIRED" : "BY ORDER OF DON CLINT"}** 🔫\n<@${targetId}> has been **pardoned** and released from exile. Do not waste this mercy.`).catch(() => {});
+  if (failures > 0) {
+    const adminCh = guild.channels.cache.get(LOCKDOWN_CHANNEL_ID);
+    if (adminCh) await adminCh.send(`⚠️ [UNEXILE] <@${targetId}> unexiled, but **${failures}/${total}** channel overwrite removals failed. Leftover deny overwrites may still block them in some channels — check manually.`).catch(() => {});
+  }
   return `🔫 <@${targetId}> unexiled. Roles restored.`;
 }
 
 async function applyExileToNewChannel(channel) {
-  if (!channel.guild) return;
+  if (!channel.guild || !channel.permissionOverwrites) return;
   for (const [exiledId] of exileStore) {
     const member = channel.guild.members.cache.get(exiledId);
     if (!member) continue;
-    if (channel.id === EXILE_CHANNEL_ID) {
-      await channel.permissionOverwrites.edit(member, { ViewChannel: true, SendMessages: true }).catch(() => {});
-    } else {
-      await channel.permissionOverwrites.edit(member, { ViewChannel: false, SendMessages: false }).catch(() => {});
+    try {
+      if (channel.id === EXILE_CHANNEL_ID) {
+        await channel.permissionOverwrites.edit(member, { ViewChannel: true, SendMessages: true });
+      } else {
+        await channel.permissionOverwrites.edit(member, { ViewChannel: false, SendMessages: false });
+      }
+    } catch (e) {
+      console.error("[EXILE NEW CHANNEL]", e.message);
     }
   }
 }
@@ -2091,7 +2136,16 @@ async function handleGodModeSentence(text, message, guild, adminCh) {
 }
 
 async function handleGodModeMessage(message, guild, adminCh) {
-  const text  = message.content.trim();
+  // Normalize bare numeric Discord IDs (17-19 digits) into <@ID> mention
+  // syntax so every <@!?(\d+)> regex in parseGodCommand/parseBareRoleFragment
+  // matches a raw pasted ID the same way it matches a real @mention. Without
+  // this, commands like "cosa exile 123456789012345678" silently fail to
+  // find a target whenever the mod pastes an ID instead of pinging — common
+  // for members who left, aren't cached, or are deliberately not being pinged.
+  const text  = message.content.trim().replace(
+    /(?<!<@!?)\b(\d{17,19})\b(?!>)/g,
+    (full, id) => `<@${id}>`
+  );
   const lower = text.toLowerCase();
 
   // ── Deactivate ─────────────────────────────────────────────────────────────
@@ -2243,7 +2297,19 @@ function isTriggered(message) {
 function isStopCommand(text) { return /\bcosa\s+(stop|shut up|be quiet|go silent|silence|enough)\b/i.test(text); }
 function isResumeCommand(text) { return /\bcosa\s+(wake up|come back|you can talk|talk again|resume|unpause)\b/i.test(text); }
 function getTargetId(message) {
+  // 1. Prefer a real @mention if one was given.
   for (const [id] of message.mentions.users) if (id !== client.user.id) return id;
+
+  // 2. Fall back to a raw numeric Discord ID typed as plain text
+  //    (e.g. "cosa exile 123456789012345678"). This matters for mods
+  //    targeting members who can't easily be @mentioned — e.g. they left
+  //    the server, aren't cached, have mentions disabled, or the mod is
+  //    deliberately avoiding pinging them (copy-pasted from an audit log,
+  //    ban list, or screenshot instead).
+  //    Discord snowflakes are 17-19 digit numbers.
+  const idMatch = message.content.match(/(?:^|\s)(\d{17,19})(?:\s|$)/);
+  if (idMatch && idMatch[1] !== client.user.id) return idMatch[1];
+
   return null;
 }
 function parseDuration(text) {
@@ -5416,6 +5482,18 @@ async function init() {
     const userText = message.content.replace(new RegExp(`<@!?${client.user.id}>`, "g"), "").trim();
     if (!userText) return;
 
+    // ── Normalize bare numeric IDs into mention syntax ──────────────────────
+    // Mods/admins often paste a raw user ID (from the audit log, ban list, a
+    // screenshot, or to avoid pinging someone) instead of @mentioning them.
+    // Every command regex below expects <@ID> / <@!ID>, so without this, raw
+    // IDs silently fail to match and the command appears to do nothing —
+    // especially noticeable for members who can't easily be @mentioned
+    // (left the server, not cached, mentions disabled, etc).
+    const userTextNormalized = userText.replace(
+      /(?<!<@!?)\b(\d{17,19})\b(?!>)/g,
+      (full, id) => `<@${id}>`
+    );
+
     // ── Natural memory trigger (Don only, works anywhere) ───────────────────
     if (isMaster) {
       // Resolve @mentions to "username (id:123)" so we lock in the ID too
@@ -5454,7 +5532,7 @@ async function init() {
     if (!isModUserBool && isToxicMessage(userText)) await handleToxic(message);
 
     if (isModUserBool) {
-      const cmd = detectMasterCommand(userText, message);
+      const cmd = detectMasterCommand(userTextNormalized, message);
       if (cmd) {
         const actionPermMap = {
           purge_confirm: "canPurge", ban_confirm: "canBan", kick_confirm: "canKick",
@@ -5477,7 +5555,7 @@ async function init() {
       }
     }
 
-    const pubCmd = detectPublicCommand(userText, message);
+    const pubCmd = detectPublicCommand(userTextNormalized, message);
     if (pubCmd) {
       // Handle help commands directly without debt check
       if (pubCmd.action === "help" || pubCmd.action === "rank_help") {
