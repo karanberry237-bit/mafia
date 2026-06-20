@@ -80,7 +80,7 @@ function initFirms(masterId, supabaseUrl, supabaseKey, clientRef, generalChannel
   MASTER_ID = masterId;
   discordClient = clientRef;
   GENERAL_CHANNEL_ID = generalChannelId;
-  supabase = createClient(supabaseUrl, supabaseKey);
+  supabase = createClient(supabaseUrl, supabaseKey, { realtime: { transport: ws } });
   firmChart.registerSupabase(supabase);
 
   // Register volatility callback — keeps firm.share_price live with candle ticks
