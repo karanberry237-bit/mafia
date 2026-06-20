@@ -1,2 +1,5 @@
 [phases.setup]
 aptPkgs = ["fontconfig", "fonts-dejavu-core"]
+
+[variables]
+NODE_VERSION = "22"
