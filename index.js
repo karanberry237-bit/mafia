@@ -1627,7 +1627,14 @@ function parseGodCommand(text) {
   if (m) return { action: "remove_role", userId: m[1], roleName: m[2].trim() };
   m = t.match(/(?:remove|take|strip)\s+(?:the\s+)?(.+?)\s+role\s+(?:from\s+)?<@!?(\d+)>/i);
   if (m) return { action: "remove_role", userId: m[2], roleName: m[1].trim() };
+// Exile
+  m = t.match(/exile\s+<@!?(\d+)>/i);
+  if (m) return { action: "exile_god", userId: m[1] };
 
+  // Unexile
+  m = t.match(/unexile\s+<@!?(\d+)>/i);
+  if (m) return { action: "unexile_god", userId: m[1] };
+  
   // Kick
   m = t.match(/kick\s+<@!?(\d+)>(?:\s+(?:for|reason[:\s]+)(.+))?/i);
   if (m) return { action: "kick", userId: m[1], reason: (m[2] || "By order of the Family").trim() };
@@ -2005,9 +2012,9 @@ async function runGodModeBatch(parsed, message, guild, adminCh) {
     const outcome = await executeGodAction(item.cmd, guild, adminCh);
     results.push(outcome);
     // Stream progress by editing the message as each action completes
-    if (progressMsg) {
-      const doneSoFar = results.length;
-      await progressMsg.edit(
+  if (progressMsg?.id) {
+    const doneSoFar = results.length;
+    await progressMsg.edit(
         `${opening}${salute}\n⚙️ *Executing ${total} action(s)... (${doneSoFar}/${parsed.length})*`
       ).catch(() => {});
     }
@@ -2024,7 +2031,7 @@ async function runGodModeBatch(parsed, message, guild, adminCh) {
     `**Results:**\n` + results.join("\n") +
     `\n\n${summaryLine}`;
 
-  if (progressMsg) await progressMsg.edit(summary).catch(() => { message.reply(summary).catch(() => {}); });
+  if (progressMsg?.id) await progressMsg.edit(summary).catch(() => { message.reply(summary).catch(() => {}); });
   else await message.reply(summary).catch(() => {});
 
   if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Batch of ${parsed.length} action(s) executed by Don Clint (${failCount} failed).`).catch(() => {});
@@ -3276,6 +3283,17 @@ ${currentMood.desc}
       await sendModLog(guild, { action: "Unmute", moderator: modName, target: member.user.username });
       return `🔫 <@${targetId}> unmuted.`;
     }
+      case "exile_god": {
+        if (cmd.userId === MASTER_ID) return "🔫 Cannot exile Don Clint.";
+        const result = await exileUser(guild, cmd.userId);
+        if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] <@${cmd.userId}> exiled by Don Clint.`).catch(() => {});
+        return result || `⛓️ <@${cmd.userId}> exiled.`;
+      }
+      case "unexile_god": {
+        const result = await unexileUser(guild, cmd.userId);
+        if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] <@${cmd.userId}> unexiled by Don Clint.`).catch(() => {});
+        return result;
+      }
     case "unban": {
       try { await guild.members.unban(targetId); await sendModLog(guild, { action: "Unban", moderator: modName, target: `<@${targetId}>` }); return `🔫 <@${targetId}> pardoned.`; }
       catch (err) { return `🔫 Unban failed: ${err.message}`; }
