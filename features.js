@@ -4,7 +4,12 @@ const { createClient } = require("@supabase/supabase-js");
 const eco = require("./economy.js");
 
 // Initialize Supabase directly — no timing dependency on initFeatures
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const WebSocket = require("ws");
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
+  realtime: {
+    transport: WebSocket
+  }
+});
 
 let MASTER_ID;
 let client;
