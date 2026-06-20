@@ -1,4 +1,5 @@
 const { createClient } = require("@supabase/supabase-js");
+const eco = require("./economy.js");
 const ws = require("ws");
 
 // ── Currency System ───────────────────────────────────────────────────────────
