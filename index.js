@@ -268,21 +268,17 @@ async function runCosaSetup(guild) {
     }
     return role.id;
   }
-
-  GENERAL_CHANNEL_ID = guild.channels.cache.find(c => c.name === "general")?.id || (await ensureChannel("general-chat", "Main chat"));
+  GENERAL_CHANNEL_ID = "1516555429491114117";
   LOCKDOWN_CHANNEL_ID = await ensureChannel("lockdown-log", "Nuclear lockdown alerts and logs");
   FAMILY_LIST_CHANNEL_ID = await ensureChannel("family-list", "Who's who in the Family");
   EXILE_CHANNEL_ID = await ensureChannel("the-doghouse", "Where the exiled wait");
   HOLDING_CHANNEL_ID = await ensureChannel("holding", "Holding cell for pending verification");
   SHADOW_COURT_ID = await ensureChannel("the-sit-down", "Anonymous trials — vote exile or mercy");
   INSIDE_MAN_ID = await ensureChannel("inside-man", "Cosa's tips and predictions");
-  CHESS_CHANNEL_ID = await ensureChannel("chess-table", "Chess games vs Cosa or other members");
+  CHESS_CHANNEL_ID = "1517887653180080280";
   MOD_LOG_CHANNEL_ID = await ensureChannel("mod-logs", "Moderation action log");
 
-  VERIFIED_ROLE_ID = await ensureRole("Verified");
-  HELPER_ROLE_ID = await ensureRole("Enforcer");
-  MOD_ROLE_ID_INACTIVITY = await ensureRole("Capo");
-  ELDER_ROLE_ID = await ensureRole("Underboss");
+ 
 
   await saveSetupConfig();
   return created;
