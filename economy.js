@@ -54,7 +54,7 @@ function parseBet(amount, tierKey) {
 let supabase;
 function initEconomy(supabaseUrl, supabaseKey) {
   try {
-    supabase = createClient(supabaseUrl, supabaseKey);
+    supabase = createClient(supabaseUrl, supabaseKey, { realtime: { transport: ws } });
     console.log("✅ Economy system initialized");
   } catch (e) {
     console.error("[ECONOMY] Init failed:", e.message);
