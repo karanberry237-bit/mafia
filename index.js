@@ -270,7 +270,7 @@ async function runCosaSetup(guild) {
   }
   GENERAL_CHANNEL_ID = "1516555429491114117";
   LOCKDOWN_CHANNEL_ID = await ensureChannel("lockdown-log", "Nuclear lockdown alerts and logs");
-  FAMILY_LIST_CHANNEL_ID = await ensureChannel("family-list", "Who's who in the Family");
+  // family-list channel removed — use 'cosa family ledger' instead
   EXILE_CHANNEL_ID = await ensureChannel("the-doghouse", "Where the exiled wait");
   HOLDING_CHANNEL_ID = await ensureChannel("holding", "Holding cell for pending verification");
   SHADOW_COURT_ID = await ensureChannel("the-sit-down", "Anonymous trials — vote exile or mercy");
@@ -1025,7 +1025,7 @@ async function handleShadowWarning(message) {
   if (!watchlist.has(userId)) watchlist.set(userId, []);
   watchlist.get(userId).push({ content: message.content, timestamp: new Date().toISOString(), channelName: message.channel.name || "DM" });
   saveData();
-  const cosasChannel = message.guild?.channels.cache.get(FAMILY_LIST_CHANNEL_ID);
+  const cosasChannel = message.guild?.channels.cache.get(LOCKDOWN_CHANNEL_ID);
   if (!cosasChannel) return;
   const entry = watchlist.get(userId);
   await cosasChannel.send(
