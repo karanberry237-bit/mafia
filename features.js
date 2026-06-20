@@ -1,15 +1,8 @@
-// ── features.js — AFK, Giveaway, Trivia, Heist, Stocks, Marriage, Shop ────────
-
-const { createClient } = require("@supabase/supabase-js");
 const eco = require("./economy.js");
 
-// Initialize Supabase directly — no timing dependency on initFeatures
-const WebSocket = require("ws");
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
-  realtime: {
-    transport: WebSocket
-  }
-});
+// Initialize Supabase directly – no timing dependency on initFeatures
+const ws = require("ws");
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, { realtime: { transport: ws } });
 
 let MASTER_ID;
 let client;
