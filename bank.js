@@ -3,7 +3,7 @@ const ws = require("ws");
 
 let supabase;
 function initBank(url, key) {
-  supabase = createClient(url, key);
+  supabase = createClient(url, key, { realtime: { transport: ws } });
   console.log("🏦 Bank system initialized");
 }
 
