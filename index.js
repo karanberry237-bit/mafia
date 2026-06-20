@@ -5043,7 +5043,7 @@ async function init() {
       await features.loadPortfolios();
       await features.loadStockPrices();
       await features.loadInventories();
-      features.startStockMarket(guild, GENERAL_CHANNEL_ID);
+      features.startStockMarket(guild, null);
       // Init firms
       firms.initFirms(MASTER_ID, process.env.SUPABASE_URL, process.env.SUPABASE_KEY, client, GENERAL_CHANNEL_ID);
       await firms.loadAllFirms();
