@@ -1239,7 +1239,8 @@ function startInactivityCheck(guild) {
       }
       if (inactive.length === 0) return;
       const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
-      if (genChannel) await genChannel.send(`⚠️ **FAMILY INACTIVITY ALERT** 🔫\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${inactive.map(m => `<@${m.id}>`).join(" ")}\n\nThe Family requires your presence. Silent for over **${formatTimerConfig(timerConfig.inactivity)}**.\n**Serve the Family. Or face consequences.** 🔫`).catch(() => {});
+      // Inactivity alert removed
+      
     } catch (err) { console.error("Inactivity check failed:", err); }
   }, timerConfig.inactivity);
 }
