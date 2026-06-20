@@ -188,13 +188,7 @@ function formatCopper(cu) {
 
 // ── Spike announcement ───────────────────────────────────────────────────────
 async function announceFirmSpike(firm, userId, shares, oldPrice, newPrice, isBuy) {
-  if (!discordClient || !GENERAL_CHANNEL_ID) return;
-  const channel = discordClient.channels.cache.get(GENERAL_CHANNEL_ID);
-  if (!channel) return;
-  const pct = Math.abs(((newPrice - oldPrice) / oldPrice) * 100).toFixed(1);
-  const dir = isBuy ? "📈" : "📉";
-  const action = isBuy ? "bought" : "sold";
-  const emoji = isBuy ? "🚀" : "💥";
+  return; // Spike announcements disabled
   await channel.send(
     `${emoji} **FIRM ${isBuy ? "SPIKE" : "DIP"} — ${firm.name}** (\`${firm.ticker}\`)
 ` +
