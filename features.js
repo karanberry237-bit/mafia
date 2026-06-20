@@ -1,3 +1,4 @@
+const { createClient } = require("@supabase/supabase-js");
 const eco = require("./economy.js");
 
 // Initialize Supabase directly – no timing dependency on initFeatures
