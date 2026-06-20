@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const { createClient } = require("@supabase/supabase-js");
+const ws = require("ws");
 const eco = require("./economy.js");
 const firmChart = require("./firmchart.js");
 
