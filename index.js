@@ -182,6 +182,10 @@ const MASTER_USERNAME = process.env.MASTER_USERNAME || "clintlint";
 const MASTER_ID = "1082216356134522910";
 const FRIEND_ID = "860781227362877460"; // XxProGodMasterDioxX — Cosa's drinking buddy
 
+// Rival bot Cosa can be set to argue/diss. Set RIVAL_BOT_ID env var to that
+// bot's Discord application/user ID. Leave unset to disable the feature.
+const RIVAL_BOT_ID = process.env.RIVAL_BOT_ID || null;
+
 // These used to be hardcoded IDs from the old server. They're now populated by
 // the "Cosa setup" command (creates "The Hideout" category + everything Cosa
 // needs) and persisted to Supabase, then reloaded into these on every boot.
@@ -199,6 +203,8 @@ let SHADOW_COURT_ID = null;
 let INSIDE_MAN_ID = null;           // "Inside Man" wall
 let CHESS_CHANNEL_ID = null;
 let MOD_LOG_CHANNEL_ID = null;
+let TALK_CHANNEL_ID = null;          // the only channel where casual AI chat is allowed
+let BOT_COMMANDS_CHANNEL_ID = null;  // the only channel where public/commoner commands work
 const chessQueue = []; // { type: "pvp"|"bot", challengerId, challengerName, opponentId, opponentName, timeLimit, difficulty }
 
 const SETUP_CONFIG_KEY = "cosa_setup_ids";
@@ -221,6 +227,8 @@ async function loadSetupConfig() {
     INSIDE_MAN_ID = v.INSIDE_MAN_ID || null;
     CHESS_CHANNEL_ID = v.CHESS_CHANNEL_ID || null;
     MOD_LOG_CHANNEL_ID = v.MOD_LOG_CHANNEL_ID || null;
+    TALK_CHANNEL_ID = v.TALK_CHANNEL_ID || null;
+    BOT_COMMANDS_CHANNEL_ID = v.BOT_COMMANDS_CHANNEL_ID || null;
     console.log("✅ Setup config loaded from Supabase — Cosa knows where everything is.");
   } catch (e) {
     console.log("⚠️ No setup config found yet — run **Cosa setup** in your server.");
@@ -235,6 +243,7 @@ async function saveSetupConfig() {
         ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID, FAMILY_LIST_CHANNEL_ID,
         EXILE_CHANNEL_ID, VERIFIED_ROLE_ID, HELPER_ROLE_ID, MOD_ROLE_ID_INACTIVITY,
         HOLDING_CHANNEL_ID, SHADOW_COURT_ID, INSIDE_MAN_ID, CHESS_CHANNEL_ID, MOD_LOG_CHANNEL_ID,
+        TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
       },
     }, { onConflict: "key" });
   } catch (e) { console.error("[SETUP CONFIG SAVE]", e.message); }
@@ -277,6 +286,8 @@ async function runCosaSetup(guild) {
   INSIDE_MAN_ID = await ensureChannel("inside-man", "Cosa's tips and predictions");
   CHESS_CHANNEL_ID = "1517887653180080280";
   MOD_LOG_CHANNEL_ID = await ensureChannel("mod-logs", "Moderation action log");
+  TALK_CHANNEL_ID = await ensureChannel("talk-with-cosa", "The only place to chat with Cosa — commands still work everywhere else");
+  BOT_COMMANDS_CHANNEL_ID = await ensureChannel("bot-commands", "The only place for member commands — gambling, economy, chess, etc. Mod commands still work everywhere.");
 
  
 
@@ -697,6 +708,13 @@ let strippedRolesBackup = new Map();
 let lockedChannelsBackup = [];
 const pendingConfirmations = new Map();
 const lastMessageTime = new Map();
+// Tracks the last time Cosa redirected someone to #talk-with-cosa, per channel.
+// Prevents spamming a redirect notice on every single message in a busy
+// off-topic channel — only nudges once per cooldown window, then goes quiet.
+const talkChannelRedirects = new Map(); // channelId -> timestamp
+const TALK_CHANNEL_REDIRECT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+const botCommandsRedirects = new Map(); // channelId -> timestamp
+const BOT_COMMANDS_REDIRECT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 let deadManInterval = null;
 const recentJoins = [];
 const recentBanTime = { time: 0 };
@@ -1457,6 +1475,63 @@ async function getAIResponse(channelId, userMessage, username, systemOverride, a
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+//  RIVAL BOT DISS / ARGUE
+// ══════════════════════════════════════════════════════════════════════════════
+// Lets Cosa take random or commanded shots at another bot in the server.
+// Deliberately kept OUT of globalHistory — this is one-off flavor, not a real
+// conversation, and shouldn't bias Cosa's memory of actual member interactions.
+let rivalDissChancePercent = 8;     // % chance per rival message, adjustable via command
+const RIVAL_DISS_COOLDOWN_MS = 60000;  // min gap between ambient (non-command) disses per channel
+const RIVAL_CHAIN_LIMIT = 3;           // max consecutive bot-vs-bot exchanges before Cosa goes quiet
+const RIVAL_CHAIN_WINDOW_MS = 45000;   // chain resets if rival hasn't spoken again within this window
+
+const rivalDissState = new Map(); // channelId -> { lastDissAt, chainCount, chainStartedAt }
+
+function getRivalState(channelId) {
+  let s = rivalDissState.get(channelId);
+  if (!s) { s = { lastDissAt: 0, chainCount: 0, chainStartedAt: 0 }; rivalDissState.set(channelId, s); }
+  return s;
+}
+
+// Returns true if it's safe to fire an ambient (non-command) diss right now —
+// enforces cooldown AND caps consecutive back-and-forth so two bots can't
+// loop on each other forever if the rival bot also auto-replies to messages.
+function canAmbientDiss(channelId) {
+  const s = getRivalState(channelId);
+  const now = Date.now();
+  if (now - s.chainStartedAt > RIVAL_CHAIN_WINDOW_MS) s.chainCount = 0; // chain went cold, reset
+  if (s.chainCount >= RIVAL_CHAIN_LIMIT) return false;
+  if (now - s.lastDissAt < RIVAL_DISS_COOLDOWN_MS) return false;
+  return true;
+}
+
+function recordAmbientDiss(channelId) {
+  const s = getRivalState(channelId);
+  const now = Date.now();
+  if (now - s.chainStartedAt > RIVAL_CHAIN_WINDOW_MS) { s.chainCount = 0; s.chainStartedAt = now; }
+  s.chainCount++;
+  s.lastDissAt = now;
+}
+
+// Generates a short roast line aimed at the rival bot, using Cosa's existing
+// personality/mood, but isolated from real conversation history so it doesn't
+// pollute getHistory() with bot-vs-bot noise.
+async function getRivalDissResponse(rivalName, rivalMessageContent) {
+  const sys = BOT_PERSONALITY + getMemoryBlock() + getMoodPersonality() +
+    `\n\nYou are about to clown on a rival Discord bot called "${rivalName}". ` +
+    `Be savage, witty, and short (1-2 sentences max). No real-world slurs, no family/mom jokes. ` +
+    `This is bot-on-bot banter for entertainment — keep it punchy.`;
+  const userMsg = rivalMessageContent
+    ? `${rivalName} just said: "${rivalMessageContent.slice(0, 200)}". Roast them for it.`
+    : `Diss ${rivalName} out of nowhere, like you just felt like it.`;
+  const reply = await rateLimitedGroqCall([
+    { role: "system", content: sys },
+    { role: "user", content: userMsg },
+  ]);
+  return sanitizeOutput(reply);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 //  GOD MODE — LOYALTY MODE  (Don Clint / MASTER_ID only)
 // ══════════════════════════════════════════════════════════════════════════════
 const HIGH_RISK_ROLE_NAMES = new Set([
@@ -1727,8 +1802,10 @@ function parseGodCommand(text) {
   m = t.match(/delete\s+(?:the\s+)?(?:channel\s+)?[#"]?([a-z0-9\-_ ]+)["]?\s*(?:channel)?/i);
   if (m) return { action: "delete_channel", channelName: m[1].trim().toLowerCase() };
 
-  // Rename channel
-  m = t.match(/rename\s+<#(\d+)>\s+to\s+([a-z0-9\-_ ]+)/i);
+  // Rename channel — allows letters/numbers/-/_/space plus tree-drawing
+  // characters (┌├└│) and other symbols/emoji, since Discord channel names
+  // accept most Unicode even though it silently strips a few characters.
+  m = t.match(/rename\s+<#(\d+)>\s+to\s+(.+)/i);
   if (m) return { action: "rename_channel", channelId: m[1], newName: m[2].trim().replace(/\s+/g, "-") };
 
   // Send message in channel
@@ -2415,6 +2492,17 @@ function detectMasterCommand(text, message) {
   if (/\bcosa\s+market\s+pump\b/.test(lower)) { const m = text.match(/pump\s+([A-Z]+)\s+(\d+)/i); return m ? { action: "market_pump", ticker: m[1], rounds: parseInt(m[2]) || 3 } : null; }
   if (/\bcosa\s+market\s+crash\b/.test(lower)) { const m = text.match(/crash\s+([A-Z]+)\s+(\d+)/i); return m ? { action: "market_crash", ticker: m[1], rounds: parseInt(m[2]) || 3 } : null; }
   if (/\bcosa\s+giveaway\s+reroll\b/.test(lower)) { const m = text.match(/(\d{17,20})/); return m ? { action: "greroll", messageId: m[1] } : null; }
+
+  // ── Rival bot diss/argue ──────────────────────────────────────────────────
+  // Only triggers when the target IS the configured rival bot, so this never
+  // shadows the existing "cosa roast @user" command for human targets.
+  if (/\bcosa\s+(?:diss|argue\s+with)\b/.test(lower) && targetId && targetId === RIVAL_BOT_ID) {
+    return { action: "rival_diss", targetId };
+  }
+  if (/\bcosa\s+set\s+diss\s+chance\b/.test(lower)) {
+    const m = text.match(/(\d{1,3})\s*%?/);
+    return { action: "set_diss_chance", percent: m ? parseInt(m[1]) : null };
+  }
 
   const bestowMatch = text.match(/bestow\s+(?:the\s+title\s+of\s+)?(\w[\w\s]*?)\s+(?:upon\s+|to\s+|on\s+)?<@!?(\d+)>/i);
   if (bestowMatch) {
@@ -4708,6 +4796,27 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
         ? `🏦 **ALL BANK BALANCES WIPED** by order of Don Clint. The Family reclaims its vaults. 🤵`
         : `🔫 Bank wipe failed — check logs.`;
     }
+    case "rival_diss": {
+      if (!RIVAL_BOT_ID) return "🔫 No rival bot configured. Set RIVAL_BOT_ID in the environment first.";
+      if (cmd.targetId !== RIVAL_BOT_ID) return "🔫 That's not the rival bot I'm set up to argue with.";
+      const rivalMember = await message.guild?.members.fetch(cmd.targetId).catch(() => null);
+      const rivalName = rivalMember?.user?.username || "that bot";
+      await message.channel.sendTyping().catch(() => {});
+      try {
+        const diss = await getRivalDissResponse(rivalName, null);
+        return diss;
+      } catch (e) {
+        return `🔫 Couldn't think of a diss right now: ${e.message}`;
+      }
+    }
+    case "set_diss_chance": {
+      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (cmd.percent === null || isNaN(cmd.percent) || cmd.percent < 0 || cmd.percent > 100) {
+        return "🔫 Give me a number between 0 and 100. e.g. **cosa set diss chance 15**";
+      }
+      rivalDissChancePercent = cmd.percent;
+      return `🎲 Rival diss chance set to **${cmd.percent}%** per rival message.`;
+    }
     case "market_tick": {
       if (message.author.id !== MASTER_ID) return "🔫 Don only.";
       await message.channel.send("📊 *Forcing market tick...*").catch(() => {});
@@ -4925,7 +5034,7 @@ function buildRankHelpText(userId) {
   modLines.push("");
   if (isDon || rankData?.canWarn)      { modLines.push("⚠️  WARNINGS"); modLines.push("  Cosa warn @user [reason]"); modLines.push("  Cosa warnings @user"); modLines.push(""); }
   if (isDon || rankData?.canMute)      { modLines.push("🔇  MUTE"); modLines.push("  Cosa mute @user [time]"); modLines.push("  Cosa unmute @user"); modLines.push(""); }
-  if (isDon || rankData?.canRoast)     { modLines.push("🔥  ROAST"); modLines.push("  Cosa roast @user"); modLines.push(""); }
+  if (isDon || rankData?.canRoast)     { modLines.push("🔥  ROAST"); modLines.push("  Cosa roast @user"); modLines.push("  Cosa diss [@rivalbot or its ID]  ← argue with the rival bot"); modLines.push(""); }
   if (isDon || rankData?.canSlimeout)  { modLines.push("💦  SLIME OUT"); modLines.push("  Cosa slime out @user [time]"); modLines.push(""); }
   if (isDon || rankData?.canKick)      { modLines.push("👢  KICK"); modLines.push("  Cosa kick @user [reason]"); modLines.push(""); }
   if (isDon || rankData?.canBan)       { modLines.push("🔨  BAN"); modLines.push("  Cosa ban @user [reason]"); modLines.push("  Cosa unban @user"); modLines.push(""); }
@@ -4939,7 +5048,7 @@ function buildRankHelpText(userId) {
     modLines.push("⚖️  THE SIT-DOWN"); modLines.push("  Cosa shadow vote @user  ← open a trial"); modLines.push("  Cosa bail @user [condition]  ← grant bail"); modLines.push("");
     modLines.push("🤝  FAMILY"); modLines.push("  Cosa bestow [rank] upon @user"); modLines.push("  Cosa revoke @user"); modLines.push("  Cosa family ledger"); modLines.push(`  Valid ranks: ${VALID_RANK_NAMES.join(", ")}`); modLines.push("");
     modLines.push("⏱️  TIMERS"); modLines.push("  Cosa timers"); modLines.push("  Cosa set timer deadman 1h"); modLines.push("  Cosa set timer psychwar 45m"); modLines.push("  Cosa set timer psychfirst 30m"); modLines.push("  Cosa set timer inactivity 6h"); modLines.push("");
-    modLines.push("🎲  PSYCH CHANCES"); modLines.push("  Cosa psychchances"); modLines.push("  Cosa set psychchance summon 40"); modLines.push("  Cosa set psychchance lockdown 20"); modLines.push("  Cosa set psychchance dm 20"); modLines.push("  Cosa set psychchance wanted 20"); modLines.push("");
+    modLines.push("🎲  PSYCH CHANCES"); modLines.push("  Cosa psychchances"); modLines.push("  Cosa set psychchance summon 40"); modLines.push("  Cosa set psychchance lockdown 20"); modLines.push("  Cosa set psychchance dm 20"); modLines.push("  Cosa set psychchance wanted 20"); modLines.push("  Cosa set diss chance 15  ← % chance to randomly diss the rival bot"); modLines.push("");
     modLines.push("🎭  PSYCH WARFARE"); modLines.push("  Cosa fake raid"); modLines.push("  Cosa last words @user"); modLines.push("");
     modLines.push("😈  MOOD"); modLines.push("  Cosa set mood [wrathful/aggressive/cold/diplomatic/cryptic/playful]"); modLines.push("");
     modLines.push("🔍  SHADOW TRIGGERS"); modLines.push("  Cosa add trigger [phrase]"); modLines.push("  Cosa remove trigger [phrase]"); modLines.push("");
@@ -5250,6 +5359,20 @@ async function init() {
         }
       }
       if (message.guild && WICK_TRIGGER_PATTERN.test(message.content)) await handleWickAlert(message);
+
+      // ── Rival bot ambient diss — random chance to clown on them ───────────
+      if (RIVAL_BOT_ID && message.author.id === RIVAL_BOT_ID && message.guild) {
+        if (canAmbientDiss(message.channelId) && Math.random() * 100 < rivalDissChancePercent) {
+          recordAmbientDiss(message.channelId);
+          try {
+            await message.channel.sendTyping().catch(() => {});
+            const diss = await getRivalDissResponse(message.author.username, message.content);
+            await message.channel.send(diss).catch(() => {});
+          } catch (e) {
+            console.error("[RIVAL DISS]", e.message);
+          }
+        }
+      }
       return;
     }
 
@@ -5537,7 +5660,7 @@ async function init() {
         const actionPermMap = {
           purge_confirm: "canPurge", ban_confirm: "canBan", kick_confirm: "canKick",
           strip_confirm: "canStrip", exile_confirm: "canExile", temp_exile_confirm: "canExile",
-          unban: "canUnban", slimeout: "canSlimeout", roast: "canRoast",
+          unban: "canUnban", slimeout: "canSlimeout", roast: "canRoast", rival_diss: "canRoast",
           mute: "canMute", unmute: "canMute", warn: "canWarn", warnings: "canWarn",
           slowmode: "canSlowmode", lockdown: "canLockdown", unlock: "canLockdown",
         };
@@ -5562,6 +5685,19 @@ async function init() {
         await executePublicCommand(message, pubCmd, channelId);
         return;
       }
+
+      // ── Restrict commoner commands to #bot-commands only ──────────────────
+      // Mod/master commands are handled separately above this block and are
+      // unaffected. DMs are exempt — there's no "wrong channel" in a DM.
+      if (!isDM && BOT_COMMANDS_CHANNEL_ID && channelId !== BOT_COMMANDS_CHANNEL_ID) {
+        const lastRedirect = botCommandsRedirects.get(channelId) || 0;
+        if (Date.now() - lastRedirect > BOT_COMMANDS_REDIRECT_COOLDOWN_MS) {
+          botCommandsRedirects.set(channelId, Date.now());
+          await message.reply(`🔫 Take that to <#${BOT_COMMANDS_CHANNEL_ID}>. This isn't the place.`).catch(() => {});
+        }
+        return;
+      }
+
       await message.channel.sendTyping().catch(()=>{});
       try {
         const result = await executePublicCommand(message, pubCmd, channelId);
@@ -5573,6 +5709,19 @@ async function init() {
       } catch (err) {
         console.error("[PUBLIC CMD ERROR]", err.stack || err.message);
         await message.channel.send(`🔫 Something went wrong: ${err.message}`).catch(()=>{});
+      }
+      return;
+    }
+
+    // ── Restrict casual AI chat to #talk-with-cosa only ─────────────────────
+    // Commands (master + public, handled above) already returned by this
+    // point if they matched, so this only affects free-form conversation.
+    // DMs are exempt — there's no "wrong channel" in a DM.
+    if (!isDM && TALK_CHANNEL_ID && channelId !== TALK_CHANNEL_ID) {
+      const lastRedirect = talkChannelRedirects.get(channelId) || 0;
+      if (Date.now() - lastRedirect > TALK_CHANNEL_REDIRECT_COOLDOWN_MS) {
+        talkChannelRedirects.set(channelId, Date.now());
+        await message.reply(`🔫 Take it to <#${TALK_CHANNEL_ID}> if you want to talk. This isn't the place.`).catch(() => {});
       }
       return;
     }
