@@ -594,6 +594,9 @@ async function startShadowVote(guild, targetId, targetName, initiatorId, isAuto 
   activeShadowTargetId = targetId;
   shadowVotes.set(targetId, { exileVotes: new Set(), mercyVotes: new Set(), startedAt: Date.now(), targetName, counterMsgId: null });
 
+  // Ping all ranked Family members so they know to vote
+  const familyPings = [...familyRoster.keys()].map(id => `<@${id}>`).join(" ") || "";
+
   // Main trial announcement
   await courtChannel.send(
     `👁️ **THE SHADOW COURT CONVENES** 👁️\n` +
@@ -606,7 +609,8 @@ async function startShadowVote(guild, targetId, targetName, initiatorId, isAuto 
     `*Your vote is completely anonymous. Nobody will know how you voted.*\n` +
     `*Only members with rank in the Family may vote.*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `*Voting closes in 24 hours. Don Clint shall then deliver judgement. 🔫*`
+    `*Voting closes in 24 hours. Don Clint shall then deliver judgement. 🔫*\n\n` +
+    (familyPings ? `${familyPings}` : "")
   ).catch(() => {});
 
   // Live counter message
@@ -959,7 +963,7 @@ function storeBanFingerprint(user) {
     avatarHash: user.avatar || null,
     createdAt: user.createdTimestamp,
   });
-  saveData();
+  saveData().catch(e => console.error("[SAVEDATA]", e.message));
 }
 
 function levenshtein(a, b) {
@@ -1008,7 +1012,25 @@ async function scoreFingerprint(member) {
   return { score, flags };
 }
 
-// ── Toxic Detection ───────────────────────────────────────────────────────────
+// ── Invited Channels ──────────────────────────────────────────────────────────
+// When someone calls Cosa (mentions it or says "cosa ...") in any channel,
+// Cosa "visits" that channel for 10 minutes. Any message to it resets the timer.
+// After 10 minutes of silence it leaves and goes back to talk-with-cosa only.
+const invitedChannels = new Map(); // channelId -> timeoutId
+
+function inviteToChannel(channelId) {
+  // Clear existing timeout if already invited
+  if (invitedChannels.has(channelId)) clearTimeout(invitedChannels.get(channelId));
+  const timeout = setTimeout(() => {
+    invitedChannels.delete(channelId);
+    console.log(`[INVITE] Cosa left channel ${channelId} after 10min inactivity`);
+  }, 10 * 60 * 1000);
+  invitedChannels.set(channelId, timeout);
+}
+
+function isInvitedChannel(channelId) {
+  return invitedChannels.has(channelId);
+}
 const TOXIC_WORDS = [
   "nigger","nigga","retard","retarded","kys","kill yourself",
   "dumb bot","stupid bot","trash bot","useless bot","shit bot","fk u",
@@ -1054,7 +1076,7 @@ async function handleShadowWarning(message) {
   const userId = message.author.id;
   if (!watchlist.has(userId)) watchlist.set(userId, []);
   watchlist.get(userId).push({ content: message.content, timestamp: new Date().toISOString(), channelName: message.channel.name || "DM" });
-  saveData();
+  saveData().catch(e => console.error("[SAVEDATA]", e.message));
   const cosasChannel = message.guild?.channels.cache.get(LOCKDOWN_CHANNEL_ID);
   if (!cosasChannel) return;
   const entry = watchlist.get(userId);
@@ -1239,7 +1261,7 @@ async function exileUser(guild, targetId, durationMs = null) {
   const exileData = { roles: savedRoles, username: member.user.username, exiledAt: Date.now(), durationMs };
   exileStore.set(targetId, exileData);
   if (durationMs) tempExiles.set(targetId, { expiresAt: Date.now() + durationMs });
-  saveData();
+  saveData().catch(e => console.error("[SAVEDATA]", e.message));
   await member.roles.set([], "Exiled").catch(() => {});
   const { total, failures } = await applyExilePermissions(guild, member, { locking: true });
   const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
@@ -1268,7 +1290,7 @@ async function unexileUser(guild, targetId, auto = false) {
   const { total, failures } = await applyExilePermissions(guild, member, { locking: false });
   exileStore.delete(targetId);
   tempExiles.delete(targetId);
-  saveData();
+  saveData().catch(e => console.error("[SAVEDATA]", e.message));
   const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
   if (genChannel) await genChannel.send(`✅ **${auto ? "EXILE EXPIRED" : "BY ORDER OF DON CLINT"}** 🔫\n<@${targetId}> has been **pardoned** and released from exile. Do not waste this mercy.`).catch(() => {});
   if (failures > 0) {
@@ -2417,7 +2439,7 @@ function addWarning(userId, reason) {
   const data = getWarnings(userId);
   data.count++;
   data.warnings.push({ reason, timestamp: new Date().toISOString() });
-  saveData();
+  saveData().catch(e => console.error("[SAVEDATA]", e.message));
   return data.count;
 }
 
@@ -3151,7 +3173,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       const targetMember = await guild?.members.fetch(targetId).catch(() => null);
       if (!targetMember) return "🔫 Can't find that member.";
       familyRoster.set(targetId, resolved);
-      saveData();
+      saveData().catch(e => console.error("[SAVEDATA]", e.message));
       const rank = RANKS[resolved];
       await message.channel.send(
         `🤵 **BY ORDER OF DON CLINT** 🔫\n` +
@@ -3374,7 +3396,7 @@ ${currentMood.desc}
       if (!familyRoster.has(targetId)) return "🔫 That person holds no title.";
       const oldRank = RANKS[familyRoster.get(targetId)];
       familyRoster.delete(targetId);
-      saveData();
+      saveData().catch(e => console.error("[SAVEDATA]", e.message));
       await sendModLog(guild, { action: `Revoke Title: ${oldRank.title}`, moderator: modName, target: `<@${targetId}>`, reason: "Order of the Family" });
       return `🔫 The title of **${oldRank.title}** has been revoked. They're nobody in the Family now.`;
     }
@@ -3384,8 +3406,8 @@ ${currentMood.desc}
       for (const [uid, rank] of familyRoster) lines.push(`${RANKS[rank].emoji} **${RANKS[rank].title}** — <@${uid}>`);
       return `🤵 **FAMILY LEDGER**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${lines.join("\n")}`;
     }
-    case "shadow_user_add": { if (!watchlist.has(targetId)) { watchlist.set(targetId, []); saveData(); } return `👁️ <@${targetId}> added to watchlist.`; }
-    case "shadow_user_remove": { const del = watchlist.delete(targetId); saveData(); return del ? `✅ <@${targetId}> removed from watchlist.` : `🔫 Not on watchlist.`; }
+    case "shadow_user_add": { if (!watchlist.has(targetId)) { watchlist.set(targetId, []); saveData().catch(e => console.error("[SAVEDATA]", e.message)); } return `👁️ <@${targetId}> added to watchlist.`; }
+    case "shadow_user_remove": { const del = watchlist.delete(targetId); saveData().catch(e => console.error("[SAVEDATA]", e.message)); return del ? `✅ <@${targetId}> removed from watchlist.` : `🔫 Not on watchlist.`; }
     case "shadow_trigger_add": { if (!SHADOW_TRIGGERS.includes(trigger.toLowerCase())) { SHADOW_TRIGGERS.push(trigger.toLowerCase()); return `✅ Added "${trigger}" to shadow triggers.`; } return `🔫 Already exists.`; }
     case "shadow_trigger_remove": { const idx = SHADOW_TRIGGERS.indexOf(trigger.toLowerCase()); if (idx > -1) { SHADOW_TRIGGERS.splice(idx, 1); return `✅ Removed "${trigger}".`; } return `🔫 Not found.`; }
 
@@ -5777,35 +5799,45 @@ async function init() {
     }
 
     // ── Restrict casual AI chat to #talk-with-cosa only ─────────────────────
-    // Commands (master + public, handled above) already returned by this
-    // point if they matched, so this only affects free-form conversation.
-    // DMs are exempt — there's no "wrong channel" in a DM.
+    // Exception 1: DMs are always allowed.
+    // Exception 2: If someone calls/mentions Cosa in any channel, it gets
+    //   "invited" there for 10 minutes. Any further message resets the timer.
+    //   After 10 minutes of silence it leaves automatically.
+    const cosaCalled = isMentioned || userTextNormalized.startsWith("cosa ");
     if (!isDM && TALK_CHANNEL_ID && channelId !== TALK_CHANNEL_ID) {
-      const lastRedirect = talkChannelRedirects.get(channelId) || 0;
-      if (Date.now() - lastRedirect > TALK_CHANNEL_REDIRECT_COOLDOWN_MS) {
-        talkChannelRedirects.set(channelId, Date.now());
-        await message.reply(`🔫 Take it to <#${TALK_CHANNEL_ID}> if you want to talk. This isn't the place.`).catch(() => {});
+      if (cosaCalled || isInvitedChannel(channelId)) {
+        // Invite/refresh the channel visit
+        if (channelId !== TALK_CHANNEL_ID) inviteToChannel(channelId);
+        // Fall through to AI response below
+      } else {
+        const lastRedirect = talkChannelRedirects.get(channelId) || 0;
+        if (Date.now() - lastRedirect > TALK_CHANNEL_REDIRECT_COOLDOWN_MS) {
+          talkChannelRedirects.set(channelId, Date.now());
+          await message.reply(`🔫 Take it to <#${TALK_CHANNEL_ID}> if you want to talk. This isn't the place.`).catch(() => {});
+        }
+        return;
       }
-      return;
     }
+    // If already in talk-with-cosa and cosa is called, still refresh invite for other channels
+    if (!isDM && cosaCalled && channelId === TALK_CHANNEL_ID) inviteToChannel(channelId);
 
     await message.channel.sendTyping().catch(()=>{});
     const typingInterval = setInterval(() => message.channel.sendTyping().catch(()=>{}), 8000);
     try {
       const reply = await getAIResponse(channelId, userText, message.author.username, null, message.author.id);
-      clearInterval(typingInterval);
       if (!reply) {
         await message.reply("🔫 The Family is silent for now. Try again.").catch(()=>{});
         return;
       }
-      if (isMentioned || repliedToBot) await message.reply(reply).catch(()=>{}); else await message.reply(reply).catch(async () => { await message.channel.send(reply).catch(()=>{}); });
+      await message.reply(reply).catch(async () => { await message.channel.send(reply).catch(()=>{}); });
     } catch (err) {
-      clearInterval(typingInterval);
       console.error("[AI ERROR]", err.message);
       const e = err.message || "unknown error";
       if (err._allKeysExhausted) await message.reply("⏳ **AI TIMEOUT** — all keys are busy right now. Give it a few seconds and try again. 🔫").catch(()=>{});
       else if (e.includes("rate limit") || e.includes("429")) await message.reply("give me a sec 🔫").catch(()=>{});
       else await message.reply(`🔫 Something went wrong on my end. Try again.`).catch(()=>{});
+    } finally {
+      clearInterval(typingInterval); // always clears, even if catch itself throws
     }
   });
 
