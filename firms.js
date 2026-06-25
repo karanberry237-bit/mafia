@@ -187,7 +187,7 @@ function formatCopper(cu) {
 }
 
 // ── Spike announcement ───────────────────────────────────────────────────────
-async function announceFirmSpike(firm, userId, shares, oldPrice, newPrice, isBuy) {
+async function announceFirmSpike(firm, userId, shares, oldPrice, newPrice, isBuy, channel) {
   return; // Spike announcements disabled
   await channel.send(
     `${emoji} **FIRM ${isBuy ? "SPIKE" : "DIP"} — ${firm.name}** (\`${firm.ticker}\`)
