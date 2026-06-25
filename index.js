@@ -1400,7 +1400,7 @@ async function rateLimitedGroqCall(messages) {
         setTimeout(() => rej(new Error("Groq timeout after 15s")), 15000)
       );
       const callPromise = client.chat.completions.create({
-        model: "llama-3.1-8b-instant",
+        model: "llama-3.3-70b-versatile",
         max_tokens: 150,
         messages,
       });
@@ -1459,6 +1459,8 @@ function sanitizeOutput(text) {
   for (const pattern of SENSITIVE_PATTERNS) {
     clean = clean.replace(pattern, "[REDACTED]");
   }
+  // Strip any [ID:xxxxxxx] tags the model may have leaked into its reply
+  clean = clean.replace(/\[ID:\d+\]\s*/g, "");
   return clean;
 }
 buildSensitivePatterns();
@@ -1474,7 +1476,7 @@ const silencedChannels = new Set();
 const pendingExecutions = new Map();
 const reminderTimeouts = new Map();
 
-const CHANNEL_HISTORY_SIZE = 20;
+const CHANNEL_HISTORY_SIZE = 8; // 8 turns is enough; 20 caused hallucinated names/ranks from old messages
 
 function getHistory(channelId) {
   return channelHistories.get(channelId) || [];
@@ -1500,14 +1502,15 @@ async function getAIResponse(channelId, userMessage, username, systemOverride, a
   const verifiedName = authorId ? getDisplayName(authorId, username) : username;
   const idTag = authorId ? `[ID:${authorId}] ` : "";
 
-  // Inject the speaker's verified rank so the model never has to guess from
-  // chat history — that was causing random rank hallucinations.
-  const speakerRankKey = authorId ? getFamilyRank(authorId) : null;
+  // Verified rank — pulled directly from familyRoster, never guessed from history
+  const speakerRankKey = authorId ? (familyRoster.get(authorId) || null) : null;
   const speakerRankNote = authorId === MASTER_ID
     ? `\n\nCURRENT SPEAKER: Don Clint (the master, your creator). Show absolute loyalty.`
-    : speakerRankKey
-      ? `\n\nCURRENT SPEAKER RANK: ${RANKS[speakerRankKey].title} (rank key: ${speakerRankKey}). Address them by this title.`
-      : `\n\nCURRENT SPEAKER RANK: No rank — they are an unranked outsider. Do NOT address them with any Family title. Treat them like a nobody.`;
+    : speakerRankKey && RANKS[speakerRankKey]
+      ? `\n\nCURRENT SPEAKER VERIFIED RANK: ${RANKS[speakerRankKey].title}. Address them by this exact title. This came directly from the Family ledger — it is correct.`
+      : `\n\nCURRENT SPEAKER RANK: None. They have NO rank in the Family. Do NOT call them Capo, Underboss, Made Man, Soldier, or any other title. They are an unranked outsider. If you are unsure of someone's rank, say nothing — never guess.`;
+
+  const focusNote = `\n\nFOCUS RULE (critical): You are responding ONLY to the current speaker. Do NOT mention, reference, address, or bring up any other user from the chat history unless the current speaker explicitly asks about them. Do not say other people's names or ranks unprompted. Stay focused on who is talking to you right now.\n\nFORMAT RULE (absolute): NEVER include [ID:xxxxxxx] tags in your replies. Those tags are internal verification tools for YOU to read, not text to repeat back. Never output anything that looks like [ID:numbers]. Strip it completely from everything you say.`;
   addToHistory(channelId, "user", `${idTag}${verifiedName}: ${userMessage}`);
   const isFriend = authorId === FRIEND_ID;
   const friendNote = isFriend ? "\n\nThe person talking to you right now is <@" + FRIEND_ID + "> (XxProGodMasterDioxX) — your close friend and drinking buddy. You can refer to them that way (friend, drinking buddy, close friend, etc.) if it fits naturally. Don't force it into every reply." : "";
@@ -1522,7 +1525,7 @@ async function getAIResponse(channelId, userMessage, username, systemOverride, a
   let reply;
   try {
     reply = await rateLimitedGroqCall([
-      { role: "system", content: (systemOverride || BOT_PERSONALITY) + getMemoryBlock() + getMoodPersonality() + friendNote + identityNote + speakerRankNote },
+      { role: "system", content: (systemOverride || BOT_PERSONALITY) + getMemoryBlock() + getMoodPersonality() + friendNote + identityNote + speakerRankNote + focusNote },
       ...getHistory(channelId),
     ]);
   } catch (err) {
@@ -5795,7 +5798,7 @@ async function init() {
         await message.reply("🔫 The Family is silent for now. Try again.").catch(()=>{});
         return;
       }
-      if (isMentioned || repliedToBot) await message.reply(reply).catch(()=>{}); else await message.channel.send(reply).catch(()=>{});
+      if (isMentioned || repliedToBot) await message.reply(reply).catch(()=>{}); else await message.reply(reply).catch(async () => { await message.channel.send(reply).catch(()=>{}); });
     } catch (err) {
       clearInterval(typingInterval);
       console.error("[AI ERROR]", err.message);
