@@ -1414,11 +1414,13 @@ async function rateLimitedGroqCall(messages) {
       const errMsg = err.message || "";
       const is429 = errMsg.includes("429") || err.status === 429 || errMsg.includes("rate_limit") || errMsg.includes("Rate limit");
       const isTPD = errMsg.includes("TPD") || errMsg.includes("tokens per day");
-      if (is429 || isTPD) {
+      const isTimeout = errMsg.includes("timeout");
+      if (is429 || isTPD || isTimeout) {
+        // Timeouts bench the key for 10s (just slow), rate limits bench for 65s
         const retryMatch = errMsg.match(/try again in ([\d.]+)s/);
-        const retryAfter = retryMatch ? Math.ceil(parseFloat(retryMatch[1]) * 1000) : 65000;
+        const retryAfter = isTimeout ? 10000 : (retryMatch ? Math.ceil(parseFloat(retryMatch[1]) * 1000) : 65000);
         keyRateLimitedUntil[idx] = Date.now() + retryAfter;
-        console.log(`[GROQ] Key ${idx + 1} rate limited for ${Math.ceil(retryAfter/1000)}s — switching instantly`);
+        console.log(`[GROQ] Key ${idx + 1} ${isTimeout ? "timed out" : "rate limited"} for ${Math.ceil(retryAfter/1000)}s — switching to next key`);
         continue;
       }
       console.error(`[GROQ] Attempt ${attempt} key ${idx + 1} failed: STATUS=${err.status || 'none'} MSG=${errMsg}`);
@@ -1426,6 +1428,7 @@ async function rateLimitedGroqCall(messages) {
     }
   }
   console.error(`[GROQ] ALL KEYS EXHAUSTED. Keys available: ${groqClients.length}. Last error: STATUS=${lastErr?.status || 'none'} MSG=${lastErr?.message || 'unknown'}`);
+  lastErr._allKeysExhausted = true;
   throw lastErr;
 }
 
@@ -1496,6 +1499,15 @@ async function getAIResponse(channelId, userMessage, username, systemOverride, a
   // identity. The bracketed ID is the only thing the model should trust.
   const verifiedName = authorId ? getDisplayName(authorId, username) : username;
   const idTag = authorId ? `[ID:${authorId}] ` : "";
+
+  // Inject the speaker's verified rank so the model never has to guess from
+  // chat history — that was causing random rank hallucinations.
+  const speakerRankKey = authorId ? getFamilyRank(authorId) : null;
+  const speakerRankNote = authorId === MASTER_ID
+    ? `\n\nCURRENT SPEAKER: Don Clint (the master, your creator). Show absolute loyalty.`
+    : speakerRankKey
+      ? `\n\nCURRENT SPEAKER RANK: ${RANKS[speakerRankKey].title} (rank key: ${speakerRankKey}). Address them by this title.`
+      : `\n\nCURRENT SPEAKER RANK: No rank — they are an unranked outsider. Do NOT address them with any Family title. Treat them like a nobody.`;
   addToHistory(channelId, "user", `${idTag}${verifiedName}: ${userMessage}`);
   const isFriend = authorId === FRIEND_ID;
   const friendNote = isFriend ? "\n\nThe person talking to you right now is <@" + FRIEND_ID + "> (XxProGodMasterDioxX) — your close friend and drinking buddy. You can refer to them that way (friend, drinking buddy, close friend, etc.) if it fits naturally. Don't force it into every reply." : "";
@@ -1508,7 +1520,7 @@ async function getAIResponse(channelId, userMessage, username, systemOverride, a
   let reply;
   try {
     reply = await rateLimitedGroqCall([
-      { role: "system", content: (systemOverride || BOT_PERSONALITY) + getMemoryBlock() + getMoodPersonality() + friendNote + identityNote },
+      { role: "system", content: (systemOverride || BOT_PERSONALITY) + getMemoryBlock() + getMoodPersonality() + friendNote + identityNote + speakerRankNote },
       ...getHistory(channelId),
     ]);
   } catch (err) {
@@ -5786,7 +5798,8 @@ async function init() {
       clearInterval(typingInterval);
       console.error("[AI ERROR]", err.message);
       const e = err.message || "unknown error";
-      if (e.includes("rate limit") || e.includes("429")) await message.reply("give me a sec 🔫").catch(()=>{});
+      if (err._allKeysExhausted) await message.reply("⏳ **AI TIMEOUT** — all keys are busy right now. Give it a few seconds and try again. 🔫").catch(()=>{});
+      else if (e.includes("rate limit") || e.includes("429")) await message.reply("give me a sec 🔫").catch(()=>{});
       else await message.reply(`🔫 Something went wrong on my end. Try again.`).catch(()=>{});
     }
   });
