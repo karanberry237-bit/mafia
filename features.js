@@ -1,15 +1,14 @@
 const { createClient } = require("@supabase/supabase-js");
 const eco = require("./economy.js");
-
-// Initialize Supabase directly – no timing dependency on initFeatures
 const ws = require("ws");
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, { realtime: { transport: ws } });
 
 let MASTER_ID;
 let client;
+let supabase; // initialized in initFeatures after dotenv is loaded
 
 function initFeatures(supabaseClient, ecoModule, masterId, discordClient) {
-  // supabase and eco now initialized directly above
+  // createClient runs here — after dotenv.config() in index.js — so env vars are guaranteed set
+  supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, { realtime: { transport: ws } });
   MASTER_ID = masterId;
   client = discordClient;
   console.log("✅ Features system initialized");
@@ -130,8 +129,12 @@ async function endGiveaway(messageId, guild) {
   }
 
   const winnerCount = Math.min(giveaway.winners, entries.length);
-  const shuffled = entries.sort(() => Math.random() - 0.5);
-  const winners = shuffled.slice(0, winnerCount);
+  // Fisher-Yates shuffle — unbiased, unlike sort(() => Math.random() - 0.5)
+  for (let i = entries.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [entries[i], entries[j]] = [entries[j], entries[i]];
+  }
+  const winners = entries.slice(0, winnerCount);
   const perWinner = Math.floor(giveaway.prizeCopper / winnerCount);
 
   for (const winner of winners) {
