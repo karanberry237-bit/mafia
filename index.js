@@ -259,34 +259,50 @@ const SETUP_CONFIG_KEY = "cosa_setup_ids";
 
 async function loadSetupConfig() {
   try {
-    const { data } = await supabase.from("empire_data").select("value").eq("key", SETUP_CONFIG_KEY).single();
-    if (!data?.value) { console.log("⚠️ No setup config found yet — run **Cosa setup** in your server."); return; }
-    const v = data.value;
-    ELDER_ROLE_ID = v.ELDER_ROLE_ID || null;
-    LOCKDOWN_CHANNEL_ID = v.LOCKDOWN_CHANNEL_ID || null;
-    GENERAL_CHANNEL_ID = v.GENERAL_CHANNEL_ID || null;
-    FAMILY_LIST_CHANNEL_ID = v.FAMILY_LIST_CHANNEL_ID || null;
-    EXILE_CHANNEL_ID = v.EXILE_CHANNEL_ID || null;
-    VERIFIED_ROLE_ID = v.VERIFIED_ROLE_ID || null;
-    HELPER_ROLE_ID = v.HELPER_ROLE_ID || null;
-    MOD_ROLE_ID_INACTIVITY = v.MOD_ROLE_ID_INACTIVITY || null;
-    HOLDING_CHANNEL_ID = v.HOLDING_CHANNEL_ID || null;
-    SHADOW_COURT_ID = v.SHADOW_COURT_ID || null;
-    INSIDE_MAN_ID = v.INSIDE_MAN_ID || null;
-    CHESS_CHANNEL_ID = v.CHESS_CHANNEL_ID || null;
-    MOD_LOG_CHANNEL_ID = v.MOD_LOG_CHANNEL_ID || null;
-    TALK_CHANNEL_ID = v.TALK_CHANNEL_ID || null;
-    BOT_COMMANDS_CHANNEL_ID = v.BOT_COMMANDS_CHANNEL_ID || null;
-    console.log("✅ Setup config loaded from Supabase — Cosa knows where everything is.");
+    // Load ALL per-guild configs — keys are cosa_setup_ids_<guildId>
+    const { data } = await supabase.from("empire_data").select("key, value").like("key", SETUP_CONFIG_KEY + "_%");
+    if (!data || data.length === 0) {
+      // Migrate legacy single-key config if it exists
+      const { data: legacyData } = await supabase.from("empire_data").select("value").eq("key", SETUP_CONFIG_KEY).single();
+      if (legacyData?.value) {
+        console.log("⚠️ Legacy single-guild setup config found — it will be migrated when that guild runs Cosa setup again.");
+      } else {
+        console.log("⚠️ No setup config found yet — run **Cosa setup** in your server.");
+      }
+      return;
+    }
+    for (const row of data) {
+      const guildId = row.key.replace(SETUP_CONFIG_KEY + "_", "");
+      const v = row.value;
+      guildConfigs.set(guildId, {
+        ELDER_ROLE_ID: v.ELDER_ROLE_ID || null,
+        LOCKDOWN_CHANNEL_ID: v.LOCKDOWN_CHANNEL_ID || null,
+        GENERAL_CHANNEL_ID: v.GENERAL_CHANNEL_ID || null,
+        FAMILY_LIST_CHANNEL_ID: v.FAMILY_LIST_CHANNEL_ID || null,
+        EXILE_CHANNEL_ID: v.EXILE_CHANNEL_ID || null,
+        VERIFIED_ROLE_ID: v.VERIFIED_ROLE_ID || null,
+        HELPER_ROLE_ID: v.HELPER_ROLE_ID || null,
+        MOD_ROLE_ID_INACTIVITY: v.MOD_ROLE_ID_INACTIVITY || null,
+        HOLDING_CHANNEL_ID: v.HOLDING_CHANNEL_ID || null,
+        SHADOW_COURT_ID: v.SHADOW_COURT_ID || null,
+        INSIDE_MAN_ID: v.INSIDE_MAN_ID || null,
+        CHESS_CHANNEL_ID: v.CHESS_CHANNEL_ID || null,
+        MOD_LOG_CHANNEL_ID: v.MOD_LOG_CHANNEL_ID || null,
+        TALK_CHANNEL_ID: v.TALK_CHANNEL_ID || null,
+        BOT_COMMANDS_CHANNEL_ID: v.BOT_COMMANDS_CHANNEL_ID || null,
+      });
+    }
+    console.log("✅ Setup configs loaded for " + data.length + " guild(s) — Cosa knows where everything is.");
   } catch (e) {
     console.log("⚠️ No setup config found yet — run **Cosa setup** in your server.");
   }
 }
 
-async function saveSetupConfig() {
+async function saveSetupConfig(guildId) {
+  if (!guildId) { console.error("[SETUP CONFIG SAVE] guildId required"); return; }
   try {
     await supabase.from("empire_data").upsert({
-      key: SETUP_CONFIG_KEY,
+      key: SETUP_CONFIG_KEY + "_" + guildId,
       value: {
         ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID, FAMILY_LIST_CHANNEL_ID,
         EXILE_CHANNEL_ID, VERIFIED_ROLE_ID, HELPER_ROLE_ID, MOD_ROLE_ID_INACTIVITY,
@@ -294,6 +310,8 @@ async function saveSetupConfig() {
         TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
       },
     }, { onConflict: "key" });
+    // Also update in-memory guildConfigs so activateGuildConfig works immediately
+    captureGuildConfig(guildId);
   } catch (e) { console.error("[SETUP CONFIG SAVE]", e.message); }
 }
 
@@ -339,7 +357,7 @@ async function runCosaSetup(guild) {
 
  
 
-  await saveSetupConfig();
+  await saveSetupConfig(guild.id);
   return created;
 }
 
@@ -2036,7 +2054,17 @@ async function executeGodAction(cmd, guild, adminCh) {
       case "mute": {
         const member = await guild.members.fetch(cmd.userId).catch(() => null);
         if (!member) return `🔫 Member not found.`;
+        // Strip admin roles temporarily so Discord allows the timeout
+        const adminRoles = member.roles.cache.filter(r =>
+          r.permissions.has(PermissionFlagsBits.Administrator) && r.id !== guild.id
+        );
+        if (adminRoles.size > 0) {
+          await member.roles.remove(adminRoles, "Temporary removal to apply Don's mute");
+        }
         await member.timeout(Math.min(cmd.durationMs, 28 * 24 * 60 * 60 * 1000), "God Mode — Don Clint");
+        if (adminRoles.size > 0) {
+          await member.roles.add(adminRoles, "Restoring roles after Don's mute applied").catch(() => {});
+        }
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] <@${cmd.userId}> muted for ${Math.round(cmd.durationMs / 60000)}min by Don Clint.`).catch(() => {});
         return `🔇 <@${cmd.userId}> silenced by Don Clint. 🔫`;
       }
@@ -3511,8 +3539,22 @@ ${currentMood.desc}
         const targetLevel = targetRankKey ? (RANKS[targetRankKey]?.level || 0) : 0;
         if (targetLevel >= modLevel) return "🔫 You cannot mute someone of equal or higher rank than you. Know your place.";
       }
-      try { await member.timeout(durationMs, "Muted"); await sendModLog(guild, { action: `Mute (${formatTime(durationMs)})`, moderator: modName, target: member.user.username, reason }); return `🔫 <@${targetId}> muted for ${formatTime(durationMs)}.`; }
-      catch (err) { return `🔫 Mute failed: ${err.message}`; }
+      try {
+        // Discord won't timeout members with Administrator permission — strip those
+        // roles temporarily, apply the timeout, then restore them immediately.
+        const adminRoles = member.roles.cache.filter(r =>
+          r.permissions.has(PermissionFlagsBits.Administrator) && r.id !== guild.id
+        );
+        if (adminRoles.size > 0) {
+          await member.roles.remove(adminRoles, "Temporary removal to apply mute");
+        }
+        await member.timeout(durationMs, "Muted");
+        if (adminRoles.size > 0) {
+          await member.roles.add(adminRoles, "Restoring roles after mute applied").catch(() => {});
+        }
+        await sendModLog(guild, { action: `Mute (${formatTime(durationMs)})`, moderator: modName, target: member.user.username, reason });
+        return `🔫 <@${targetId}> muted for ${formatTime(durationMs)}.`;
+      } catch (err) { return `🔫 Mute failed: ${err.message}`; }
     }
     case "unmute": {
       const member = await guild.members.fetch(targetId).catch(() => null);
@@ -4357,14 +4399,20 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         const robberBal = eco.walletToCopper(await eco.getWallet(message.author.id));
         if (robberBal >= outcome.fine) {
           await eco.deductCopper(message.author.id, outcome.fine);
-          return "🚨 **CAUGHT!**\nYou tried to rob **" + targetName + "** but got caught! You paid a fine of **💵 " + outcome.fine.toLocaleString() + " Cash**. 😂";
+          // Fine goes to the victim as compensation
+          await eco.addCopper(cmd.targetId, outcome.fine);
+          return "🚨 **CAUGHT!**\nYou tried to rob **" + targetName + "** but got caught! You paid a fine of **💵 " + outcome.fine.toLocaleString() + " Cash** — which went straight to **" + targetName + "**. 😂";
         } else {
-          // Can't pay — take everything and add rest as debt
+          // Can't pay — take everything and add rest as debt, victim gets what we can
           const shortfall = outcome.fine - robberBal;
-          if (robberBal > 0) await eco.deductCopper(message.author.id, robberBal);
+          if (robberBal > 0) {
+            await eco.deductCopper(message.author.id, robberBal);
+            // Victim gets whatever the robber had
+            await eco.addCopper(cmd.targetId, robberBal);
+          }
           await eco.addDebt(message.author.id, shortfall);
           gamblingBlacklist.add(message.author.id);
-          return "🚨 **CAUGHT AND BROKE!**\nYou tried to rob **" + targetName + "** but got caught! You couldn't pay the full fine of **💵 " + outcome.fine.toLocaleString() + " Cash**.\n\n💸 Your balance was wiped. You now owe **💵 " + shortfall.toLocaleString() + " Cash** in debt.\n⛔ You're banned from gambling until cleared.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔴 **YOU ARE NOW IN DEBT**\n💡 Use **Cosa loan small** to borrow coins | **Cosa pay debt [amount]** to repay";
+          return "🚨 **CAUGHT AND BROKE!**\nYou tried to rob **" + targetName + "** but got caught! You couldn't pay the full fine of **💵 " + outcome.fine.toLocaleString() + " Cash**.\n\n💸 Your balance was wiped (**" + targetName + "** got what was left). You now owe **💵 " + shortfall.toLocaleString() + " Cash** in debt.\n⛔ You're banned from gambling until cleared.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔴 **YOU ARE NOW IN DEBT**\n💡 Use **Cosa loan small** to borrow coins | **Cosa pay debt [amount]** to repay";
         }
       } else {
         return "💨 **ESCAPED!**\nYou tried to rob **" + targetName + "** but they spotted you and you ran away empty-handed. Embarrassing.";
@@ -5305,8 +5353,11 @@ async function init() {
   client.once(Events.ClientReady, async (readyClient) => {
     console.log(`✅ The Family's Cosa is online as ${readyClient.user.tag}`);
     readyClient.user.setActivity("watching over the Family 🔫");
+    console.log(`✅ Active in ${readyClient.guilds.cache.size} guild(s): ${[...readyClient.guilds.cache.values()].map(g => g.name).join(", ")}`);
     const guild = readyClient.guilds.cache.first();
     if (guild) {
+      // Activate the first guild's config for startup tasks (mood, tips, etc.)
+      activateGuildConfig(guild.id);
       startDeadMansSwitch(guild);
       startInactivityCheck(guild);
       startPsychologicalWarfare(guild);
@@ -5470,6 +5521,9 @@ async function init() {
     }
 
     const isDM = !message.guild;
+    // Activate this guild's saved config so all channel/role IDs are correct
+    // for THIS guild — prevents cross-guild bleed when bot is in multiple servers.
+    if (message.guild) activateGuildConfig(message.guild.id);
     const channelId = message.channelId;
     const isMaster = message.author.id === MASTER_ID;
     const isMadeMan = familyRoster.has(message.author.id);
@@ -5831,6 +5885,8 @@ async function init() {
 
   // ── Slash Command Handler ───────────────────────────────────────────────────
   client.on(Events.InteractionCreate, async (interaction) => {
+    // Activate per-guild config for this interaction
+    if (interaction.guild) activateGuildConfig(interaction.guild.id);
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === "clear") {
         globalHistory = [];
