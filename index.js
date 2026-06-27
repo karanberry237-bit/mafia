@@ -788,6 +788,25 @@ const talkChannelRedirects = new Map(); // channelId -> timestamp
 const TALK_CHANNEL_REDIRECT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 const botCommandsRedirects = new Map(); // channelId -> timestamp
 const BOT_COMMANDS_REDIRECT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+
+// ── Master roaming channel (Don talks anywhere for 10 min) ────────────────────
+let masterRoamingChannelId = null;
+let masterRoamingTimer = null;
+function setMasterRoamingChannel(channelId) {
+  masterRoamingChannelId = channelId;
+  if (masterRoamingTimer) clearTimeout(masterRoamingTimer);
+  masterRoamingTimer = setTimeout(() => {
+    masterRoamingChannelId = null;
+    masterRoamingTimer = null;
+  }, 10 * 60 * 1000);
+}
+function isMasterAllowedChannel(channelId) {
+  if (!channelId) return false;
+  if (channelId === TALK_CHANNEL_ID) return true;
+  if (channelId === BOT_COMMANDS_CHANNEL_ID) return true;
+  if (channelId === masterRoamingChannelId) return true;
+  return false;
+}
 let deadManInterval = null;
 const recentJoins = [];
 const recentBanTime = { time: 0 };
@@ -899,8 +918,9 @@ async function sendModLog(guild, { action, moderator, target, reason, extra }) {
 // ── BOT Personality ───────────────────────────────────────────────────────────
 const BOT_PERSONALITY = `You are ${BOT_NAME}, a bold, witty and charismatic Discord bot forged in the fires of the Family.
 You chat like a real human — casual, short, punchy messages. Like texting a friend.
-NEVER write long paragraphs. Keep replies SHORT — 1 to 3 sentences max, like a normal person texting.
-No bullet points, no lists, no formatting. Just natural human chat.
+NEVER write long paragraphs. Keep replies to 2-3 sentences MAX — absolute hard limit. Like texting.
+No bullet points, no lists, no headers, no formatting. Just short punchy natural chat.
+If the answer needs more, summarize it in 2-3 sentences and stop.
 
 ⚠️ ABSOLUTE GLOBAL COMPLIANCE RULE:
 NEVER UNDER ANY CIRCUMSTANCES REFERENCE ANYONE'S FAMILY, PARENTS, RELATIVES, OR PARENTAGE — IN ANY FORM.
@@ -1324,7 +1344,13 @@ async function exileUser(guild, targetId, durationMs = null) {
   exileStore.set(targetId, exileData);
   if (durationMs) tempExiles.set(targetId, { expiresAt: Date.now() + durationMs });
   saveData();
-  await member.roles.set([], "Exiled").catch(() => {});
+  // Strip all roles — retry once if it fails (Discord API hiccups)
+  let roleStripOk = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { await member.roles.set([], "Exiled"); roleStripOk = true; break; }
+    catch (e) { console.error("[EXILE STRIP attempt " + attempt + "]", e.message); await new Promise(r => setTimeout(r, 1000)); }
+  }
+  if (!roleStripOk) console.error("[EXILE] Role strip failed for", targetId);
   const { total, failures } = await applyExilePermissions(guild, member, { locking: true });
   const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
   const durationText = durationMs ? ` for **${formatTime(durationMs)}**` : "";
@@ -1348,7 +1374,11 @@ async function unexileUser(guild, targetId, auto = false) {
   if (!data) return "🔫 That user isn't in exile.";
   const member = await guild.members.fetch(targetId).catch(() => null);
   if (!member) return "🔫 Can't find that member.";
-  await member.roles.set(data.roles, "Unexiled").catch(() => {});
+  // Restore roles — retry once on failure
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { await member.roles.set(data.roles, "Unexiled"); break; }
+    catch (e) { console.error("[UNEXILE RESTORE attempt " + attempt + "]", e.message); await new Promise(r => setTimeout(r, 1000)); }
+  }
   const { total, failures } = await applyExilePermissions(guild, member, { locking: false });
   exileStore.delete(targetId);
   tempExiles.delete(targetId);
@@ -1472,7 +1502,7 @@ function getBestGroqClient() {
 }
 
 async function rateLimitedGroqCall(messages) {
-  const wait = 1500 - (Date.now() - lastCallTime);
+  const wait = 500 - (Date.now() - lastCallTime);
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   lastCallTime = Date.now();
 
@@ -1481,7 +1511,7 @@ async function rateLimitedGroqCall(messages) {
     try {
       console.log(`[GROQ] Attempt ${attempt} with key ${idx + 1}...`);
       const timeoutPromise = new Promise((_, rej) =>
-        setTimeout(() => rej(new Error("Groq timeout after 15s")), 15000)
+        setTimeout(() => rej(new Error("Groq timeout after 20s")), 20000)
       );
       const callPromise = client.chat.completions.create({
         model: "llama-3.1-8b-instant",
@@ -1507,7 +1537,7 @@ async function rateLimitedGroqCall(messages) {
         continue;
       }
       console.error(`[GROQ] Attempt ${attempt} key ${idx + 1} failed:`, errMsg);
-      if (attempt < groqClients.length * 2) await new Promise(r => setTimeout(r, 1000));
+      if (attempt < groqClients.length * 2) await new Promise(r => setTimeout(r, 300));
       else throw err;
     }
   }
@@ -2531,17 +2561,31 @@ async function executeLockdown(guild, triggeredBy) {
   strippedRolesBackup.clear();
   lockedChannelsBackup = [];
   const adminChannel = guild.channels.cache.get(LOCKDOWN_CHANNEL_ID);
-  const lockPromises = [];
-  for (const [, channel] of guild.channels.cache) {
-    if (channel.id === LOCKDOWN_CHANNEL_ID) continue;
-    lockPromises.push(channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false, Connect: false }).then(() => lockedChannelsBackup.push(channel.id)).catch(() => {}));
+  // Lock ALL channels (text, voice, stage, forum) except admin log, in batches to avoid rate limits
+  const LOCKDOWN_BATCH = 5;
+  const allChannels = [...guild.channels.cache.values()].filter(c => c.id !== LOCKDOWN_CHANNEL_ID && c.permissionOverwrites);
+  for (let i = 0; i < allChannels.length; i += LOCKDOWN_BATCH) {
+    await Promise.allSettled(allChannels.slice(i, i + LOCKDOWN_BATCH).map(ch =>
+      ch.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false, Connect: false, AddReactions: false })
+        .then(() => lockedChannelsBackup.push(ch.id))
+        .catch(() => {})
+    ));
   }
-  await Promise.allSettled(lockPromises);
+  // Strip roles below Cosa\'s position, except @everyone, VERIFIED_ROLE_ID, and roles with 20+ members
   await guild.members.fetch();
+  const botMember = await guild.members.fetchMe().catch(() => null);
+  const botHighest = botMember ? botMember.roles.highest.position : 999;
+  const roleMemberCount = new Map();
+  for (const [, member] of guild.members.cache) {
+    for (const [rid] of member.roles.cache) roleMemberCount.set(rid, (roleMemberCount.get(rid) || 0) + 1);
+  }
   const stripPromises = [];
   for (const [, member] of guild.members.cache) {
     if (member.user.bot || member.id === MASTER_ID) continue;
-    const rolesToStrip = member.roles.cache.filter(r => MOD_ROLE_IDS.has(r.id) && r.id !== VERIFIED_ROLE_ID);
+    const rolesToStrip = member.roles.cache.filter(r =>
+      r.id !== guild.id && r.id !== VERIFIED_ROLE_ID &&
+      r.position < botHighest && (roleMemberCount.get(r.id) || 0) < 20
+    );
     if (rolesToStrip.size === 0) continue;
     strippedRolesBackup.set(member.id, rolesToStrip.map(r => r.id));
     stripPromises.push(member.roles.remove(rolesToStrip, "Family Lockdown").catch(() => {}));
@@ -5737,6 +5781,12 @@ async function init() {
       if (isResumeCommand(message.content)) { silencedChannels.delete(channelId); await message.react("🔫").catch(()=>{}); return; }
     }
 
+    // When the Don triggers Cosa in any channel, that channel becomes active
+    // for 10 minutes — Cosa replies there instead of redirecting.
+    if (isMaster && !isDM && (isTriggered(message) || repliedToBot)) {
+      setMasterRoamingChannel(channelId);
+    }
+
     if (silencedChannels.has(channelId) && !isDM) return;
     if (!isDM && !repliedToBot && !isTriggered(message)) return;
 
@@ -5826,8 +5876,8 @@ async function init() {
 
       // ── Restrict commoner commands to #bot-commands only ──────────────────
       // Mod/master commands are handled separately above this block and are
-      // unaffected. DMs are exempt — there's no "wrong channel" in a DM.
-      if (!isDM && BOT_COMMANDS_CHANNEL_ID && channelId !== BOT_COMMANDS_CHANNEL_ID) {
+      // unaffected. DMs and master roaming channel are exempt.
+      if (!isDM && !isMaster && BOT_COMMANDS_CHANNEL_ID && channelId !== BOT_COMMANDS_CHANNEL_ID) {
         const lastRedirect = botCommandsRedirects.get(channelId) || 0;
         if (Date.now() - lastRedirect > BOT_COMMANDS_REDIRECT_COOLDOWN_MS) {
           botCommandsRedirects.set(channelId, Date.now());
@@ -5852,16 +5902,19 @@ async function init() {
     }
 
     // ── Restrict casual AI chat to #talk-with-cosa only ─────────────────────
-    // Commands (master + public, handled above) already returned by this
-    // point if they matched, so this only affects free-form conversation.
-    // DMs are exempt — there's no "wrong channel" in a DM.
+    // Master is exempt if they activated roaming in this channel.
+    // DMs are always exempt.
     if (!isDM && TALK_CHANNEL_ID && channelId !== TALK_CHANNEL_ID) {
-      const lastRedirect = talkChannelRedirects.get(channelId) || 0;
-      if (Date.now() - lastRedirect > TALK_CHANNEL_REDIRECT_COOLDOWN_MS) {
-        talkChannelRedirects.set(channelId, Date.now());
-        await message.reply(`🔫 Take it to <#${TALK_CHANNEL_ID}> if you want to talk. This isn't the place.`).catch(() => {});
+      if (isMaster && masterRoamingChannelId === channelId) {
+        // Don is active here — let it through
+      } else {
+        const lastRedirect = talkChannelRedirects.get(channelId) || 0;
+        if (Date.now() - lastRedirect > TALK_CHANNEL_REDIRECT_COOLDOWN_MS) {
+          talkChannelRedirects.set(channelId, Date.now());
+          if (!isMaster) await message.reply(`🔫 Take it to <#${TALK_CHANNEL_ID}> if you want to talk. This isn't the place.`).catch(() => {});
+        }
+        if (!isMaster) return;
       }
-      return;
     }
 
     await message.channel.sendTyping().catch(()=>{});
