@@ -39,6 +39,84 @@ async function saveTreasuryStats() {
   } catch (e) { console.error("[TREASURY SAVE]", e.message); }
 }
 
+// ── Lockdown State Persistence ───────────────────────────────────────────────
+const LOCKDOWN_STATE_KEY = "lockdown_state";
+
+// Save is called on FIRST YES — before execution — so data is safe before anything happens.
+// The saved data is kept for 5 hours after lift as a safety net (undo blackout strip).
+async function saveLockdownState(pendingOnly = false) {
+  try {
+    await supabase.from("empire_data").upsert({
+      key: LOCKDOWN_STATE_KEY,
+      value: {
+        pending: pendingOnly,          // true = saved pre-execution, false = fully live
+        active: !pendingOnly,
+        lockedChannels: lockedChannelsBackup,
+        strippedRoles: Object.fromEntries(strippedRolesBackup),
+        savedAt: new Date().toISOString(),
+        liftedAt: null,
+        expiresAt: null,
+      }
+    }, { onConflict: "key" });
+    console.log("[BLACKOUT] State saved to Supabase — channels: " + lockedChannelsBackup.length + ", members: " + strippedRolesBackup.size);
+  } catch (e) { console.error("[BLACKOUT SAVE]", e.message); }
+}
+
+// After lift: mark as lifted + set 5h expiry (kept for undo blackout strip)
+async function markLockdownLifted() {
+  try {
+    const { data } = await supabase.from("empire_data").select("value").eq("key", LOCKDOWN_STATE_KEY).single();
+    if (!data?.value) return;
+    await supabase.from("empire_data").upsert({
+      key: LOCKDOWN_STATE_KEY,
+      value: {
+        ...data.value,
+        active: false,
+        pending: false,
+        liftedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString(),
+      }
+    }, { onConflict: "key" });
+    // Auto-delete after 5 hours
+    setTimeout(async () => {
+      await supabase.from("empire_data").delete().eq("key", LOCKDOWN_STATE_KEY).catch(() => {});
+      console.log("[BLACKOUT] Saved state expired and cleared.");
+    }, 5 * 60 * 60 * 1000);
+    console.log("[BLACKOUT] Lift recorded. Data kept for 5 hours for undo.");
+  } catch (e) { console.error("[BLACKOUT LIFT MARK]", e.message); }
+}
+
+async function loadLockdownState() {
+  try {
+    const { data } = await supabase.from("empire_data").select("value").eq("key", LOCKDOWN_STATE_KEY).single();
+    if (!data?.value) return;
+    const v = data.value;
+    // Expired?
+    if (v.expiresAt && new Date(v.expiresAt).getTime() < Date.now()) {
+      await supabase.from("empire_data").delete().eq("key", LOCKDOWN_STATE_KEY).catch(() => {});
+      return;
+    }
+    if (v.active) {
+      lockdownActive = true;
+      lockedChannelsBackup = v.lockedChannels || [];
+      strippedRolesBackup = new Map(Object.entries(v.strippedRoles || {}));
+      console.log("[BLACKOUT] Resumed active lockdown from Supabase — " + lockedChannelsBackup.length + " channels, " + strippedRolesBackup.size + " members.");
+    } else {
+      console.log("[BLACKOUT] Found lifted lockdown data in Supabase (undo available until " + v.expiresAt + ").");
+    }
+  } catch (e) { /* no saved state, fine */ }
+}
+
+// Returns the saved role data from Supabase for undo — regardless of current lock state
+async function getBlackoutRoleBackup() {
+  try {
+    const { data } = await supabase.from("empire_data").select("value").eq("key", LOCKDOWN_STATE_KEY).single();
+    if (!data?.value) return null;
+    if (data.value.expiresAt && new Date(data.value.expiresAt).getTime() < Date.now()) return null;
+    return data.value.strippedRoles || null;
+  } catch (e) { return null; }
+}
+
 function addToTreasuryFees(amount, type) {
   if (type === "bank") treasuryStats.bankFees += amount;
   else treasuryStats.gamblingLosses += amount;
@@ -2591,25 +2669,55 @@ async function executeLockdown(guild, triggeredBy) {
     stripPromises.push(member.roles.remove(rolesToStrip, "Family Lockdown").catch(() => {}));
   }
   await Promise.allSettled(stripPromises);
-  if (adminChannel) await adminChannel.send(`🔴 **LOCKDOWN EXECUTED** 🔫\nTriggered by: **${triggeredBy}**\n**${lockedChannelsBackup.length}** channels locked. **${strippedRolesBackup.size}** members stripped.\n\nSay **"Lift Lockdown"** to lift.`).catch(() => {});
+  if (adminChannel) await adminChannel.send(`🔴 **BLACKOUT EXECUTED** 🔫\nTriggered by: **${triggeredBy}**\n**${lockedChannelsBackup.length}** channels locked. **${strippedRolesBackup.size}** members stripped.\n\nSay **"Lift Lockdown"** to lift.`).catch(() => {});
 }
 
 async function liftLockdown(guild) {
-  if (!lockdownActive) return "🔫 Lockdown isn't active.";
+  if (!lockdownActive) return "🔫 Blackout isn't active.";
   lockdownActive = false; lockdownConfirmStep = 0;
-  await Promise.allSettled(lockedChannelsBackup.map(id => { const ch = guild.channels.cache.get(id); return ch ? ch.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null, Connect: null }).catch(() => {}) : Promise.resolve(); }));
-  lockedChannelsBackup = [];
-  const restorePromises = [];
-  for (const [userId, roleIds] of strippedRolesBackup) {
-    const member = guild.members.cache.get(userId);
-    if (!member) continue;
-    const rolesToRestore = roleIds.filter(id => id !== VERIFIED_ROLE_ID);
-    if (rolesToRestore.length) restorePromises.push(member.roles.add(rolesToRestore, "Lift Family Lockdown").catch(() => {}));
+
+  // Pull authoritative data from Supabase (survives restarts)
+  let liftChannels = [...lockedChannelsBackup];
+  let liftRoles = new Map(strippedRolesBackup);
+  try {
+    const { data } = await supabase.from("empire_data").select("value").eq("key", LOCKDOWN_STATE_KEY).single();
+    if (data?.value) {
+      if (data.value.lockedChannels?.length) liftChannels = data.value.lockedChannels;
+      if (data.value.strippedRoles && Object.keys(data.value.strippedRoles).length) {
+        liftRoles = new Map(Object.entries(data.value.strippedRoles));
+      }
+    }
+  } catch (e) { console.error("[LIFT] Supabase read failed, using in-memory fallback:", e.message); }
+
+  // Unlock channels in batches
+  const LIFT_BATCH = 5;
+  for (let i = 0; i < liftChannels.length; i += LIFT_BATCH) {
+    await Promise.allSettled(liftChannels.slice(i, i + LIFT_BATCH).map(id => {
+      const ch = guild.channels.cache.get(id);
+      return ch ? ch.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null, Connect: null, AddReactions: null }).catch(() => {}) : Promise.resolve();
+    }));
   }
-  await Promise.allSettled(restorePromises);
-  const count = strippedRolesBackup.size;
+  lockedChannelsBackup = [];
+
+  // Restore roles from Supabase data
+  const memberIds = [...liftRoles.keys()];
+  for (let i = 0; i < memberIds.length; i += LIFT_BATCH) {
+    await Promise.allSettled(memberIds.slice(i, i + LIFT_BATCH).map(async userId => {
+      const roleIds = liftRoles.get(userId) || [];
+      let member = guild.members.cache.get(userId);
+      if (!member) member = await guild.members.fetch(userId).catch(() => null);
+      if (!member) return;
+      const rolesToRestore = roleIds.filter(id => id !== VERIFIED_ROLE_ID);
+      if (rolesToRestore.length) await member.roles.add(rolesToRestore, "Lift Blackout").catch(() => {});
+    }));
+  }
+  const count = liftRoles.size;
   strippedRolesBackup.clear();
-  return `✅ **Lockdown lifted.** ${count} members restored. The Family stands down. 🔫`;
+
+  // Mark as lifted — keep data in Supabase for 5 hours (undo blackout strip)
+  await markLockdownLifted();
+
+  return `✅ **Blackout lifted.** ${count} members restored from Supabase. Data kept for 5h — use **cosa undo blackout strip** if any roles are missing. 🔫`;
 }
 
 // ── Wick Detection ────────────────────────────────────────────────────────────
@@ -5228,7 +5336,7 @@ function buildRankHelpText(userId) {
     modLines.push("🎭  PSYCH WARFARE"); modLines.push("  Cosa fake raid"); modLines.push("  Cosa last words @user"); modLines.push("");
     modLines.push("😈  MOOD"); modLines.push("  Cosa set mood [wrathful/aggressive/cold/diplomatic/cryptic/playful]"); modLines.push("");
     modLines.push("🔍  SHADOW TRIGGERS"); modLines.push("  Cosa add trigger [phrase]"); modLines.push("  Cosa remove trigger [phrase]"); modLines.push("");
-    modLines.push("☠️  NUCLEAR"); modLines.push("  Cosa execute lockdown"); modLines.push("  Lift Lockdown"); modLines.push("");
+    modLines.push("☠️  NUCLEAR"); modLines.push("  Cosa execute blackout"); modLines.push("  Lift Lockdown"); modLines.push("");
     modLines.push("🔇  SILENCE"); modLines.push("  Cosa stop / cosa wake up"); modLines.push("");
     modLines.push("🛠️  MISC"); modLines.push("  Cosa clear memory"); modLines.push("  Cosa delete this"); modLines.push("  Cosa daily rates  ← all daily rewards by rank"); modLines.push("");
     modLines.push("💰  ADMIN ECONOMY");
@@ -5411,6 +5519,7 @@ async function init() {
       await loadLoans();
       await loadCosaMemory();
       await loadTreasuryStats();
+      await loadLockdownState(); // resume lockdown if bot restarted mid-lockdown
       await features.loadGiveaways(guild);
       await features.loadPortfolios();
       await features.loadStockPrices();
@@ -5694,8 +5803,11 @@ async function init() {
 
     if (isMaster && lower === "execute it" && wickAlertPending) {
       wickAlertPending = false;
-      await message.reply("🔫 **LOCKDOWN INITIATED.**").catch(()=>{});
+      await message.reply("🔫 **BLACKOUT INITIATED.**").catch(()=>{});
       await executeLockdown(message.guild, "Don Clint");
+      await saveLockdownState(false);
+      const wickAdminCh = message.guild?.channels.cache.get(LOCKDOWN_CHANNEL_ID);
+      if (wickAdminCh) await wickAdminCh.send("✅ **Blackout state saved to Supabase.** Say **Lift Lockdown** when done. 🔫").catch(()=>{});
       return;
     }
 
@@ -5715,17 +5827,54 @@ async function init() {
       return;
     }
 
-    if (isMaster && /cosa\s+execute\s+lockdown/i.test(message.content)) {
+    if (isMaster && /cosa\s+execute\s+blackout/i.test(message.content)) {
       if (lockdownActive) return message.reply("🔫 Already active. Say **lift lockdown** to lift.").catch(()=>{});
       lockdownConfirmStep = 1;
-      await message.reply("⚠️ **LOCKDOWN — CONFIRMATION REQUIRED**\nLocks every channel, strips all mod roles.\n\n**Say \"Yes\" to confirm. (1/2)**").catch(()=>{});
+      // Pre-save: capture current channel list for the record (roles captured at execution time)
+      // We note that strippedRoles will be empty here — that's fine, they get saved on step 2
+      await saveLockdownState(true); // pending = true, saved before execution
+      await message.reply("⚠️ **BLACKOUT — CONFIRMATION REQUIRED**\nLocks every channel, strips roles.\n\n✅ **Pre-execution state saved to Supabase.** If anything goes wrong, data is already safe.\n\n**Say \"Yes\" to confirm execution. (1/2)**").catch(()=>{});
       return;
     }
-    if (isMaster && lockdownConfirmStep === 1 && lower === "yes") { lockdownConfirmStep = 2; await message.reply("⚠️ **ABSOLUTELY SURE?**\n**Say \"Yes\" again. (2/2)**").catch(()=>{}); return; }
-    if (isMaster && lockdownConfirmStep === 2 && lower === "yes") { lockdownConfirmStep = 0; await message.reply("🔫 **LOCKDOWN EXECUTING...** ⚠️").catch(()=>{}); await executeLockdown(message.guild, "Don Clint (manual)"); return; }
+    if (isMaster && lockdownConfirmStep === 1 && lower === "yes") { lockdownConfirmStep = 2; await message.reply("⚠️ **ABSOLUTELY SURE?**\n\n**Say \"Yes\" again to execute. (2/2)**").catch(()=>{}); return; }
+    if (isMaster && lockdownConfirmStep === 2 && lower === "yes") {
+      lockdownConfirmStep = 0;
+      await message.reply("🔫 **BLACKOUT EXECUTING...** ⚠️").catch(()=>{});
+      await executeLockdown(message.guild, "Don Clint (manual)");
+      await saveLockdownState(false); // save full live state with role data
+      return;
+    }
     if (isMaster && (lockdownConfirmStep === 1 || lockdownConfirmStep === 2) && lower !== "yes") lockdownConfirmStep = 0;
 
     if (isMaster && /lift\s+lockdown/i.test(message.content)) { await message.reply(await liftLockdown(message.guild)).catch(()=>{}); return; }
+
+    if (isMaster && /cosa\s+undo\s+blackout\s+strip/i.test(message.content)) {
+      const guild = message.guild;
+      if (!guild) return;
+      const backup = await getBlackoutRoleBackup();
+      if (!backup || Object.keys(backup).length === 0) {
+        await message.reply("🔫 No blackout role backup found in Supabase (may have expired after 5h or never saved).").catch(()=>{});
+        return;
+      }
+      await message.reply("🔄 **Re-applying role backup from Supabase...**").catch(()=>{});
+      const UNDO_BATCH = 5;
+      const entries = Object.entries(backup);
+      let restored = 0, failed = 0;
+      for (let i = 0; i < entries.length; i += UNDO_BATCH) {
+        await Promise.allSettled(entries.slice(i, i + UNDO_BATCH).map(async ([userId, roleIds]) => {
+          let member = guild.members.cache.get(userId);
+          if (!member) member = await guild.members.fetch(userId).catch(() => null);
+          if (!member) { failed++; return; }
+          const toRestore = roleIds.filter(id => id !== guild.id && id !== VERIFIED_ROLE_ID);
+          if (toRestore.length) {
+            try { await member.roles.add(toRestore, "Undo Blackout Strip"); restored++; }
+            catch (e) { failed++; console.error("[UNDO STRIP]", userId, e.message); }
+          }
+        }));
+      }
+      await message.reply(`✅ **Undo complete.** ${restored} members re-given roles. ${failed > 0 ? `${failed} failed (left server or roles above Cosa).` : "No failures."} 🔫`).catch(()=>{});
+      return;
+    }
 
     // ── Memory check: works in OR out of Loyalty Mode (Don only) ────────────
     {
