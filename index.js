@@ -2683,7 +2683,8 @@ async function executeLockdown(guild, triggeredBy) {
     if (member.user.bot || member.id === MASTER_ID) continue;
     const rolesToStrip = member.roles.cache.filter(r =>
       r.id !== guild.id && r.id !== VERIFIED_ROLE_ID &&
-      r.position < botHighest && (roleMemberCount.get(r.id) || 0) < 20
+      r.position < botHighest && (roleMemberCount.get(r.id) || 0) < 20 &&
+      !r.managed // excludes Server Booster and other Discord-managed roles
     );
     if (rolesToStrip.size === 0) continue;
     strippedRolesBackup.set(member.id, rolesToStrip.map(r => r.id));
