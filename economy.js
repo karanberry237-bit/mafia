@@ -171,14 +171,14 @@ function getDailyAmount(rankKey) {
 // Weights tuned so matching two commons is frequent, jackpots are rare.
 // Total weight ~100. Skull symbol reduced from 37→15 so near-misses feel fair.
 const SLOT_SYMBOLS = [
-  { emoji: "🤵", weight: 2,  multiplier: 10  }, // rare jackpot — the Don himself
-  { emoji: "💎", weight: 4,  multiplier: 6   },
-  { emoji: "🔫", weight: 8,  multiplier: 4   },
-  { emoji: "🥃", weight: 14, multiplier: 2.5 },
-  { emoji: "🎩", weight: 20, multiplier: 1.5 },
-  { emoji: "🚬", weight: 22, multiplier: 1   },
-  { emoji: "💵", weight: 25, multiplier: 0.5 }, // partial return on pair
-  { emoji: "💀", weight: 15, multiplier: 0   }, // loss, reduced from 37
+  { emoji: "🤵", weight: 3,  multiplier: 10  }, // rare jackpot — the Don himself
+  { emoji: "💎", weight: 6,  multiplier: 6   },
+  { emoji: "🔫", weight: 10, multiplier: 4   },
+  { emoji: "🥃", weight: 16, multiplier: 2.5 },
+  { emoji: "🎩", weight: 22, multiplier: 1.5 },
+  { emoji: "🚬", weight: 24, multiplier: 1   },
+  { emoji: "💵", weight: 27, multiplier: 0.5 }, // partial return on pair
+  { emoji: "💀", weight: 8,  multiplier: 0   }, // loss, further reduced
 ];
 
 function spinSlot() {
@@ -214,13 +214,13 @@ function playSlots(bet, charmActive = false) {
 // Max is now 5x. 0.5x counts as a loss (loaded dice reroll it).
 // 3x and 5x are rare but reachable. Total weight = 1000 for clean math.
 const WHEEL_SEGMENTS = [
-  { label: "💀 WIPED OUT",  multiplier: 0,   weight: 280 },
-  { label: "☠️ WIPED OUT",  multiplier: 0,   weight: 250 },
-  { label: "0.5x 😬",       multiplier: 0.5, weight: 200 }, // treated as loss for loaded dice
-  { label: "1x",            multiplier: 1,   weight: 160 },
-  { label: "2x",            multiplier: 2,   weight: 80  },
-  { label: "3x 🔥",         multiplier: 3,   weight: 22  },
-  { label: "5x ⚡",         multiplier: 5,   weight: 8   },
+  { label: "💀 WIPED OUT",  multiplier: 0,   weight: 180 },
+  { label: "☠️ WIPED OUT",  multiplier: 0,   weight: 150 },
+  { label: "0.5x 😬",       multiplier: 0.5, weight: 170 }, // treated as loss for loaded dice
+  { label: "1x",            multiplier: 1,   weight: 250 },
+  { label: "2x",            multiplier: 2,   weight: 150 },
+  { label: "3x 🔥",         multiplier: 3,   weight: 70  },
+  { label: "5x ⚡",         multiplier: 5,   weight: 30  },
 ];
 
 function spinWheel() {
@@ -249,7 +249,7 @@ function attemptRob(targetCopperBalance, robberCopperBalance, robberDebt = 0) {
   const steal = Math.floor(targetCopperBalance * (0.2 + Math.random() * 0.2));
   const finePercent = 0.5 + Math.random() * 0.2;
   // In debt to the Family = lower success rate (20% instead of 40%)
-  const successThreshold = robberDebt > 0 ? 0.2 : 0.4;
+  const successThreshold = robberDebt > 0 ? 0.25 : 0.50;
   if (r < successThreshold) return { result: "success", amount: steal };
   if (r < 0.7) return { result: "caught", fine: Math.floor(steal * finePercent) };
   return { result: "escaped" };
