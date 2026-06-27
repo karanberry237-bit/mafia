@@ -2657,7 +2657,21 @@ async function executeLockdown(guild, triggeredBy) {
   for (const [, member] of guild.members.cache) {
     for (const [rid] of member.roles.cache) roleMemberCount.set(rid, (roleMemberCount.get(rid) || 0) + 1);
   }
-  const stripPromises = [];
+  // Debug: log positions to console + admin channel (truncated to fit Discord limit)
+  const rolesSorted = [...guild.roles.cache.values()].sort((a, b) => b.position - a.position);
+  console.log("[BLACKOUT DEBUG] Bot highest pos:", botHighest);
+  rolesSorted.forEach(r => console.log(" role:", r.name, "pos:", r.position, "members:", roleMemberCount.get(r.id) || 0));
+  const debugLines = rolesSorted.map(r => r.name + " pos:" + r.position + " m:" + (roleMemberCount.get(r.id)||0));
+  const debugChunks = [];
+  let chunk = "🔍 **BLACKOUT DEBUG** — Cosa pos: **" + botHighest + "**\n";
+  for (const line of debugLines) {
+    if (chunk.length + line.length + 1 > 1900) { debugChunks.push(chunk); chunk = ""; }
+    chunk += line + "\n";
+  }
+  if (chunk) debugChunks.push(chunk);
+  for (const c of debugChunks) { if (adminChannel) await adminChannel.send(c).catch(e => console.error("[DEBUG SEND]", e.message)); }
+
+  let strippedCount = 0, stripFailCount = 0;
   for (const [, member] of guild.members.cache) {
     if (member.user.bot || member.id === MASTER_ID) continue;
     const rolesToStrip = member.roles.cache.filter(r =>
@@ -2666,9 +2680,16 @@ async function executeLockdown(guild, triggeredBy) {
     );
     if (rolesToStrip.size === 0) continue;
     strippedRolesBackup.set(member.id, rolesToStrip.map(r => r.id));
-    stripPromises.push(member.roles.remove(rolesToStrip, "Family Lockdown").catch(() => {}));
+    try {
+      await member.roles.remove(rolesToStrip, "Family Lockdown");
+      strippedCount++;
+    } catch(e) {
+      stripFailCount++;
+      console.error("[BLACKOUT STRIP FAIL]", member.user.username, e.message);
+      if (adminChannel) await adminChannel.send("⚠️ Strip failed for **" + member.user.username + "**: " + e.message).catch(()=>{});
+    }
   }
-  await Promise.allSettled(stripPromises);
+  console.log("[BLACKOUT] Stripped " + strippedCount + " members, " + stripFailCount + " failures.");
   if (adminChannel) await adminChannel.send(`🔴 **BLACKOUT EXECUTED** 🔫\nTriggered by: **${triggeredBy}**\n**${lockedChannelsBackup.length}** channels locked. **${strippedRolesBackup.size}** members stripped.\n\nSay **"Lift Lockdown"** to lift.`).catch(() => {});
 }
 
