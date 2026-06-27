@@ -2664,20 +2664,6 @@ async function executeLockdown(guild, triggeredBy) {
   for (const [, member] of guild.members.cache) {
     for (const [rid] of member.roles.cache) roleMemberCount.set(rid, (roleMemberCount.get(rid) || 0) + 1);
   }
-  // Debug: log positions to console + admin channel (truncated to fit Discord limit)
-  const rolesSorted = [...guild.roles.cache.values()].sort((a, b) => b.position - a.position);
-  console.log("[BLACKOUT DEBUG] Bot highest pos:", botHighest);
-  rolesSorted.forEach(r => console.log(" role:", r.name, "pos:", r.position, "members:", roleMemberCount.get(r.id) || 0));
-  const debugLines = rolesSorted.map(r => r.name + " pos:" + r.position + " m:" + (roleMemberCount.get(r.id)||0));
-  const debugChunks = [];
-  let chunk = "🔍 **BLACKOUT DEBUG** — Cosa pos: **" + botHighest + "**\n";
-  for (const line of debugLines) {
-    if (chunk.length + line.length + 1 > 1900) { debugChunks.push(chunk); chunk = ""; }
-    chunk += line + "\n";
-  }
-  if (chunk) debugChunks.push(chunk);
-  for (const c of debugChunks) { if (adminChannel) await adminChannel.send(c).catch(e => console.error("[DEBUG SEND]", e.message)); }
-
   let strippedCount = 0, stripFailCount = 0;
   for (const [, member] of guild.members.cache) {
     if (member.user.bot || member.id === MASTER_ID) continue;
@@ -2694,11 +2680,42 @@ async function executeLockdown(guild, triggeredBy) {
     } catch(e) {
       stripFailCount++;
       console.error("[BLACKOUT STRIP FAIL]", member.user.username, e.message);
-      if (adminChannel) await adminChannel.send("⚠️ Strip failed for **" + member.user.username + "**: " + e.message).catch(()=>{});
     }
   }
   console.log("[BLACKOUT] Stripped " + strippedCount + " members, " + stripFailCount + " failures.");
-  if (adminChannel) await adminChannel.send(`🔴 **BLACKOUT EXECUTED** 🔫\nTriggered by: **${triggeredBy}**\n**${lockedChannelsBackup.length}** channels locked. **${strippedRolesBackup.size}** members stripped.\n\nSay **"Lift Lockdown"** to lift.`).catch(() => {});
+  if (adminChannel) await adminChannel.send(`🔴 **BLACKOUT EXECUTED** 🔫\nTriggered by: **${triggeredBy}**\n**${lockedChannelsBackup.length}** channels locked. **${strippedRolesBackup.size}** members stripped. **${stripFailCount}** skipped (managed/above Cosa).\n\nSay **lift lockdown** to lift.`).catch(() => {});
+
+  // Mod log — full blackout summary with channels + per-member role details
+  const modLogCh = guild.channels.cache.get(MOD_LOG_CHANNEL_ID);
+  if (modLogCh) {
+    const now = new Date().toLocaleString();
+    const channelNames = lockedChannelsBackup
+      .map(id => { const c = guild.channels.cache.get(id); return c ? "#" + c.name : id; })
+      .slice(0, 25).join(", ");
+    const channelLine = lockedChannelsBackup.length > 25
+      ? channelNames + " ...+" + (lockedChannelsBackup.length - 25) + " more"
+      : channelNames || "none";
+
+    await modLogCh.send(
+      `📋 **MOD LOG** — ${now}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n**Action:** 🔴 BLACKOUT EXECUTED\n**Triggered by:** ${triggeredBy}\n**Channels locked (${lockedChannelsBackup.length}):** ${channelLine}\n**Members stripped:** ${strippedRolesBackup.size} | **Skipped:** ${stripFailCount}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
+    ).catch(() => {});
+
+    // Per-member stripped role details in chunks
+    const strippedLines = [];
+    for (const [uid, roleIds] of strippedRolesBackup) {
+      const roleNames = roleIds.map(rid => { const r = guild.roles.cache.get(rid); return r ? r.name : rid; }).join(", ");
+      strippedLines.push(`<@${uid}> stripped of: **${roleNames}**`);
+    }
+    if (strippedLines.length > 0) {
+      let chunk = "**Stripped members:**\n";
+      for (const line of strippedLines) {
+        if (chunk.length + line.length + 2 > 1900) { await modLogCh.send(chunk).catch(() => {}); chunk = ""; }
+        chunk += line + "\n";
+      }
+      if (chunk) await modLogCh.send(chunk).catch(() => {});
+    }
+    await modLogCh.send(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n<@${MASTER_ID}> — say **lift lockdown** when ready. 🔫`).catch(() => {});
+  }
 }
 
 async function liftLockdown(guild) {
@@ -2759,6 +2776,31 @@ async function liftLockdown(guild) {
 
   // Mark as lifted — keep data in Supabase for 5 hours (undo blackout strip)
   await markLockdownLifted();
+
+  // Mod log — full lift summary with per-member role restore details
+  const liftModLogCh = guild.channels.cache.get(MOD_LOG_CHANNEL_ID);
+  if (liftModLogCh) {
+    const now = new Date().toLocaleString();
+    await liftModLogCh.send(
+      `📋 **MOD LOG** — ${now}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n**Action:** ✅ BLACKOUT LIFTED\n**Channels unlocked:** ${liftChannels.length}\n**Members restored:** ${count}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
+    ).catch(() => {});
+
+    // Per-member restored role details
+    const restoreLines = [];
+    for (const [uid, roleIds] of liftRoles) {
+      const roleNames = roleIds.map(rid => { const r = guild.roles.cache.get(rid); return r ? r.name : rid; }).join(", ");
+      restoreLines.push(`<@${uid}> restored: **${roleNames}**`);
+    }
+    if (restoreLines.length > 0) {
+      let chunk = "**Restored members:**\n";
+      for (const line of restoreLines) {
+        if (chunk.length + line.length + 2 > 1900) { await liftModLogCh.send(chunk).catch(() => {}); chunk = ""; }
+        chunk += line + "\n";
+      }
+      if (chunk) await liftModLogCh.send(chunk).catch(() => {});
+    }
+    await liftModLogCh.send(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n<@${MASTER_ID}> — blackout fully lifted. Data kept 5h for undo. 🔫`).catch(() => {});
+  }
 
   return `✅ **Blackout lifted.** ${count} members restored from Supabase. Data kept for 5h — use **cosa undo blackout strip** if any roles are missing. 🔫`;
 }
