@@ -45,21 +45,26 @@ const LOCKDOWN_STATE_KEY = "lockdown_state";
 // Save is called on FIRST YES — before execution — so data is safe before anything happens.
 // The saved data is kept for 5 hours after lift as a safety net (undo blackout strip).
 async function saveLockdownState(pendingOnly = false) {
-  try {
-    await supabase.from("empire_data").upsert({
-      key: LOCKDOWN_STATE_KEY,
-      value: {
-        pending: pendingOnly,          // true = saved pre-execution, false = fully live
-        active: !pendingOnly,
-        lockedChannels: lockedChannelsBackup,
-        strippedRoles: Object.fromEntries(strippedRolesBackup),
-        savedAt: new Date().toISOString(),
-        liftedAt: null,
-        expiresAt: null,
-      }
-    }, { onConflict: "key" });
-    console.log("[BLACKOUT] State saved to Supabase — channels: " + lockedChannelsBackup.length + ", members: " + strippedRolesBackup.size);
-  } catch (e) { console.error("[BLACKOUT SAVE]", e.message); }
+  const payload = {
+    pending: pendingOnly,
+    active: !pendingOnly,
+    lockedChannels: lockedChannelsBackup,
+    strippedRoles: Object.fromEntries(strippedRolesBackup),
+    savedAt: new Date().toISOString(),
+    liftedAt: null,
+    expiresAt: null,
+  };
+  console.log("[BLACKOUT SAVE] Attempting — channels:", lockedChannelsBackup.length, "members:", strippedRolesBackup.size, "payload keys:", Object.keys(payload.strippedRoles).length);
+  const { error } = await supabase.from("empire_data").upsert({ key: LOCKDOWN_STATE_KEY, value: payload }, { onConflict: "key" });
+  if (error) {
+    console.error("[BLACKOUT SAVE ERROR]", error.message, error.code, error.details);
+    // Try to notify via admin channel if possible
+    const guild = [...(global._cosaClient?.guilds?.cache?.values() || [])][0];
+    const adminCh = guild?.channels?.cache?.get(LOCKDOWN_CHANNEL_ID);
+    if (adminCh) await adminCh.send("🚨 **BLACKOUT SAVE FAILED:** " + error.message).catch(()=>{});
+  } else {
+    console.log("[BLACKOUT SAVE] Success — channels:", lockedChannelsBackup.length, "stripped members:", strippedRolesBackup.size);
+  }
 }
 
 // After lift: mark as lifted + set 5h expiry (kept for undo blackout strip)
@@ -1553,6 +1558,8 @@ const client = new Client({
   ],
 });
 
+global._cosaClient = client; // for saveLockdownState error reporting
+
 // ── Rate Limit & AI Call ──────────────────────────────────────────────────────
 let lastCallTime = 0;
 // Track which keys are rate limited and when they reset
@@ -2694,7 +2701,21 @@ async function executeLockdown(guild, triggeredBy) {
 }
 
 async function liftLockdown(guild) {
-  if (!lockdownActive) return "🔫 Blackout isn't active.";
+  // Check Supabase too — lockdownActive may be false after a bot restart
+  if (!lockdownActive) {
+    try {
+      const { data } = await supabase.from("empire_data").select("value").eq("key", LOCKDOWN_STATE_KEY).single();
+      if (data?.value?.active) {
+        // Restore in-memory state from Supabase then proceed
+        lockdownActive = true;
+        lockedChannelsBackup = data.value.lockedChannels || [];
+        strippedRolesBackup = new Map(Object.entries(data.value.strippedRoles || {}));
+        console.log("[LIFT] Restored lockdown state from Supabase before lifting.");
+      } else {
+        return "🔫 Blackout isn't active.";
+      }
+    } catch (e) { return "🔫 Blackout isn't active."; }
+  }
   lockdownActive = false; lockdownConfirmStep = 0;
 
   // Pull authoritative data from Supabase (survives restarts)
