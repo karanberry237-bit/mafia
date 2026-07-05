@@ -64,22 +64,19 @@ function initEconomy(supabaseUrl, supabaseKey) {
 async function getWallet(userId) {
   const empty = { user_id: userId, copper: 0, silver: 0, gold: 0, stellar: 0, last_daily: null, total_earned: 0, debt: 0 };
   if (!supabase) return empty;
-  try {
-    const result = await supabase.from("wallets").select("*").eq("user_id", userId);
-    console.log("[GET WALLET]", userId, JSON.stringify(result.data), result.error?.message);
-    if (result.error || !result.data || result.data.length === 0) return empty;
-    return result.data[0];
-  } catch (e) {
-    console.error("[GET WALLET ERROR]", e.message);
+  const { data, error } = await supabase.from("wallets").select("*").eq("user_id", userId);
+  if (error) {
+    console.error("[GET WALLET ERROR]", error.message);
     return empty;
   }
+  if (!data || data.length === 0) return empty;
+  return data[0];
 }
 
 async function saveWallet(wallet) {
   if (!supabase) return;
-  try {
-    await supabase.from("wallets").upsert(wallet, { onConflict: "user_id" });
-  } catch (e) { console.error("[SAVE WALLET]", e.message); }
+  const { error } = await supabase.from("wallets").upsert(wallet, { onConflict: "user_id" });
+  if (error) console.error("[SAVE WALLET]", error.message);
 }
 
 async function getDebt(userId) {
@@ -138,10 +135,12 @@ async function deductCopper(userId, copperAmount) {
 }
 
 async function getLeaderboard(limit = 10) {
-  try {
-    const result = await supabase.from("wallets").select("*").order("total_earned", { ascending: false }).limit(limit);
-    return result.data || [];
-  } catch { return []; }
+  const { data, error } = await supabase.from("wallets").select("*").order("total_earned", { ascending: false }).limit(limit);
+  if (error) {
+    console.error("[GET LEADERBOARD ERROR]", error.message);
+    return [];
+  }
+  return data || [];
 }
 
 // ── Daily Rewards by Rank ─────────────────────────────────────────────────────
