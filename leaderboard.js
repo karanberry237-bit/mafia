@@ -69,40 +69,38 @@ async function resolveRoblox(discordId) {
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
 async function getAllEntries() {
-  try {
-    const { data } = await supabase.from("family_leaderboard").select("*").order("rank", { ascending: true });
-    return data || [];
-  } catch (e) {
-    console.error("[LEADERBOARD LOAD]", e.message);
+  const { data, error } = await supabase.from("family_leaderboard").select("*").order("rank", { ascending: true });
+  if (error) {
+    console.error("[LEADERBOARD LOAD]", error.message);
     return [];
   }
+  return data || [];
 }
 
 async function getEntry(rank) {
-  try {
-    const { data } = await supabase.from("family_leaderboard").select("*").eq("rank", rank).single();
-    return data || null;
-  } catch {
+  const { data, error } = await supabase.from("family_leaderboard").select("*").eq("rank", rank).maybeSingle();
+  if (error) {
+    console.error("[LEADERBOARD GET]", error.message);
     return null;
   }
+  return data || null;
 }
 
 async function saveMessageRef(channelId, messageId) {
-  try {
-    await supabase.from("empire_data").upsert(
-      { key: "leaderboard_message", value: { channelId, messageId } },
-      { onConflict: "key" }
-    );
-  } catch (e) { console.error("[LEADERBOARD MSG SAVE]", e.message); }
+  const { error } = await supabase.from("empire_data").upsert(
+    { key: "leaderboard_message", value: { channelId, messageId } },
+    { onConflict: "key" }
+  );
+  if (error) console.error("[LEADERBOARD MSG SAVE]", error.message);
 }
 
 async function getMessageRef() {
-  try {
-    const { data } = await supabase.from("empire_data").select("value").eq("key", "leaderboard_message").single();
-    return data?.value || null;
-  } catch {
+  const { data, error } = await supabase.from("empire_data").select("value").eq("key", "leaderboard_message").maybeSingle();
+  if (error) {
+    console.error("[LEADERBOARD MSG GET]", error.message);
     return null;
   }
+  return data?.value || null;
 }
 
 // ── Embed rendering ───────────────────────────────────────────────────────────
@@ -153,11 +151,10 @@ async function setEntry(rank, discordId, region, countryEmoji, stage) {
     updated_at: new Date().toISOString(),
   };
 
-  try {
-    await supabase.from("family_leaderboard").upsert(row, { onConflict: "rank" });
-  } catch (e) {
-    console.error("[LEADERBOARD SET]", e.message);
-    return { success: false, reason: "Database error while saving." };
+  const { error: upsertError } = await supabase.from("family_leaderboard").upsert(row, { onConflict: "rank" });
+  if (upsertError) {
+    console.error("[LEADERBOARD SET]", upsertError.message);
+    return { success: false, reason: "Database error while saving: " + upsertError.message };
   }
 
   const updated = await updateLiveMessage();
@@ -165,22 +162,20 @@ async function setEntry(rank, discordId, region, countryEmoji, stage) {
 }
 
 async function removeEntry(rank) {
-  try {
-    await supabase.from("family_leaderboard").delete().eq("rank", rank);
-  } catch (e) {
-    console.error("[LEADERBOARD REMOVE]", e.message);
-    return { success: false, reason: "Database error while removing." };
+  const { error } = await supabase.from("family_leaderboard").delete().eq("rank", rank);
+  if (error) {
+    console.error("[LEADERBOARD REMOVE]", error.message);
+    return { success: false, reason: "Database error while removing: " + error.message };
   }
   const updated = await updateLiveMessage();
   return { success: true, messageUpdated: updated };
 }
 
 async function clearAll() {
-  try {
-    await supabase.from("family_leaderboard").delete().neq("rank", -1);
-  } catch (e) {
-    console.error("[LEADERBOARD CLEAR]", e.message);
-    return { success: false };
+  const { error } = await supabase.from("family_leaderboard").delete().neq("rank", -1);
+  if (error) {
+    console.error("[LEADERBOARD CLEAR]", error.message);
+    return { success: false, reason: error.message };
   }
   await updateLiveMessage();
   return { success: true };
@@ -230,14 +225,13 @@ async function refreshAll() {
   for (const entry of entries) {
     const roblox = await resolveRoblox(entry.discord_id);
     if (roblox) {
-      try {
-        await supabase.from("family_leaderboard").update({
-          roblox_id: roblox.robloxId,
-          roblox_username: roblox.username,
-          avatar_url: roblox.avatarUrl,
-          updated_at: new Date().toISOString(),
-        }).eq("rank", entry.rank);
-      } catch (e) { console.error("[LEADERBOARD REFRESH]", e.message); }
+      const { error } = await supabase.from("family_leaderboard").update({
+        roblox_id: roblox.robloxId,
+        roblox_username: roblox.username,
+        avatar_url: roblox.avatarUrl,
+        updated_at: new Date().toISOString(),
+      }).eq("rank", entry.rank);
+      if (error) console.error("[LEADERBOARD REFRESH]", error.message);
     }
   }
   const updated = await updateLiveMessage();
