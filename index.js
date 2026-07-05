@@ -5590,7 +5590,7 @@ const commands = [
     .toJSON(),
   new SlashCommandBuilder()
     .setName("leaderboard")
-    .setDescription("Manage the Family rankings leaderboard (Don Clint only)")
+    .setDescription("Manage the Family rankings leaderboard (Don Clint + granted editors)")
     .addSubcommand(sub =>
       sub.setName("set")
         .setDescription("Set (or overwrite) a leaderboard slot")
@@ -5609,6 +5609,17 @@ const commands = [
     .addSubcommand(sub => sub.setName("post").setDescription("Post the leaderboard message in this channel (first-time setup)"))
     .addSubcommand(sub => sub.setName("refresh").setDescription("Re-fetch Roblox avatars/usernames for all entries"))
     .addSubcommand(sub => sub.setName("view").setDescription("Preview the leaderboard here without touching the live message"))
+    .addSubcommand(sub =>
+      sub.setName("grant")
+        .setDescription("Give a user permission to manage the leaderboard (Don only)")
+        .addUserOption(opt => opt.setName("user").setDescription("The user to grant leaderboard access to").setRequired(true))
+    )
+    .addSubcommand(sub =>
+      sub.setName("revoke")
+        .setDescription("Remove a user's leaderboard permission (Don only)")
+        .addUserOption(opt => opt.setName("user").setDescription("The user to revoke leaderboard access from").setRequired(true))
+    )
+    .addSubcommand(sub => sub.setName("editors").setDescription("List everyone with leaderboard permissions (Don only)"))
     .toJSON(),
 ];
 
@@ -6366,12 +6377,53 @@ async function init() {
       }
 
       if (interaction.commandName === "leaderboard") {
-        if (interaction.user.id !== MASTER_ID) {
-          await interaction.reply({ content: "🔫 Don only.", ephemeral: true }).catch(() => {});
+        const sub = interaction.options.getSubcommand();
+        const isDon = interaction.user.id === MASTER_ID;
+        const DON_ONLY_SUBS = new Set(["grant", "revoke", "editors"]);
+
+        if (DON_ONLY_SUBS.has(sub)) {
+          if (!isDon) {
+            await interaction.reply({ content: "🔫 Only Don Clint can manage leaderboard permissions.", ephemeral: true }).catch(() => {});
+            return;
+          }
+        } else {
+          const allowed = isDon || await leaderboard.isEditor(interaction.user.id);
+          if (!allowed) {
+            await interaction.reply({ content: "🔫 You don't have permission to manage the leaderboard.", ephemeral: true }).catch(() => {});
+            return;
+          }
+        }
+
+        await interaction.deferReply({ ephemeral: sub !== "view" && sub !== "post" });
+
+        if (sub === "grant") {
+          const user = interaction.options.getUser("user");
+          const result = await leaderboard.addEditor(user.id);
+          if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
+          await interaction.editReply(
+            result.alreadyPresent
+              ? `ℹ️ <@${user.id}> already has leaderboard permissions.`
+              : `✅ <@${user.id}> can now use \`/leaderboard set\`, \`remove\`, \`clear\`, \`post\`, \`refresh\`, and \`view\`.`
+          );
           return;
         }
-        const sub = interaction.options.getSubcommand();
-        await interaction.deferReply({ ephemeral: sub !== "view" && sub !== "post" });
+        if (sub === "revoke") {
+          const user = interaction.options.getUser("user");
+          const result = await leaderboard.removeEditor(user.id);
+          if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
+          await interaction.editReply(
+            result.wasPresent
+              ? `✅ <@${user.id}>'s leaderboard permissions have been revoked.`
+              : `ℹ️ <@${user.id}> didn't have leaderboard permissions.`
+          );
+          return;
+        }
+        if (sub === "editors") {
+          const ids = await leaderboard.getEditorIds();
+          if (!ids.length) { await interaction.editReply("🏆 No editors granted yet — only Don Clint can manage the leaderboard."); return; }
+          await interaction.editReply("🏆 **Leaderboard editors:**\n" + ids.map(id => `• <@${id}>`).join("\n"));
+          return;
+        }
 
         if (sub === "set") {
           const rank = interaction.options.getInteger("rank");
@@ -6380,7 +6432,7 @@ async function init() {
           const country = interaction.options.getString("country");
           const stage = interaction.options.getString("stage");
           console.log("[LB SET CALL DEBUG] rank=", rank, "| typeof=", typeof rank, "| user=", user?.id, "| region=", region, "| country=", country, "| stage=", stage);
-          const result = await leaderboard.setEntry(rank, user.id, region, country, stage);
+          const result = await leaderboard.setEntry(rank, user.id, region, country, stage, interaction.guild?.id);
           if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
           const robloxNote = result.roblox
             ? `Linked Roblox: **${result.roblox.username || result.roblox.robloxId}**`
