@@ -32,19 +32,18 @@ function getNextTier(currentTier) {
 
 // ── Bank Operations ───────────────────────────────────────────────────────────
 async function getBankAccount(userId) {
-  try {
-    const { data } = await supabase.from("banks").select("*").eq("user_id", userId).single();
-    if (!data) return { user_id: userId, balance: 0, vault_tier: "shoebox", last_processed: new Date().toISOString() };
-    return data;
-  } catch {
-    return { user_id: userId, balance: 0, vault_tier: "shoebox", last_processed: new Date().toISOString() };
+  const empty = { user_id: userId, balance: 0, vault_tier: "shoebox", last_processed: new Date().toISOString() };
+  const { data, error } = await supabase.from("banks").select("*").eq("user_id", userId).maybeSingle();
+  if (error) {
+    console.error("[GET BANK ERROR]", error.message);
+    return empty;
   }
+  return data || empty;
 }
 
 async function saveBankAccount(account) {
-  try {
-    await supabase.from("banks").upsert(account, { onConflict: "user_id" });
-  } catch (e) { console.error("[SAVE BANK]", e.message); }
+  const { error } = await supabase.from("banks").upsert(account, { onConflict: "user_id" });
+  if (error) console.error("[SAVE BANK]", error.message);
 }
 
 async function processBank(account, masterId, addToTreasury) {
@@ -143,27 +142,28 @@ function formatCopper(copper) {
 
 // ── Daily Processing (called every 24h) ──────────────────────────────────────
 async function runDailyBankProcessing(masterId, addToTreasury) {
-  try {
-    const { data } = await supabase.from("banks").select("*");
-    if (!data) return;
-    let processed = 0;
-    for (const account of data) {
-      await processBank(account, masterId, addToTreasury);
-      processed++;
-    }
-    console.log("[BANK] Daily processing complete — " + processed + " accounts");
-  } catch (e) { console.error("[BANK DAILY]", e.message); }
+  const { data, error } = await supabase.from("banks").select("*");
+  if (error) {
+    console.error("[BANK DAILY]", error.message);
+    return;
+  }
+  if (!data) return;
+  let processed = 0;
+  for (const account of data) {
+    await processBank(account, masterId, addToTreasury);
+    processed++;
+  }
+  console.log("[BANK] Daily processing complete — " + processed + " accounts");
 }
 
 async function wipeAllBanks() {
-  try {
-    await supabase.from("banks").update({ balance: 0 }).neq("user_id", "0");
-    console.log("[BANK] All bank balances wiped by the Don");
-    return true;
-  } catch (e) {
-    console.error("[BANK WIPE]", e.message);
+  const { error } = await supabase.from("banks").update({ balance: 0 }).neq("user_id", "0");
+  if (error) {
+    console.error("[BANK WIPE]", error.message);
     return false;
   }
+  console.log("[BANK] All bank balances wiped by the Don");
+  return true;
 }
 
 module.exports = {
