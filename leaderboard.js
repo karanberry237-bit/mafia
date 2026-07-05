@@ -103,6 +103,53 @@ async function getMessageRef() {
   return data?.value || null;
 }
 
+// ── Leaderboard Editors (permission allowlist, separate from Don-only powers) ─
+const EDITORS_KEY = "leaderboard_editors";
+
+async function getEditorIds() {
+  const { data, error } = await supabase.from("empire_data").select("value").eq("key", EDITORS_KEY).maybeSingle();
+  if (error) {
+    console.error("[LEADERBOARD EDITORS GET]", error.message);
+    return [];
+  }
+  return data?.value?.ids || [];
+}
+
+async function addEditor(userId) {
+  const ids = await getEditorIds();
+  if (ids.includes(userId)) return { success: true, alreadyPresent: true, ids };
+  const updated = [...ids, userId];
+  const { error } = await supabase.from("empire_data").upsert(
+    { key: EDITORS_KEY, value: { ids: updated } },
+    { onConflict: "key" }
+  );
+  if (error) {
+    console.error("[LEADERBOARD EDITORS ADD]", error.message);
+    return { success: false, reason: error.message };
+  }
+  return { success: true, ids: updated };
+}
+
+async function removeEditor(userId) {
+  const ids = await getEditorIds();
+  if (!ids.includes(userId)) return { success: true, wasPresent: false, ids };
+  const updated = ids.filter(id => id !== userId);
+  const { error } = await supabase.from("empire_data").upsert(
+    { key: EDITORS_KEY, value: { ids: updated } },
+    { onConflict: "key" }
+  );
+  if (error) {
+    console.error("[LEADERBOARD EDITORS REMOVE]", error.message);
+    return { success: false, reason: error.message };
+  }
+  return { success: true, wasPresent: true, ids: updated };
+}
+
+async function isEditor(userId) {
+  const ids = await getEditorIds();
+  return ids.includes(userId);
+}
+
 // ── Embed rendering ───────────────────────────────────────────────────────────
 const RANK_COLORS = [0xF1C40F, 0xC0C0C0, 0xCD7F32, 0x5865F2, 0x5865F2, 0x5865F2, 0x5865F2, 0x5865F2, 0x5865F2, 0x5865F2];
 
@@ -133,7 +180,7 @@ async function renderEmbeds() {
 // ── Public actions ────────────────────────────────────────────────────────────
 
 // Adds/overwrites an entry at a rank slot, resolves Roblox info, then updates the live message.
-async function setEntry(rank, discordId, region, countryEmoji, stage) {
+async function setEntry(rank, discordId, region, countryEmoji, stage, guildId) {
   console.log("[LB SET DEBUG] rank=", rank, "| typeof=", typeof rank, "| MAX_RANKS=", MAX_RANKS, "| typeof MAX_RANKS=", typeof MAX_RANKS, "| rank<1:", rank < 1, "| rank>MAX_RANKS:", rank > MAX_RANKS);
   if (rank < 1 || rank > MAX_RANKS) return { success: false, reason: `Rank must be between 1 and ${MAX_RANKS}.` };
 
@@ -150,6 +197,7 @@ async function setEntry(rank, discordId, region, countryEmoji, stage) {
     avatar_url: roblox?.avatarUrl || null,
     updated_at: new Date().toISOString(),
   };
+  if (guildId) row.guild_id = guildId;
 
   const { error: upsertError } = await supabase.from("family_leaderboard").upsert(row, { onConflict: "rank" });
   if (upsertError) {
@@ -248,5 +296,9 @@ module.exports = {
   refreshAll,
   getAllEntries,
   getEntry,
+  getEditorIds,
+  addEditor,
+  removeEditor,
+  isEditor,
   MAX_RANKS,
 };
