@@ -6379,6 +6379,7 @@ async function init() {
           const region = interaction.options.getString("region");
           const country = interaction.options.getString("country");
           const stage = interaction.options.getString("stage");
+          console.log("[LB SET CALL DEBUG] rank=", rank, "| typeof=", typeof rank, "| user=", user?.id, "| region=", region, "| country=", country, "| stage=", stage);
           const result = await leaderboard.setEntry(rank, user.id, region, country, stage);
           if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
           const robloxNote = result.roblox
