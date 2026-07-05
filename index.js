@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits, Events, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, ChannelType } = require("discord.js");
+const { Client, GatewayIntentBits, Events, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, ChannelType, EmbedBuilder } = require("discord.js");
 const Groq = require("groq-sdk");
 const { AttachmentBuilder } = require("discord.js");
 const chessModule = require("./chess.js");
@@ -11,6 +11,7 @@ const features = require("./features.js");
 const firms = require("./firms.js");
 const stockChart = require("./stockchart.js");
 const { tickFirmCandles } = require("./firmchart.js");
+const leaderboard = require("./leaderboard.js");
 const chessCooldowns = new Map();
 const CHESS_COOLDOWN_MS = 30000;
 const gambleCooldowns = new Map();
@@ -2837,6 +2838,7 @@ function detectMasterCommand(text, message) {
   const targetId = getTargetId(message);
 
   if (/\bcosa\s+bank\s+wipe\s+all\b/.test(lower)) return { action: "bank_wipe_all" };
+
   if (/\bcosa\s+market\s+tick\b/.test(lower)) return { action: "market_tick" };
   if (/\bcosa\s+market\s+(open|close)\b/.test(lower)) return { action: "market_toggle", open: lower.includes("open") };
   if (/\bcosa\s+market\s+pump\b/.test(lower)) { const m = text.match(/pump\s+([A-Z]+)\s+(\d+)/i); return m ? { action: "market_pump", ticker: m[1], rounds: parseInt(m[2]) || 3 } : null; }
@@ -5535,6 +5537,28 @@ const commands = [
     .setName("rank-help")
     .setDescription("Show moderation commands for your rank (Capo and above only, visible only to you)")
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("leaderboard")
+    .setDescription("Manage the Family rankings leaderboard (Don Clint only)")
+    .addSubcommand(sub =>
+      sub.setName("set")
+        .setDescription("Set (or overwrite) a leaderboard slot")
+        .addIntegerOption(opt => opt.setName("rank").setDescription("Rank position (1-10)").setRequired(true).setMinValue(1).setMaxValue(10))
+        .addUserOption(opt => opt.setName("user").setDescription("The Discord user for this slot").setRequired(true))
+        .addStringOption(opt => opt.setName("region").setDescription("Region, e.g. Oceania").setRequired(true))
+        .addStringOption(opt => opt.setName("country").setDescription("Country flag emoji, e.g. 🇦🇺").setRequired(true))
+        .addStringOption(opt => opt.setName("stage").setDescription("Stage text, e.g. \"1 High\"").setRequired(true))
+    )
+    .addSubcommand(sub =>
+      sub.setName("remove")
+        .setDescription("Remove a leaderboard slot")
+        .addIntegerOption(opt => opt.setName("rank").setDescription("Rank position (1-10)").setRequired(true).setMinValue(1).setMaxValue(10))
+    )
+    .addSubcommand(sub => sub.setName("clear").setDescription("Wipe every leaderboard entry"))
+    .addSubcommand(sub => sub.setName("post").setDescription("Post the leaderboard message in this channel (first-time setup)"))
+    .addSubcommand(sub => sub.setName("refresh").setDescription("Re-fetch Roblox avatars/usernames for all entries"))
+    .addSubcommand(sub => sub.setName("view").setDescription("Preview the leaderboard here without touching the live message"))
+    .toJSON(),
 ];
 
 const LOYALTY_HELP_TEXT =
@@ -5613,6 +5637,14 @@ async function init() {
       features.startStockMarket(guild, null);
       // Init firms
       firms.initFirms(MASTER_ID, process.env.SUPABASE_URL, process.env.SUPABASE_KEY, client, GENERAL_CHANNEL_ID);
+      leaderboard.initLeaderboard({
+        masterId: MASTER_ID,
+        supabaseUrl: process.env.SUPABASE_URL,
+        supabaseKey: process.env.SUPABASE_KEY,
+        clientRef: client,
+        bloxlinkApiKey: process.env.BLOXLINK_API_KEY,
+        bloxlinkGuildId: process.env.BLOXLINK_GUILD_ID,
+      });
       await firms.loadAllFirms();
       console.log("🏢 Firms loaded");
       setInterval(tickFirmCandles, 60_000);
@@ -6152,10 +6184,15 @@ async function init() {
       }
     }
 
+    const MIN_REPLY_DELAY_MS = 5000;
+    const replyStartedAt = Date.now();
     await message.channel.sendTyping().catch(()=>{});
     const typingInterval = setInterval(() => message.channel.sendTyping().catch(()=>{}), 8000);
     try {
       const reply = await getAIResponse(channelId, userText, message.author.username, null, message.author.id);
+      // Always show typing for at least MIN_REPLY_DELAY_MS, even if Groq answered instantly.
+      const elapsed = Date.now() - replyStartedAt;
+      if (elapsed < MIN_REPLY_DELAY_MS) await new Promise(r => setTimeout(r, MIN_REPLY_DELAY_MS - elapsed));
       clearInterval(typingInterval);
       if (!reply) {
         await message.reply("🔫 The Family is silent for now. Try again.").catch(()=>{});
@@ -6163,6 +6200,8 @@ async function init() {
       }
       if (isMentioned || repliedToBot) await message.reply(reply).catch(()=>{}); else await message.channel.send(reply).catch(()=>{});
     } catch (err) {
+      const elapsed = Date.now() - replyStartedAt;
+      if (elapsed < MIN_REPLY_DELAY_MS) await new Promise(r => setTimeout(r, MIN_REPLY_DELAY_MS - elapsed));
       clearInterval(typingInterval);
       console.error("[AI ERROR]", err.message);
       const e = err.message || "unknown error";
@@ -6268,6 +6307,67 @@ async function init() {
         await interaction.reply({ content: chunks[0], ephemeral: true }).catch(() => {});
         for (let i = 1; i < chunks.length; i++) {
           await interaction.followUp({ content: chunks[i], ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "leaderboard") {
+        if (interaction.user.id !== MASTER_ID) {
+          await interaction.reply({ content: "🔫 Don only.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        const sub = interaction.options.getSubcommand();
+        await interaction.deferReply({ ephemeral: sub !== "view" && sub !== "post" });
+
+        if (sub === "set") {
+          const rank = interaction.options.getInteger("rank");
+          const user = interaction.options.getUser("user");
+          const region = interaction.options.getString("region");
+          const country = interaction.options.getString("country");
+          const stage = interaction.options.getString("stage");
+          const result = await leaderboard.setEntry(rank, user.id, region, country, stage);
+          if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
+          const robloxNote = result.roblox
+            ? `Linked Roblox: **${result.roblox.username || result.roblox.robloxId}**`
+            : "⚠️ No Bloxlink-verified Roblox account found for that user — entry saved without an avatar.";
+          const liveNote = result.messageUpdated ? "Live leaderboard message updated." : "No leaderboard message posted yet — use `/leaderboard post` to put it up.";
+          await interaction.editReply(`✅ Set rank **#${rank}** to <@${user.id}>.\n${robloxNote}\n${liveNote}`);
+          return;
+        }
+        if (sub === "remove") {
+          const rank = interaction.options.getInteger("rank");
+          const result = await leaderboard.removeEntry(rank);
+          if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
+          await interaction.editReply(`✅ Removed rank **#${rank}**.` + (result.messageUpdated ? " Live message updated." : ""));
+          return;
+        }
+        if (sub === "clear") {
+          await leaderboard.clearAll();
+          await interaction.editReply("✅ Leaderboard cleared.");
+          return;
+        }
+        if (sub === "post") {
+          const result = await leaderboard.postLeaderboard(interaction.channel);
+          if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
+          await interaction.editReply("✅ Leaderboard posted. Future `/leaderboard set`/`remove` calls will update this message in place.");
+          return;
+        }
+        if (sub === "refresh") {
+          const result = await leaderboard.refreshAll();
+          await interaction.editReply(`✅ Refreshed Roblox data for **${result.count}** entries.` + (result.messageUpdated ? " Live message updated." : " No posted message found — use `/leaderboard post`."));
+          return;
+        }
+        if (sub === "view") {
+          const entries = await leaderboard.getAllEntries();
+          if (!entries.length) { await interaction.editReply("🏆 No leaderboard entries yet."); return; }
+          const embeds = entries.map(e => {
+            const nameLine = e.roblox_id ? `[${e.roblox_username || "Unknown"}](https://www.roblox.com/users/${e.roblox_id}/profile)` : `<@${e.discord_id}>`;
+            const eb = new EmbedBuilder().setDescription(`**#${e.rank} ${nameLine}**\n<@${e.discord_id}>\nRegion: - **${e.region || "—"}**\nCountry: - ${e.country_emoji || "—"}\nStage: - **${e.stage || "—"}**`);
+            if (e.avatar_url) eb.setThumbnail(e.avatar_url);
+            return eb;
+          });
+          await interaction.editReply({ embeds });
+          return;
         }
         return;
       }
