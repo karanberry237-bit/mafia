@@ -155,18 +155,16 @@ const RANK_COLORS = [0xF1C40F, 0xC0C0C0, 0xCD7F32, 0x5865F2, 0x5865F2, 0x5865F2,
 
 function buildEmbed(entry) {
   const displayName = entry.roblox_username || `<@${entry.discord_id}>`;
-  const nameLine = entry.roblox_id
-    ? `[${entry.roblox_username || "Unknown"}](https://www.roblox.com/users/${entry.roblox_id}/profile)`
-    : `<@${entry.discord_id}>`;
 
   const embed = new EmbedBuilder()
     .setColor(RANK_COLORS[entry.rank - 1] || 0x5865F2)
+    .setTitle(`#${entry.rank} ${displayName}`)
     .setDescription(
-      `**#${entry.rank} ${nameLine}**\n` +
-      `<@${entry.discord_id}>\n` +
-      `Region: - **${entry.region || "—"}**\n` +
-      `Country: - ${entry.country_emoji || "—"}\n` +
-      `Stage: - **${entry.stage || "—"}**`
+      `| <@${entry.discord_id}> |\n` +
+      `<< | .${displayName}. | >>\n\n` +
+      `Region: **${entry.region || "—"}**\n` +
+      `Country: ${entry.country_emoji || "—"}\n` +
+      `Stage: **${entry.stage || "—"}**`
     );
   if (entry.avatar_url) embed.setThumbnail(entry.avatar_url);
   return embed;
