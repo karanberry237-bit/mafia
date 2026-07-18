@@ -2218,10 +2218,22 @@ function godCoerceField(val, type) {
   return null;
 }
 
+// Pulls every ID the human actually typed — real @mentions, #channel mentions,
+// and bare 17-20 digit snowflakes pasted as plain text. Anything the AI
+// produces that ISN'T in this set is treated as hallucinated and dropped,
+// even if it happens to look like a well-formed Discord ID.
+function extractRealIdsFromText(text) {
+  const ids = new Set();
+  for (const m of text.matchAll(/<[@#]!?(\d{17,20})>/g)) ids.add(m[1]);
+  for (const m of text.matchAll(/\b(\d{17,20})\b/g)) ids.add(m[1]);
+  return ids;
+}
+
 // Validates one raw AI-suggested action against the schema table. Anything the
-// model hallucinated (unknown action, missing/invalid required field, fake ID)
+// model hallucinated (unknown action, missing/invalid required field, fake ID,
+// or — critically — an ID that never actually appeared in the human's message)
 // gets silently dropped instead of executed.
-function sanitizeGodAction(raw) {
+function sanitizeGodAction(raw, realIds, currentChannelId) {
   if (!raw || typeof raw !== "object" || typeof raw.action !== "string") return null;
   const schema = GOD_AI_SCHEMAS[raw.action];
   if (!schema) return null;
@@ -2229,12 +2241,23 @@ function sanitizeGodAction(raw) {
   for (const [field, type] of Object.entries(schema.req || {})) {
     const v = godCoerceField(raw[field], type);
     if (v === null) return null;
+    if (type === "id") {
+      // userId must be a real ID the human actually mentioned/pasted — never AI-invented.
+      // channelId is also allowed if it's just "the current channel".
+      const isCurrentChannel = field === "channelId" && v === currentChannelId;
+      if (!isCurrentChannel && !realIds.has(v)) return null;
+    }
     out[field] = v;
   }
   for (const [field, type] of Object.entries(schema.opt || {})) {
     if (raw[field] === undefined || raw[field] === null) continue;
     const v = godCoerceField(raw[field], type);
-    if (v !== null) out[field] = v;
+    if (v === null) continue;
+    if (type === "id") {
+      const isCurrentChannel = field === "channelId" && v === currentChannelId;
+      if (!isCurrentChannel && !realIds.has(v)) continue; // drop just this optional field
+    }
+    out[field] = v;
   }
   // Defaults + clamps (mirror what the regex parsers produce)
   if (out.action === "kick" || out.action === "ban") out.reason = out.reason || "By order of the Family";
@@ -2289,7 +2312,8 @@ AVAILABLE ACTIONS (use these exact field names):
 {"action":"remember","text":"..."} / {"action":"forget","query":"..."} / {"action":"list_memory","page":1}
 
 RULES:
-- userId must come from a <@123...> mention or a raw 17-19 digit number in the message. NEVER invent an ID. If an action needs a user and none was mentioned, omit that action.
+- Only output an action if the message is CLEARLY an instruction to change the server. If it's ambiguous, a reaction, a fragment of past conversation, banter, or you're not confident it's a command, output {"actions":[]}. When in doubt, do nothing — a missed command can just be repeated, but a wrong action can't be undone.
+- userId must come from a <@123...> mention or a raw 17-19 digit number in the message. NEVER invent, guess, or reuse an ID from anywhere else (including this prompt or prior context). If an action needs a user and none was mentioned IN THIS MESSAGE, omit that action entirely.
 - channelId must come from a <#123...> mention in the message or the id listed in the server context. If the owner says "this channel" for lock/slowmode/rename, use the current channel id from the context.
 - For give_role/remove_role/edit_role/delete_channel/delete_category, match names against the EXISTING roles/channels in the context (case-insensitive, closest match). create_role/create_channel may use new names.
 - One sentence can contain several actions — output them all, in order.
@@ -2308,9 +2332,10 @@ async function aiParseGodCommands(text, guild, message) {
     let parsed;
     try { parsed = JSON.parse(jsonMatch[0]); } catch { return null; }
     const rawActions = Array.isArray(parsed.actions) ? parsed.actions : [];
-    const actions = rawActions.map(sanitizeGodAction).filter(Boolean).slice(0, 10);
+    const realIds = extractRealIdsFromText(text);
+    const actions = rawActions.map(a => sanitizeGodAction(a, realIds, message.channelId)).filter(Boolean).slice(0, 10);
     if (actions.length !== rawActions.length) {
-      console.log(`[GOD AI] Dropped ${rawActions.length - actions.length} invalid action(s) from AI output`);
+      console.log(`[GOD AI] Dropped ${rawActions.length - actions.length} invalid/hallucinated action(s) from AI output`);
     }
     return { actions };
   } catch (e) {
@@ -2867,6 +2892,22 @@ async function handleGodModeMessage(message, guild, adminCh) {
     await message.reply(
       `${currentMood.emoji} **Loyalty Mode deactivated.** Cosa returns.\n` +
       `Mood restored: **${currentMood.name}** — *${currentMood.desc}*`
+    ).catch(() => {});
+    return true;
+  }
+
+  // ── Manual reset: clear ANY stuck pending confirmation (single or batch) ──
+  // Doesn't touch Loyalty Mode itself — just wipes leftover "awaiting execute"
+  // state so old context can't bleed into unrelated messages.
+  if (/^cosa\s+(reset|clear\s+pending|clear\s+commands?)$/i.test(text.trim())) {
+    const hadSingle = !!pendingGodAction;
+    const hadBatch = !!pendingBatchAction;
+    godClearPending();
+    batchClearPending();
+    await message.reply(
+      hadSingle || hadBatch
+        ? `🔫 Cleared. Nothing pending anymore, my Don.`
+        : `🔫 Nothing was pending, but you're clean either way.`
     ).catch(() => {});
     return true;
   }
@@ -6026,6 +6067,7 @@ const LOYALTY_HELP_TEXT =
   `**Activation**\n` +
   `\`cosa show loyalty\` — activate Loyalty Mode\n` +
   `\`cosa loyalty off\` — deactivate\n` +
+  `\`cosa reset\` — clear any stuck pending confirmation\n` +
   `*(auto-deactivates after 10 minutes of inactivity)*\n\n` +
   `**🗣️ Just talk to me**\n` +
   `While Loyalty Mode is on, you don't need exact commands — speak naturally and I'll understand:\n` +
