@@ -3028,34 +3028,41 @@ async function handleGodModeMessage(message, guild, adminCh) {
     return true;
   }
 
+  // Jarvis, when active WITHOUT Loyalty Mode, is meant to be pure natural
+  // language — no hard-coded regex patterns to accidentally misfire on. Only
+  // when Loyalty Mode is ALSO on do the fast regex shortcuts apply first.
+  const pureAiMode = jarvisModeActive && !godModeActive;
+
   // ── Mass ban: "ban @everyone" (guild-scoped, needs @everyone/@here ping) ────
+  // Kept even in pure-AI mode — this one is a literal Discord mention, not a
+  // regex guess, so there's no ambiguity to misfire on.
   if (guild && isMassBanRequest(message)) {
     return await promptMassBan(message, guild, adminCh);
   }
 
-  // ── Compound single-line sentence: "create a role X, color Y, give it to @z" ──
-  {
+  let cmd = null;
+
+  if (!pureAiMode) {
+    // ── Compound single-line sentence: "create a role X, color Y, give it to @z" ──
     const handledSentence = await handleGodModeSentence(text, message, guild, adminCh);
     if (handledSentence) return true;
-  }
 
-  // ── Multi-line batch: one action per line ───────────────────────────────────
-  {
+    // ── Multi-line batch: one action per line ───────────────────────────────────
     const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
     if (lines.length > 1) {
       const handled = await handleGodModeBatch(lines, message, guild, adminCh);
       if (handled) return true;
       // If batch parsing found zero valid commands at all, fall through to AI
     }
+
+    // ── Parse new command ─────────────────────────────────────────────────────
+    cmd = parseGodCommand(text);
   }
 
-  // ── Parse new command ─────────────────────────────────────────────────────
-  let cmd = parseGodCommand(text);
-
-  // ── AI FALLBACK: regexes didn't understand — let the AI interpret it ──────
-  // This is what makes Loyalty Mode feel like a person: "get rid of that spam
-  // channel", "shut @x up for an hour", "make a vip role, gold, give it to @y"
-  // all work without matching any hard-coded pattern.
+  // ── AI: pure natural language — Jarvis's main mode, and Loyalty Mode's fallback ──
+  // This is what makes it feel like a person: "get rid of that spam channel",
+  // "shut @x up for an hour", "make a vip role, gold, give it to @y" all work
+  // without matching any hard-coded pattern.
   if (!cmd) {
     await message.channel.sendTyping().catch(() => {});
     const ai = await aiParseGodCommands(text, guild, message);
