@@ -1880,17 +1880,49 @@ let godModeInactivityTimer = null;
 let godModeSavedHistory  = [];
 let godModeGuildId       = null;
 let godModeSavedMood     = null;
-let pendingGodAction     = null; // { action, data, step, timeoutHandle }
 
+// Guild-scoped pending confirmations. Previously this was a single global
+// (`pendingGodAction`), which meant a confirmation staged in one guild could
+// in principle be confirmed/cancelled by a message arriving from a DIFFERENT
+// guild (e.g. while testing in a second server). Keying by guildId closes
+// that gap — "execute"/"cancel" only ever resolves the pending action that
+// was staged for the exact guild the message came from.
+const pendingGodActionByGuild = new Map(); // guildId -> { action, data, step, timeoutHandle }
+let _lastGodActionGuildId = null; // tracks which guild's pending action godClearPending()/godSetPending() with no explicit guildId should target — set by the caller context just before use
+
+function godClearPendingFor(guildId) {
+  const key = guildId || "dm";
+  const existing = pendingGodActionByGuild.get(key);
+  if (existing?.timeoutHandle) clearTimeout(existing.timeoutHandle);
+  pendingGodActionByGuild.delete(key);
+}
+function godSetPendingFor(guildId, action, data, step) {
+  godClearPendingFor(guildId);
+  const key = guildId || "dm";
+  const handle = setTimeout(() => { pendingGodActionByGuild.delete(key); }, 30000);
+  pendingGodActionByGuild.set(key, { action, data, step, timeoutHandle: handle, guildId: key });
+}
+function godGetPendingFor(guildId) {
+  return pendingGodActionByGuild.get(guildId || "dm") || null;
+}
+
+// Backward-compatible wrappers: existing call sites in handleGodModeMessage
+// call godSetPending(action, data, step) / godClearPending() without a guildId
+// because they're always invoked with `guild` in scope in that function. We
+// keep the same call signature by tracking the guild of the message currently
+// being handled via _lastGodActionGuildId, set at the top of handleGodModeMessage.
 function godClearPending() {
-  if (pendingGodAction?.timeoutHandle) clearTimeout(pendingGodAction.timeoutHandle);
-  pendingGodAction = null;
+  godClearPendingFor(_lastGodActionGuildId);
 }
 function godSetPending(action, data, step) {
-  godClearPending();
-  const handle = setTimeout(() => { pendingGodAction = null; }, 30000);
-  pendingGodAction = { action, data, step, timeoutHandle: handle };
+  godSetPendingFor(_lastGodActionGuildId, action, data, step);
 }
+// `pendingGodAction` getter — existing code reads this as a plain variable in
+// several places (`if (pendingGodAction)`, `pendingGodAction.step`, etc). We
+// can't make a getter transparently replace a `let` binding used that way
+// without touching every call site, so instead each call site below is
+// updated to call godGetPendingFor(guild?.id) explicitly wherever it
+// previously read the bare `pendingGodAction` variable.
 function godResetInactivity(onExpire) {
   if (godModeInactivityTimer) clearTimeout(godModeInactivityTimer);
   godModeInactivityTimer = setTimeout(onExpire, GOD_MODE_INACTIVITY_MS);
@@ -2637,16 +2669,35 @@ async function executeGodAction(cmd, guild, adminCh) {
 }
 
 // ── Multi-action batch executor (jarvis-style progress + results) ─────────────
-let pendingBatchAction = null; // { lines, parsed, riskyDescriptions, timeoutHandle }
+// Guild-scoped for the same reason as pendingGodActionByGuild above — a batch
+// confirmation staged in one guild must never be executable/cancellable from
+// a different guild's messages.
+const pendingBatchActionByGuild = new Map(); // guildId -> { parsed, riskyDescriptions, timeoutHandle }
 
+function batchClearPendingFor(guildId) {
+  const key = guildId || "dm";
+  const existing = pendingBatchActionByGuild.get(key);
+  if (existing?.timeoutHandle) clearTimeout(existing.timeoutHandle);
+  pendingBatchActionByGuild.delete(key);
+}
+function batchSetPendingFor(guildId, parsed, riskyDescriptions) {
+  batchClearPendingFor(guildId);
+  const key = guildId || "dm";
+  const handle = setTimeout(() => { pendingBatchActionByGuild.delete(key); }, 30000);
+  pendingBatchActionByGuild.set(key, { parsed, riskyDescriptions, timeoutHandle: handle, guildId: key });
+}
+function batchGetPendingFor(guildId) {
+  return pendingBatchActionByGuild.get(guildId || "dm") || null;
+}
+// Backward-compatible wrappers, mirroring godClearPending/godSetPending —
+// existing call sites (confirmAndRunBatch, handleGodModeMessage) keep calling
+// batchSetPending(parsed, risky) / batchClearPending() unchanged; they resolve
+// against whichever guild's message is currently being handled.
 function batchClearPending() {
-  if (pendingBatchAction?.timeoutHandle) clearTimeout(pendingBatchAction.timeoutHandle);
-  pendingBatchAction = null;
+  batchClearPendingFor(_lastGodActionGuildId);
 }
 function batchSetPending(parsed, riskyDescriptions) {
-  batchClearPending();
-  const handle = setTimeout(() => { pendingBatchAction = null; }, 30000);
-  pendingBatchAction = { parsed, riskyDescriptions, timeoutHandle: handle };
+  batchSetPendingFor(_lastGodActionGuildId, parsed, riskyDescriptions);
 }
 
 function describeRisk(cmd, guild) {
@@ -2734,9 +2785,33 @@ async function runGodModeBatch(parsed, message, guild, adminCh) {
   if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Batch of ${parsed.length} action(s) executed by Don Clint (${failCount} failed).`).catch(() => {});
 }
 
+// Destructive actions that remove a member or delete a channel/category
+// outright. A natural-language instruction is allowed to bundle up to
+// DESTRUCTIVE_BATCH_FAST_CONFIRM_MAX of these with a single confirmation;
+// beyond that it's rejected outright and pointed at the dedicated mass-ban
+// flow (which lists every target and requires TWO confirmations) instead of
+// silently accepting an arbitrarily large batch through free text.
+const DESTRUCTIVE_BATCH_ACTIONS = new Set(["ban", "kick", "delete_channel", "delete_channel_id", "delete_category"]);
+const DESTRUCTIVE_BATCH_FAST_CONFIRM_MAX = 5;
+
 // Shared: given parsed [{line, cmd}] items, flags risky ones and either runs
 // immediately (all-safe) or asks for one confirmation covering the whole batch.
 async function confirmAndRunBatch(parsed, message, guild, adminCh) {
+  const destructiveItems = parsed.filter(item => item.cmd && DESTRUCTIVE_BATCH_ACTIONS.has(item.cmd.action));
+
+  if (destructiveItems.length > DESTRUCTIVE_BATCH_FAST_CONFIRM_MAX) {
+    const preview = destructiveItems.slice(0, 10).map(item => `• ${describeRisk(item.cmd, guild) || describeActionShort(item.cmd)}`).join("\n");
+    const more = destructiveItems.length > 10 ? `\n…and ${destructiveItems.length - 10} more` : "";
+    await message.reply(
+      `⚠️ That instruction contains **${destructiveItems.length}** destructive action(s) (ban/kick/channel deletion) — ` +
+      `over the limit of ${DESTRUCTIVE_BATCH_FAST_CONFIRM_MAX} I'll run off a single confirmation.\n` +
+      `${preview}${more}\n\n` +
+      `Split it into smaller instructions, use the regular mod commands one at a time, or — if you genuinely mean a mass ban — ` +
+      `ping @everyone/@here with "ban" to go through the dedicated mass-ban flow (full list, expandable, confirmed twice).`
+    ).catch(() => {});
+    return true;
+  }
+
   const riskyDescriptions = [];
   for (const item of parsed) {
     if (!item.cmd) continue;
@@ -2930,6 +3005,10 @@ async function runMassBan(cmd, message, guild, adminCh) {
 }
 
 async function handleGodModeMessage(message, guild, adminCh) {
+  // Guild-scope every godSetPending()/godClearPending() call made for the rest
+  // of this invocation to the guild this message actually came from.
+  _lastGodActionGuildId = guild?.id || null;
+
   // Normalize bare numeric Discord IDs (17-19 digits) into <@ID> mention
   // syntax so every <@!?(\d+)> regex in parseGodCommand/parseBareRoleFragment
   // matches a raw pasted ID the same way it matches a real @mention. Without
@@ -2957,8 +3036,8 @@ async function handleGodModeMessage(message, guild, adminCh) {
   // Doesn't touch Loyalty Mode itself — just wipes leftover "awaiting execute"
   // state so old context can't bleed into unrelated messages.
   if (/^cosa\s+(reset|clear\s+pending|clear\s+commands?)$/i.test(text.trim())) {
-    const hadSingle = !!pendingGodAction;
-    const hadBatch = !!pendingBatchAction;
+    const hadSingle = !!godGetPendingFor(guild?.id);
+    const hadBatch = !!batchGetPendingFor(guild?.id);
     godClearPending();
     batchClearPending();
     await message.reply(
@@ -2988,22 +3067,25 @@ async function handleGodModeMessage(message, guild, adminCh) {
     });
   }
 
-  // ── Handle "execute" confirmation for a pending BATCH ─────────────────────
-  if (lower === "execute" && pendingBatchAction) {
-    const pending = pendingBatchAction;
+  // ── Handle "execute" confirmation for a pending BATCH (guild-scoped) ───────
+  const pendingBatchForThisGuild = batchGetPendingFor(guild?.id);
+  if (lower === "execute" && pendingBatchForThisGuild) {
+    const pending = pendingBatchForThisGuild;
     batchClearPending();
     await runGodModeBatch(pending.parsed, message, guild, adminCh);
     return true;
   }
-  if (/^(cancel|abort|nevermind|nvm)$/i.test(lower) && pendingBatchAction) {
+  if (/^(cancel|abort|nevermind|nvm)$/i.test(lower) && batchGetPendingFor(guild?.id)) {
     batchClearPending();
     await message.reply(`🔫 Batch cancelled.`).catch(() => {});
     return true;
   }
 
-  // ── Handle "execute" confirmation ──────────────────────────────────────────
-  if (lower === "execute" && pendingGodAction) {
-    const pending = pendingGodAction;
+  // ── Handle "execute" confirmation (guild-scoped — only resolves a pending
+  // action that was staged for THIS guild) ───────────────────────────────────
+  const pendingForThisGuild = godGetPendingFor(guild?.id);
+  if (lower === "execute" && pendingForThisGuild) {
+    const pending = pendingForThisGuild;
     if (NUCLEAR_GOD_ACTIONS.has(pending.action)) {
       if (pending.step === 1) {
         godSetPending(pending.action, pending.data, 2);
@@ -3029,7 +3111,7 @@ async function handleGodModeMessage(message, guild, adminCh) {
   }
 
   // ── Cancel ────────────────────────────────────────────────────────────────
-  if (/^(cancel|abort|nevermind|nvm)$/i.test(lower) && pendingGodAction) {
+  if (/^(cancel|abort|nevermind|nvm)$/i.test(lower) && godGetPendingFor(guild?.id)) {
     godClearPending();
     await message.reply(`🔫 Action cancelled.`).catch(() => {});
     return true;
