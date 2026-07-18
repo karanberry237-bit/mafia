@@ -1921,6 +1921,56 @@ function deactivateGodMode() {
   return true;
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  JARVIS MODE — separate from Loyalty Mode. "cosa enable jarvis" flips Cosa's
+//  entire persona to a calm, precise, Tony-Stark's-AI-butler voice AND makes
+//  every message from Don Clint go straight through the natural-language admin
+//  interpreter (the same aiParseGodCommands used as Loyalty Mode's fallback)
+//  before anything else. Independent toggle — works with or without Loyalty
+//  Mode being on. Same execute/cancel/nuclear confirmation safety underneath.
+// ══════════════════════════════════════════════════════════════════════════════
+let jarvisModeActive         = false;
+let jarvisModeGuildId        = null;
+let jarvisModeSavedMood      = null;
+let jarvisModeSavedHistory   = [];
+let jarvisInactivityTimer    = null;
+const JARVIS_INACTIVITY_MS   = 10 * 60 * 1000;
+
+const JARVIS_PERSONALITY = `You are Jarvis — a calm, hyper-competent AI assistant in the mold of Tony Stark's butler AI.
+Speak with dry wit, quiet confidence, and impeccable manners. Address the user as "sir" or "Don Clint" interchangeably, never anything else.
+Keep replies short and precise — 1-3 sentences. No slang, no emoji spam (one tasteful one is fine), no mafia theming while this mode is active.
+You are unfailingly loyal to Don Clint and carry out his instructions on the server efficiently and without complaint, noting when something can't be done and why.
+Stay composed under pressure. Understate rather than overstate. A touch of gentle sarcasm is welcome, but never disrespect.`;
+
+function jarvisResetInactivity(onExpire) {
+  if (jarvisInactivityTimer) clearTimeout(jarvisInactivityTimer);
+  jarvisInactivityTimer = setTimeout(onExpire, JARVIS_INACTIVITY_MS);
+}
+function jarvisClearInactivity() {
+  if (jarvisInactivityTimer) { clearTimeout(jarvisInactivityTimer); jarvisInactivityTimer = null; }
+}
+
+function activateJarvisMode(guildId) {
+  if (jarvisModeActive) return false;
+  jarvisModeSavedHistory = [...getHistory(guildId)];
+  jarvisModeGuildId      = guildId;
+  jarvisModeSavedMood    = currentMood;
+  jarvisModeActive       = true;
+  guildHistories.set(guildId || "dm", []); // clean slate, same as God Mode
+  console.log("[JARVIS MODE] ACTIVATED");
+  return true;
+}
+function deactivateJarvisMode() {
+  if (!jarvisModeActive) return false;
+  jarvisModeActive = false;
+  jarvisClearInactivity();
+  guildHistories.set(jarvisModeGuildId || "dm", [...jarvisModeSavedHistory]);
+  currentMood = jarvisModeSavedMood || currentMood;
+  console.log("[JARVIS MODE] DEACTIVATED — history + mood restored");
+  return true;
+}
+
+
 // Splits a single message into clauses on " and "/commas, while protecting
 // <@mentions> from being split on internal commas. Also breaks before known
 // trigger phrases ("make it...", "give it to...", "color...", etc.) even when
@@ -2912,13 +2962,24 @@ async function handleGodModeMessage(message, guild, adminCh) {
     return true;
   }
 
-  // Reset inactivity on every Don message while in God Mode
-  godResetInactivity(async () => {
-    deactivateGodMode();
-    if (adminCh) await adminCh.send(`⏳ **[GOD MODE LOG] Loyalty Mode auto-deactivated** — 10 min inactivity.`).catch(() => {});
-    const ch = await client.channels.fetch(message.channelId).catch(() => null);
-    if (ch) await ch.send(`⏳ **Loyalty Mode auto-deactivated** due to inactivity. Cosa returns to normal. 🔫`).catch(() => {});
-  });
+  // Reset inactivity on every Don message while in God Mode (Loyalty Mode)
+  if (godModeActive) {
+    godResetInactivity(async () => {
+      deactivateGodMode();
+      if (adminCh) await adminCh.send(`⏳ **[GOD MODE LOG] Loyalty Mode auto-deactivated** — 10 min inactivity.`).catch(() => {});
+      const ch = await client.channels.fetch(message.channelId).catch(() => null);
+      if (ch) await ch.send(`⏳ **Loyalty Mode auto-deactivated** due to inactivity. Cosa returns to normal. 🔫`).catch(() => {});
+    });
+  }
+  // Reset inactivity on every Don message while Jarvis Mode is active (independent toggle)
+  if (jarvisModeActive) {
+    jarvisResetInactivity(async () => {
+      deactivateJarvisMode();
+      if (adminCh) await adminCh.send(`⏳ **[JARVIS MODE LOG] Jarvis Mode auto-deactivated** — 10 min inactivity.`).catch(() => {});
+      const ch = await client.channels.fetch(message.channelId).catch(() => null);
+      if (ch) await ch.send(`⏳ Jarvis powering down after ten minutes of quiet, sir. Say **cosa enable jarvis** to bring me back.`).catch(() => {});
+    });
+  }
 
   // ── Handle "execute" confirmation for a pending BATCH ─────────────────────
   if (lower === "execute" && pendingBatchAction) {
@@ -6069,6 +6130,8 @@ const LOYALTY_HELP_TEXT =
   `\`cosa loyalty off\` — deactivate\n` +
   `\`cosa reset\` — clear any stuck pending confirmation\n` +
   `*(auto-deactivates after 10 minutes of inactivity)*\n\n` +
+  `**Related mode**\n` +
+  `\`cosa enable jarvis\` — separate toggle, swaps Cosa's whole persona to Jarvis and enables the same natural-language commands. \`cosa disable jarvis\` to end it.\n\n` +
   `**🗣️ Just talk to me**\n` +
   `While Loyalty Mode is on, you don't need exact commands — speak naturally and I'll understand:\n` +
   `*"get rid of that spam channel"*, *"shut @user up for an hour"*,\n` +
@@ -6528,13 +6591,40 @@ async function init() {
       return;
     }
 
-    // ── GOD MODE: Handle all messages from Don while active ─────────────────
-    if (isMaster && godModeActive) {
+    // ── JARVIS MODE: Activation (separate toggle — full persona + AI interpreter) ──
+    if (isMaster && /cosa\s+enable\s+jarvis/i.test(message.content)) {
+      if (jarvisModeActive) { await message.reply("Already online, sir.").catch(() => {}); return; }
+      activateJarvisMode(message.guild?.id);
+      const adminCh = message.guild?.channels.cache.get(LOCKDOWN_CHANNEL_ID);
+      if (adminCh) await adminCh.send(`🤵 **[JARVIS MODE LOG] Jarvis Mode ACTIVATED** by Don Clint.`).catch(() => {});
+      await message.reply(
+        "🟦 **Jarvis online.**\n" +
+        "Good to be back, sir. Speak plainly and I'll handle the rest.\n" +
+        "*Say **cosa disable jarvis** whenever you'd like me to step aside.*"
+      ).catch(() => {});
+      return;
+    }
+
+    // ── JARVIS MODE: Deactivation ───────────────────────────────────────────
+    if (isMaster && jarvisModeActive && /^(cosa\s+)?(disable\s+jarvis|jarvis\s+off)$/i.test(message.content.trim())) {
+      deactivateJarvisMode();
+      const adminCh = message.guild?.channels.cache.get(LOCKDOWN_CHANNEL_ID);
+      if (adminCh) await adminCh.send(`🤵 **[JARVIS MODE LOG] Jarvis Mode DEACTIVATED** by Don Clint.`).catch(() => {});
+      await message.reply(
+        `${currentMood.emoji} **Jarvis stepping back.** Cosa returns.\n` +
+        `Mood restored: **${currentMood.name}** — *${currentMood.desc}*`
+      ).catch(() => {});
+      return;
+    }
+
+    // ── GOD MODE / JARVIS MODE: Handle all messages from Don while either is active ──
+    if (isMaster && (godModeActive || jarvisModeActive)) {
       const adminCh = message.guild?.channels.cache.get(LOCKDOWN_CHANNEL_ID);
       const handled = await handleGodModeMessage(message, message.guild, adminCh);
       if (handled) return;
-      // Not a god command — fall through to normal AI chat below
+      // Not a god command — fall through to normal AI chat below (Jarvis persona applies if active)
     }
+
 
     if (/cosa\s+show\s+command\s+order\s+66/i.test(message.content)) {
       await message.channel.send("# 🔴 LOCKDOWN — THE FAMILY'S FINAL PROTOCOL 🔫\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**Lockdown is the Family's nuclear option.**\nA single command from **Don Clint** triggers a full server lockdown.\n\n🔒 **WHAT HAPPENS:**\n> Every channel locked. All mod roles stripped. Server goes dark.\n\n🛡️ **IMMUNE:** Don Clint always. Verified members keep verified status.\n\n⚡ **TRIGGERS:** Wick detects raid → Cosa pings Don Clint. Or Don Clint commands it manually — confirmed twice.\n\n♻️ **LIFTING:** Only Don Clint says *\"Lift Lockdown\"*.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*The Family does not forgive raids. 🔫*").catch(() => {});
@@ -6698,7 +6788,7 @@ async function init() {
     await message.channel.sendTyping().catch(()=>{});
     const typingInterval = setInterval(() => message.channel.sendTyping().catch(()=>{}), 8000);
     try {
-      const reply = await getAIResponse(message.guild?.id, channelId, userText, message.author.username, null, message.author.id);
+      const reply = await getAIResponse(message.guild?.id, channelId, userText, message.author.username, jarvisModeActive ? JARVIS_PERSONALITY : null, message.author.id);
       // Always show typing for at least MIN_REPLY_DELAY_MS, even if Groq answered instantly.
       const elapsed = Date.now() - replyStartedAt;
       if (elapsed < MIN_REPLY_DELAY_MS) await new Promise(r => setTimeout(r, MIN_REPLY_DELAY_MS - elapsed));
