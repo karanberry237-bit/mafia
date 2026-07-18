@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits, Events, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, ChannelType, EmbedBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, Events, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, ChannelType, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle } = require("discord.js");
 const Groq = require("groq-sdk");
 const { AttachmentBuilder } = require("discord.js");
 const chessModule = require("./chess.js");
@@ -1632,7 +1632,7 @@ function getBestGroqClient() {
   return { client: groqClients[soonest], idx: soonest };
 }
 
-async function rateLimitedGroqCall(messages) {
+async function rateLimitedGroqCall(messages, opts = {}) {
   const wait = 500 - (Date.now() - lastCallTime);
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   lastCallTime = Date.now();
@@ -1645,8 +1645,10 @@ async function rateLimitedGroqCall(messages) {
         setTimeout(() => rej(new Error("Groq timeout after 20s")), 20000)
       );
       const callPromise = client.chat.completions.create({
-        model: "llama-3.1-8b-instant",
-        max_tokens: 150,
+        model: opts.model || "llama-3.1-8b-instant",
+        max_tokens: opts.maxTokens || 150,
+        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+        ...(opts.jsonMode ? { response_format: { type: "json_object" } } : {}),
         messages,
       });
       const response = await Promise.race([callPromise, timeoutPromise]);
@@ -1870,7 +1872,7 @@ const HIGH_RISK_ROLE_NAMES = new Set([
   "cosa", "don clint", "the family", "underboss",
   "consigliere", "boss", "the commission",
 ]);
-const NUCLEAR_GOD_ACTIONS = new Set(["ban", "kick", "delete_channel", "delete_channel_id"]);
+const NUCLEAR_GOD_ACTIONS = new Set(["ban", "kick", "delete_channel", "delete_channel_id", "ban_everyone"]);
 const GOD_MODE_INACTIVITY_MS = 10 * 60 * 1000;
 
 let godModeActive        = false;
@@ -2167,6 +2169,154 @@ function parseGodCommand(text) {
   m = t.match(/^(?:show|list)\s+(?:my\s+)?memor(?:y|ies)\b(?:\s+page\s+(\d+))?|^what\s+do\s+you\s+remember\b|^memories(?:\s+page\s+(\d+))?\b/i);
   if (m) return { action: "list_memory", page: parseInt(m[1] || m[2] || "1") };
   return null;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  LOYALTY MODE — AI INTENT INTERPRETER ("talk to me like a person")
+//  When the regex parsers don't recognize what Don Clint said, the raw sentence
+//  is handed to the AI, which maps plain human speech ("get rid of that spam
+//  channel", "shut him up for an hour", "make a vip role and give it to him")
+//  onto the same action objects executeGodAction already understands.
+//  Risky actions (ban/kick/delete/high-risk roles) still go through the exact
+//  same execute/cancel confirmation flow as regex-parsed commands.
+// ══════════════════════════════════════════════════════════════════════════════
+const GOD_AI_SCHEMAS = {
+  create_role:       { req: { roleName: "string" }, opt: { color: "string", hoist: "boolean", position: "position" } },
+  edit_role:         { req: { roleName: "string" }, opt: { color: "string", hoist: "boolean", position: "position" } },
+  give_role:         { req: { userId: "id", roleName: "string" } },
+  remove_role:       { req: { userId: "id", roleName: "string" } },
+  kick:              { req: { userId: "id" }, opt: { reason: "string" } },
+  ban:               { req: { userId: "id" }, opt: { reason: "string" } },
+  unban:             { req: { userId: "id" } },
+  mute:              { req: { userId: "id" }, opt: { durationMs: "number" } },
+  unmute:            { req: { userId: "id" } },
+  create_category:   { req: { name: "string" } },
+  delete_category:   { req: { name: "string" } },
+  create_channel:    { req: { name: "string" } },
+  delete_channel:    { req: { channelName: "string" } },
+  delete_channel_id: { req: { channelId: "id" } },
+  rename_channel:    { req: { channelId: "id", newName: "string" } },
+  send_message:      { req: { channelId: "id", content: "string" } },
+  slowmode:          { req: { channelId: "id", seconds: "number" } },
+  slowmode_current:  { req: { seconds: "number" } },
+  lock_channel:      { req: { channelId: "id" } },
+  unlock_channel:    { req: { channelId: "id" } },
+  remember:          { req: { text: "string" } },
+  forget:            { req: { query: "string" } },
+  list_memory:       { req: {}, opt: { page: "number" } },
+};
+
+function godCoerceField(val, type) {
+  if (type === "string")   return typeof val === "string" && val.trim() ? val.trim() : null;
+  if (type === "boolean")  return typeof val === "boolean" ? val : null;
+  if (type === "number")   { const n = Number(val); return Number.isFinite(n) && n > 0 ? Math.floor(n) : null; }
+  if (type === "position") return val === "top" || val === "bottom" ? val : null;
+  if (type === "id") {
+    const s = String(val ?? "").replace(/[<@!#&>]/g, "").trim();
+    return /^\d{17,20}$/.test(s) ? s : null;
+  }
+  return null;
+}
+
+// Validates one raw AI-suggested action against the schema table. Anything the
+// model hallucinated (unknown action, missing/invalid required field, fake ID)
+// gets silently dropped instead of executed.
+function sanitizeGodAction(raw) {
+  if (!raw || typeof raw !== "object" || typeof raw.action !== "string") return null;
+  const schema = GOD_AI_SCHEMAS[raw.action];
+  if (!schema) return null;
+  const out = { action: raw.action };
+  for (const [field, type] of Object.entries(schema.req || {})) {
+    const v = godCoerceField(raw[field], type);
+    if (v === null) return null;
+    out[field] = v;
+  }
+  for (const [field, type] of Object.entries(schema.opt || {})) {
+    if (raw[field] === undefined || raw[field] === null) continue;
+    const v = godCoerceField(raw[field], type);
+    if (v !== null) out[field] = v;
+  }
+  // Defaults + clamps (mirror what the regex parsers produce)
+  if (out.action === "kick" || out.action === "ban") out.reason = out.reason || "By order of the Family";
+  if (out.action === "mute") out.durationMs = Math.min(out.durationMs || 10 * 60000, 28 * 24 * 60 * 60 * 1000);
+  if (out.action === "slowmode" || out.action === "slowmode_current") out.seconds = Math.min(out.seconds, 21600);
+  if (out.action === "create_channel" || out.action === "create_category") out.name = out.name.toLowerCase().replace(/\s+/g, "-");
+  if (out.action === "rename_channel") out.newName = out.newName.replace(/\s+/g, "-");
+  return out;
+}
+
+// Compact snapshot of the server so the AI can resolve "the memes channel" or
+// "the vip role" into real names/IDs instead of guessing.
+function godAiGuildContext(guild, message) {
+  const roles = [...guild.roles.cache.values()]
+    .filter(r => r.id !== guild.id)
+    .sort((a, b) => b.position - a.position)
+    .slice(0, 60)
+    .map(r => r.name)
+    .join(", ");
+  const channels = [...guild.channels.cache.values()]
+    .filter(c => c.type === 0 || c.type === 4)
+    .slice(0, 100)
+    .map(c => (c.type === 4 ? `category "${c.name}"` : `#${c.name} (id:${c.id})`))
+    .join(", ");
+  return `Current channel id: ${message.channelId}\nExisting roles: ${roles || "none"}\nExisting channels: ${channels || "none"}`;
+}
+
+const GOD_AI_SYSTEM_PROMPT = `You are the command interpreter for a Discord admin bot. The server owner speaks to you in plain, casual English (typos included). Your ONLY job is to translate his message into a JSON list of server actions.
+
+Respond with ONLY a valid JSON object, no other text, in this exact shape:
+{"actions":[{...},{...}]}
+
+If the message is just conversation, a question, a greeting, or anything that is NOT a request to change the server, respond with {"actions":[]}.
+
+AVAILABLE ACTIONS (use these exact field names):
+{"action":"create_role","roleName":"...","color":"red|#hex (optional)","hoist":true/false (optional),"position":"top|bottom (optional)"}
+{"action":"edit_role","roleName":"...","color":"...","hoist":...,"position":"..."} — change an EXISTING role
+{"action":"give_role","userId":"...","roleName":"..."}
+{"action":"remove_role","userId":"...","roleName":"..."}
+{"action":"kick","userId":"...","reason":"..."}
+{"action":"ban","userId":"...","reason":"..."}
+{"action":"unban","userId":"..."}
+{"action":"mute","userId":"...","durationMs":600000} — convert durations to milliseconds ("an hour"=3600000, "a day"=86400000, default 600000)
+{"action":"unmute","userId":"..."}
+{"action":"create_channel","name":"..."}
+{"action":"delete_channel","channelName":"..."} or {"action":"delete_channel_id","channelId":"..."}
+{"action":"create_category","name":"..."} / {"action":"delete_category","name":"..."}
+{"action":"rename_channel","channelId":"...","newName":"..."}
+{"action":"send_message","channelId":"...","content":"..."}
+{"action":"slowmode","channelId":"...","seconds":30} or {"action":"slowmode_current","seconds":30} for "this channel"
+{"action":"lock_channel","channelId":"..."} / {"action":"unlock_channel","channelId":"..."}
+{"action":"remember","text":"..."} / {"action":"forget","query":"..."} / {"action":"list_memory","page":1}
+
+RULES:
+- userId must come from a <@123...> mention or a raw 17-19 digit number in the message. NEVER invent an ID. If an action needs a user and none was mentioned, omit that action.
+- channelId must come from a <#123...> mention in the message or the id listed in the server context. If the owner says "this channel" for lock/slowmode/rename, use the current channel id from the context.
+- For give_role/remove_role/edit_role/delete_channel/delete_category, match names against the EXISTING roles/channels in the context (case-insensitive, closest match). create_role/create_channel may use new names.
+- One sentence can contain several actions — output them all, in order.
+- "shut him up" / "silence him" = mute. "get rid of" a channel = delete. "get rid of"/"throw out" a person = kick. "make him X" where X is a role = give_role.
+- Output raw JSON only. No markdown, no explanations.`;
+
+async function aiParseGodCommands(text, guild, message) {
+  try {
+    const reply = await rateLimitedGroqCall([
+      { role: "system", content: GOD_AI_SYSTEM_PROMPT + "\n\nSERVER CONTEXT:\n" + godAiGuildContext(guild, message) },
+      { role: "user", content: text },
+    ], { maxTokens: 800, temperature: 0, jsonMode: true });
+
+    const jsonMatch = reply.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    let parsed;
+    try { parsed = JSON.parse(jsonMatch[0]); } catch { return null; }
+    const rawActions = Array.isArray(parsed.actions) ? parsed.actions : [];
+    const actions = rawActions.map(sanitizeGodAction).filter(Boolean).slice(0, 10);
+    if (actions.length !== rawActions.length) {
+      console.log(`[GOD AI] Dropped ${rawActions.length - actions.length} invalid action(s) from AI output`);
+    }
+    return { actions };
+  } catch (e) {
+    console.error("[GOD AI PARSE]", e.message);
+    return null;
+  }
 }
 
 async function executeGodAction(cmd, guild, adminCh) {
@@ -2555,6 +2705,148 @@ async function handleGodModeSentence(text, message, guild, adminCh) {
   return await confirmAndRunBatch(parsed, message, guild, adminCh);
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  MASS BAN — "ban @everyone" (Don Clint only, GUILD-SCOPED)
+//  Triggered ONLY by a real @everyone / @here ping in a ban sentence. Operates
+//  strictly on the guild the message was sent in — never touches other servers.
+//  Always excludes Don Clint and the bot, and only targets members the bot is
+//  actually allowed to ban (role hierarchy / ownership handled by .bannable).
+// ══════════════════════════════════════════════════════════════════════════════
+
+// State for the "Expand" button so a click can list every targeted member.
+// Keyed by a short random token embedded in the button's customId.
+const pendingMassBans = new Map(); // token -> { guildId, targets, skipped, requestedBy, createdAt }
+const MASSBAN_STATE_TTL = 5 * 60 * 1000;
+
+function massBanCleanup() {
+  const now = Date.now();
+  for (const [token, v] of pendingMassBans) {
+    if (now - v.createdAt > MASSBAN_STATE_TTL) pendingMassBans.delete(token);
+  }
+}
+
+// Detects "ban everyone" intent: a genuine @everyone/@here ping alongside a ban word.
+function isMassBanRequest(message) {
+  if (!message.guild) return false;
+  if (!message.mentions?.everyone) return false; // true for @everyone AND @here
+  return /\bban\b/i.test(message.content);
+}
+
+// Builds the guild-scoped target list. Returns bannable members plus the ones
+// skipped (owner, higher role than the bot, the Don, the bot itself).
+async function buildMassBanTargets(guild) {
+  await guild.members.fetch().catch(() => {});
+  const botId = guild.client.user.id;
+  const targets = [];
+  const skipped = [];
+  for (const member of guild.members.cache.values()) {
+    const name = member.user.tag || member.user.username;
+    if (member.id === MASTER_ID) { skipped.push({ id: member.id, name, reason: "Don Clint (protected)" }); continue; }
+    if (member.id === botId)     { skipped.push({ id: member.id, name, reason: "Cosa (self)" }); continue; }
+    if (!member.bannable)        { skipped.push({ id: member.id, name, reason: "above my rank / owner" }); continue; }
+    targets.push({ id: member.id, name });
+  }
+  return { targets, skipped };
+}
+
+// Renders the full target list as plain text (used by the Expand button).
+function formatMassBanList(targets, skipped) {
+  const lines = [];
+  lines.push(`TARGETED FOR BAN (${targets.length}):`);
+  targets.forEach((t, i) => lines.push(`${String(i + 1).padStart(3)}. ${t.name} (${t.id})`));
+  if (skipped.length) {
+    lines.push("");
+    lines.push(`SKIPPED (${skipped.length}) — cannot be banned:`);
+    skipped.forEach(s => lines.push(`  - ${s.name} (${s.id}) — ${s.reason}`));
+  }
+  return lines.join("\n");
+}
+
+// Sends the initial confirmation with a count + an Expand button. The full
+// nuclear double-`execute` flow (via pendingGodAction) still applies on top.
+async function promptMassBan(message, guild, adminCh) {
+  const { targets, skipped } = await buildMassBanTargets(guild);
+
+  if (targets.length === 0) {
+    await message.reply("🔫 There's no one here I'm actually able to ban, my Don. (Everyone is either you, me, the owner, or above my rank.)").catch(() => {});
+    return true;
+  }
+
+  const token = Math.random().toString(36).slice(2, 10);
+  pendingMassBans.set(token, { guildId: guild.id, targets, skipped, requestedBy: message.author.id, createdAt: Date.now() });
+  massBanCleanup();
+
+  // Store the resolved list on the pending god action so execute bans exactly
+  // this list (no drift), and mark it nuclear so it needs a double execute.
+  godSetPending("ban_everyone", { action: "ban_everyone", targets, skipped, token, guildId: guild.id }, 1);
+
+  const preview = targets.slice(0, 10).map((t, i) => `${i + 1}. ${t.name}`).join("\n");
+  const more = targets.length > 10 ? `\n…and **${targets.length - 10}** more` : "";
+
+  const embed = new EmbedBuilder()
+    .setColor(0xED4245)
+    .setTitle("🔴 MASS BAN — CONFIRM")
+    .setDescription(
+      `You're about to **ban ${targets.length} member(s)** from **${guild.name}** *(this server only)*.\n` +
+      (skipped.length ? `*${skipped.length} member(s) can't be banned and will be skipped.*\n` : "") +
+      `\n**Preview:**\n${preview}${more}\n\n` +
+      `Click **Expand** to see the full list.\n` +
+      `Say **execute** to proceed (you'll be asked one more time) or **cancel** to abort. *(30s window)*`
+    );
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`massban_expand:${token}`).setLabel(`📜 Expand full list (${targets.length})`).setStyle(ButtonStyle.Secondary)
+  );
+
+  await message.reply({ embeds: [embed], components: [row] }).catch(() => {});
+  if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Mass-ban of ${targets.length} member(s) staged in **${guild.name}** by Don Clint — awaiting confirmation.`).catch(() => {});
+  return true;
+}
+
+// Actually bans the stored list, guild-scoped, streaming progress. Called only
+// after the double-`execute` nuclear confirmation.
+async function runMassBan(cmd, message, guild, adminCh) {
+  const targets = cmd.targets || [];
+  if (cmd.guildId && cmd.guildId !== guild.id) {
+    await message.reply("🔫 Server mismatch — refusing to run this mass-ban here for safety.").catch(() => {});
+    return;
+  }
+  if (targets.length === 0) { await message.reply("🔫 Nothing to ban.").catch(() => {}); return; }
+
+  const progress = await message.reply(`🔴 **Executing mass ban** — 0/${targets.length}...`).catch(() => null);
+  let done = 0, failed = 0;
+  const failures = [];
+
+  for (const t of targets) {
+    if (t.id === MASTER_ID) { continue; } // triple-guard: never the Don
+    try {
+      await guild.members.ban(t.id, { reason: "Mass ban — Don Clint", deleteMessageSeconds: 0 });
+      done++;
+    } catch (e) {
+      failed++;
+      failures.push(`${t.name}: ${e.message}`);
+    }
+    // Edit progress every 5 bans (and on the last one) to avoid rate limits
+    if (progress?.id && ((done + failed) % 5 === 0 || done + failed === targets.length)) {
+      await progress.edit(`🔴 **Executing mass ban** — ${done + failed}/${targets.length} (${done} banned, ${failed} failed)...`).catch(() => {});
+    }
+    await new Promise(r => setTimeout(r, 350)); // gentle pacing for Discord's rate limits
+  }
+
+  const summary =
+    `🔴 **Mass ban complete.**\n` +
+    `✅ Banned: **${done}**\n` +
+    (failed ? `⚠️ Failed: **${failed}**\n` : "") +
+    (cmd.skipped?.length ? `⏭️ Skipped (unbannable): **${cmd.skipped.length}**\n` : "") +
+    `\n*The Family stands cleansed, my Don. 🔫*`;
+
+  if (progress?.id) await progress.edit(summary).catch(() => { message.reply(summary).catch(() => {}); });
+  else await message.reply(summary).catch(() => {});
+
+  if (cmd.token) pendingMassBans.delete(cmd.token);
+  if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] MASS BAN executed in **${guild.name}** by Don Clint — ${done} banned, ${failed} failed.${failures.length ? "\nFailures:\n" + failures.slice(0, 20).join("\n") : ""}`).catch(() => {});
+}
+
 async function handleGodModeMessage(message, guild, adminCh) {
   // Normalize bare numeric Discord IDs (17-19 digits) into <@ID> mention
   // syntax so every <@!?(\d+)> regex in parseGodCommand/parseBareRoleFragment
@@ -2610,6 +2902,10 @@ async function handleGodModeMessage(message, guild, adminCh) {
         return true;
       } else if (pending.step === 2) {
         godClearPending();
+        if (pending.action === "ban_everyone") {
+          await runMassBan(pending.data, message, guild, adminCh);
+          return true;
+        }
         const result = await executeGodAction(pending.data, guild, adminCh);
         await message.reply(result).catch(() => {});
         return true;
@@ -2630,6 +2926,11 @@ async function handleGodModeMessage(message, guild, adminCh) {
     return true;
   }
 
+  // ── Mass ban: "ban @everyone" (guild-scoped, needs @everyone/@here ping) ────
+  if (guild && isMassBanRequest(message)) {
+    return await promptMassBan(message, guild, adminCh);
+  }
+
   // ── Compound single-line sentence: "create a role X, color Y, give it to @z" ──
   {
     const handledSentence = await handleGodModeSentence(text, message, guild, adminCh);
@@ -2647,8 +2948,25 @@ async function handleGodModeMessage(message, guild, adminCh) {
   }
 
   // ── Parse new command ─────────────────────────────────────────────────────
-  const cmd = parseGodCommand(text);
-  if (!cmd) return false; // not a god command — fall through to AI
+  let cmd = parseGodCommand(text);
+
+  // ── AI FALLBACK: regexes didn't understand — let the AI interpret it ──────
+  // This is what makes Loyalty Mode feel like a person: "get rid of that spam
+  // channel", "shut @x up for an hour", "make a vip role, gold, give it to @y"
+  // all work without matching any hard-coded pattern.
+  if (!cmd) {
+    await message.channel.sendTyping().catch(() => {});
+    const ai = await aiParseGodCommands(text, guild, message);
+    if (!ai || ai.actions.length === 0) return false; // pure conversation — fall through to normal AI chat
+    if (ai.actions.length === 1) {
+      cmd = ai.actions[0]; // single action — reuse the normal confirm flow below
+    } else {
+      // Multiple actions in one sentence — run through the batch pipeline
+      // (same risky-action confirmation as everything else)
+      const parsed = ai.actions.map(a => ({ line: describeActionShort(a), cmd: a }));
+      return await confirmAndRunBatch(parsed, message, guild, adminCh);
+    }
+  }
 
   const isNuclear = NUCLEAR_GOD_ACTIONS.has(cmd.action);
 
@@ -5709,6 +6027,11 @@ const LOYALTY_HELP_TEXT =
   `\`cosa show loyalty\` — activate Loyalty Mode\n` +
   `\`cosa loyalty off\` — deactivate\n` +
   `*(auto-deactivates after 10 minutes of inactivity)*\n\n` +
+  `**🗣️ Just talk to me**\n` +
+  `While Loyalty Mode is on, you don't need exact commands — speak naturally and I'll understand:\n` +
+  `*"get rid of that spam channel"*, *"shut @user up for an hour"*,\n` +
+  `*"make a vip role, gold color, and give it to @user"*, *"lock this channel down"*\n` +
+  `Risky things (ban/kick/delete) still ask you to confirm with \`execute\`.\n\n` +
   `**Roles**\n` +
   `\`cosa create role called <name> [color <color>] [hoisted] [position top|bottom]\`\n` +
   `\`cosa give <@user> the <role> role\`\n` +
@@ -6358,6 +6681,30 @@ async function init() {
   client.on(Events.InteractionCreate, async (interaction) => {
     // Activate per-guild config for this interaction
     if (interaction.guild) activateGuildConfig(interaction.guild.id);
+
+    // ── Mass-ban "Expand full list" button ────────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith("massban_expand:")) {
+      const token = interaction.customId.split(":")[1];
+      const state = pendingMassBans.get(token);
+      if (interaction.user.id !== MASTER_ID) {
+        await interaction.reply({ content: "🔫 This isn't yours to open.", ephemeral: true }).catch(() => {});
+        return;
+      }
+      if (!state || state.guildId !== interaction.guildId) {
+        await interaction.reply({ content: "🔫 That list has expired.", ephemeral: true }).catch(() => {});
+        return;
+      }
+      const fullText = formatMassBanList(state.targets, state.skipped);
+      // Ephemeral so only the Don sees it. Attach as a file if it's long.
+      if (fullText.length > 1800) {
+        const file = new AttachmentBuilder(Buffer.from(fullText, "utf8"), { name: "mass-ban-targets.txt" });
+        await interaction.reply({ content: `📜 **${state.targets.length}** member(s) targeted — full list attached:`, files: [file], ephemeral: true }).catch(() => {});
+      } else {
+        await interaction.reply({ content: "```\n" + fullText + "\n```", ephemeral: true }).catch(() => {});
+      }
+      return;
+    }
+
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === "clear") {
         guildHistories.set(interaction.guild?.id || "dm", []);
