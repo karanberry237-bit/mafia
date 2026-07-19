@@ -3463,9 +3463,19 @@ const BETRAYAL_MSGS = [
 ];
 
 // ── Command Detection ─────────────────────────────────────────────────────────
-function detectMasterCommand(text, message) {
+function detectMasterCommand(text, message, explicitTrigger) {
   const lower = text.toLowerCase();
   const targetId = getTargetId(message);
+  // Patterns below that DON'T themselves require the word "cosa" (bestow,
+  // revoke, ban, kick, mute, lockdown, etc.) are single common words that show
+  // up constantly in ordinary conversation ("that guy got banned", "I got
+  // kicked from a game"). They're only safe to treat as commands when the
+  // message was clearly directed at the bot — a mention, a reply to it, or
+  // the word "cosa" somewhere in it. Jarvis Mode processes every message from
+  // Don, triggered or not, so without this gate plain chat would misfire into
+  // real mod actions. When ambiguous, `explicitTrigger` being false means we
+  // fall through to conversation instead of guessing.
+  if (explicitTrigger === undefined) explicitTrigger = isTriggered(message);
 
   if (/\bcosa\s+bank\s+wipe\s+all\b/.test(lower)) return { action: "bank_wipe_all" };
 
@@ -3486,15 +3496,15 @@ function detectMasterCommand(text, message) {
     return { action: "set_diss_chance", percent: m ? parseInt(m[1]) : null };
   }
 
-  const bestowMatch = text.match(/bestow\s+(?:the\s+title\s+of\s+)?(\w[\w\s]*?)\s+(?:upon\s+|to\s+|on\s+)?<@!?(\d+)>/i);
+  const bestowMatch = explicitTrigger && text.match(/bestow\s+(?:the\s+title\s+of\s+)?(\w[\w\s]*?)\s+(?:upon\s+|to\s+|on\s+)?<@!?(\d+)>/i);
   if (bestowMatch) {
     const rankKey = bestowMatch[1].trim();
     const userId = bestowMatch[2];
     return { action: "bestow", rankKey, targetId: userId };
   }
 
-  const revokeMatch = text.match(/revoke\s+(?:the\s+title\s+(?:of\s+)?(?:from\s+)?)?<@!?(\d+)>/i) ||
-                      text.match(/strip\s+(?:the\s+title\s+(?:from\s+)?)?<@!?(\d+)>/i);
+  const revokeMatch = explicitTrigger && (text.match(/revoke\s+(?:the\s+title\s+(?:of\s+)?(?:from\s+)?)?<@!?(\d+)>/i) ||
+                      text.match(/strip\s+(?:the\s+title\s+(?:from\s+)?)?<@!?(\d+)>/i));
   if (revokeMatch && revokeMatch[1]) return { action: "revoke_title", targetId: revokeMatch[1] };
   // Admin economy commands
   if (/\bcosa\s+set\s+balance\b/.test(lower) && targetId) {
@@ -3532,9 +3542,9 @@ function detectMasterCommand(text, message) {
   if (/\bcosa\s+(eco|economy)\b/.test(lower)) return { action: "eco_help" };
   if (/\bcosa\s+(help|commands|cmds)\b/.test(lower)) return { action: "help" };
 
-  const shadowMatch = text.match(/shadow\s+(?:vote|court)\s+<@!?(\d+)>/i);
+  const shadowMatch = explicitTrigger && text.match(/shadow\s+(?:vote|court)\s+<@!?(\d+)>/i);
   if (shadowMatch) return { action: "shadow_vote", targetId: shadowMatch[1] };
-  const bailMatch = text.match(/bail\s+<@!?(\d+)>\s*(.*)/i);
+  const bailMatch = explicitTrigger && text.match(/bail\s+<@!?(\d+)>\s*(.*)/i);
   if (bailMatch) return { action: "bail", targetId: bailMatch[1], condition: bailMatch[2]?.trim() || "an oath of loyalty to the Family" };
   const moodMatch = text.match(/cosa\s+(?:set\s+)?mood\s+(.*)/i);
   if (moodMatch) return { action: "set_mood", moodName: moodMatch[1]?.trim() };
@@ -3590,13 +3600,13 @@ function detectMasterCommand(text, message) {
     return { action: "race", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) };
   }
 
-  if (/\bfamily\s+ledger\b/i.test(lower)) return { action: "family_ledger" };
-  if (/\badd\b.*(to)\s+shadow\s+list/i.test(lower) && targetId) return { action: "shadow_user_add", targetId };
-  if (/\bremove\b.*(from)\s+shadow\s+list/i.test(lower) && targetId) return { action: "shadow_user_remove", targetId };
-  const wordMatch = text.match(/shadow\s+(add|remove)\s+["']?(.+?)["']?$/i);
+  if (explicitTrigger && /\bfamily\s+ledger\b/i.test(lower)) return { action: "family_ledger" };
+  if (explicitTrigger && /\badd\b.*(to)\s+shadow\s+list/i.test(lower) && targetId) return { action: "shadow_user_add", targetId };
+  if (explicitTrigger && /\bremove\b.*(from)\s+shadow\s+list/i.test(lower) && targetId) return { action: "shadow_user_remove", targetId };
+  const wordMatch = explicitTrigger && text.match(/shadow\s+(add|remove)\s+["']?(.+?)["']?$/i);
   if (wordMatch) return { action: wordMatch[1]==="add" ? "shadow_trigger_add" : "shadow_trigger_remove", trigger: wordMatch[2] };
 
-  const timerMatch = text.match(/set\s+timer\s+(deadman|dead\s*man|psychwar|psych\s*war|psychfirst|psych\s*first|inactivity)\s+([\dhms ]+)/i);
+  const timerMatch = explicitTrigger && text.match(/set\s+timer\s+(deadman|dead\s*man|psychwar|psych\s*war|psychfirst|psych\s*first|inactivity)\s+([\dhms ]+)/i);
   if (timerMatch) {
     const timerName = timerMatch[1].toLowerCase().replace(/\s/g, "");
     const timerKey = timerName === "deadman" ? "deadman"
@@ -3607,45 +3617,45 @@ function detectMasterCommand(text, message) {
     if (timerKey) return { action: "set_timer", timerKey, rawTime: timerMatch[2].trim() };
   }
 
-  const chanceMatch = text.match(/set\s+psychchance\s+(summon|lockdown|dm|wanted)\s+(\d+)/i);
+  const chanceMatch = explicitTrigger && text.match(/set\s+psychchance\s+(summon|lockdown|dm|wanted)\s+(\d+)/i);
   if (chanceMatch) return { action: "set_psychchance", event: chanceMatch[1].toLowerCase(), value: parseInt(chanceMatch[2]) };
 
-  if (/\btimers\b/i.test(lower) && !/set/i.test(lower)) return { action: "view_timers" };
-  if (/\bpsychchances\b/i.test(lower) && !/set/i.test(lower)) return { action: "view_psychchances" };
+  if (explicitTrigger && /\btimers\b/i.test(lower) && !/set/i.test(lower)) return { action: "view_timers" };
+  if (explicitTrigger && /\bpsychchances\b/i.test(lower) && !/set/i.test(lower)) return { action: "view_psychchances" };
 
-  if (/\b(purge|nuke)\b/.test(lower) || /\b(delete|clear)\b.*(message|msg|chat)/.test(lower)) {
+  if (explicitTrigger && (/\b(purge|nuke)\b/.test(lower) || /\b(delete|clear)\b.*(message|msg|chat)/.test(lower))) {
     const amountMatch = text.match(/(\d+)/);
     return { action: "purge_confirm", amount: amountMatch ? Math.min(parseInt(amountMatch[1]), 100) : 10 };
   }
-  if (/\bban\b/.test(lower) && targetId) {
+  if (explicitTrigger && /\bban\b/.test(lower) && targetId) {
     const reasonMatch = text.match(/ban\s+<@!?\d+>\s*(.*)/i);
     return { action: "ban_confirm", targetId, reason: reasonMatch?.[1]?.trim() || "Banned by Cosa" };
   }
-  if (/\bkick\b/.test(lower) && targetId) {
+  if (explicitTrigger && /\bkick\b/.test(lower) && targetId) {
     const reasonMatch = text.match(/kick\s+<@!?\d+>\s*(.*)/i);
     return { action: "kick_confirm", targetId, reason: reasonMatch?.[1]?.trim() || "Kicked by Cosa" };
   }
-  if (/\bstrip\b/.test(lower) && targetId) return { action: "strip_confirm", targetId };
-  if (/\btemp\s*exile\b/.test(lower) && targetId) return { action: "temp_exile_confirm", targetId, durationMs: parseDuration(text) };
-  if (/\bexile\b/.test(lower) && targetId) return { action: "exile_confirm", targetId };
-  if (/\bunexile\b/.test(lower) && targetId) return { action: "unexile", targetId };
-  if (/\bfake\s+raid\b/i.test(lower)) return { action: "fake_raid" };
-  if (/\bwatchlist\b/.test(lower) && targetId) return { action: "watchlist", targetId };
-  if (/\bdelete\s+(this|that|it)\b/.test(lower)) return { action: "delete_reply" };
-  if (/\bslime\s*out\b/.test(lower) && targetId) return { action: "slimeout", targetId, durationMs: parseDuration(text) };
-  if (/\broast\b/.test(lower) && targetId) return { action: "roast", targetId };
-  if (/\b(mute|timeout)\b/.test(lower) && targetId) return { action: "mute", targetId, durationMs: parseDuration(text) };
-  if (/\b(unmute|untimeout)\b/.test(lower) && targetId) return { action: "unmute", targetId };
-  if (/\bunban\b/.test(lower) && targetId) return { action: "unban", targetId };
-  if (/\b(clear|reset|wipe)\s*(memory|history|chat)\b/.test(lower)) return { action: "clear_memory" };
-  if (/\bwarn\b/.test(lower) && targetId) {
+  if (explicitTrigger && /\bstrip\b/.test(lower) && targetId) return { action: "strip_confirm", targetId };
+  if (explicitTrigger && /\btemp\s*exile\b/.test(lower) && targetId) return { action: "temp_exile_confirm", targetId, durationMs: parseDuration(text) };
+  if (explicitTrigger && /\bexile\b/.test(lower) && targetId) return { action: "exile_confirm", targetId };
+  if (explicitTrigger && /\bunexile\b/.test(lower) && targetId) return { action: "unexile", targetId };
+  if (explicitTrigger && /\bfake\s+raid\b/i.test(lower)) return { action: "fake_raid" };
+  if (explicitTrigger && /\bwatchlist\b/.test(lower) && targetId) return { action: "watchlist", targetId };
+  if (explicitTrigger && /\bdelete\s+(this|that|it)\b/.test(lower)) return { action: "delete_reply" };
+  if (explicitTrigger && /\bslime\s*out\b/.test(lower) && targetId) return { action: "slimeout", targetId, durationMs: parseDuration(text) };
+  if (explicitTrigger && /\broast\b/.test(lower) && targetId) return { action: "roast", targetId };
+  if (explicitTrigger && /\b(mute|timeout)\b/.test(lower) && targetId) return { action: "mute", targetId, durationMs: parseDuration(text) };
+  if (explicitTrigger && /\b(unmute|untimeout)\b/.test(lower) && targetId) return { action: "unmute", targetId };
+  if (explicitTrigger && /\bunban\b/.test(lower) && targetId) return { action: "unban", targetId };
+  if (explicitTrigger && /\b(clear|reset|wipe)\s*(memory|history|chat)\b/.test(lower)) return { action: "clear_memory" };
+  if (explicitTrigger && /\bwarn\b/.test(lower) && targetId) {
     const reasonMatch = text.match(/warn\s+<@!?\d+>\s*(.*)/i);
     return { action: "warn", targetId, reason: reasonMatch?.[1]?.trim() || "No reason given" };
   }
-  if (/\bwarnings\b/.test(lower) && targetId) return { action: "warnings", targetId };
-  if (/\b(slowmode|slow mode)\b/.test(lower)) return { action: "slowmode", durationMs: parseDuration(text) };
-  if (/\blockdown\b/.test(lower)) return { action: "lockdown" };
-  if (/\bunlock(down)?\b/.test(lower)) return { action: "unlock" };
+  if (explicitTrigger && /\bwarnings\b/.test(lower) && targetId) return { action: "warnings", targetId };
+  if (explicitTrigger && /\b(slowmode|slow mode)\b/.test(lower)) return { action: "slowmode", durationMs: parseDuration(text) };
+  if (explicitTrigger && /\blockdown\b/.test(lower)) return { action: "lockdown" };
+  if (explicitTrigger && /\bunlock(down)?\b/.test(lower)) return { action: "unlock" };
 
   return null;
 }
@@ -6744,13 +6754,17 @@ async function init() {
     }
 
     // When the Don triggers Cosa in any channel, that channel becomes active
-    // for 10 minutes — Cosa replies there instead of redirecting.
-    if (isMaster && !isDM && (isTriggered(message) || repliedToBot)) {
+    // for 10 minutes — Cosa replies there instead of redirecting. While Jarvis
+    // Mode is active, EVERY message from Don counts as a trigger — Jarvis is
+    // meant to hold up his end of a conversation without needing "cosa" said
+    // or the bot pinged first, same as a real assistant would.
+    const jarvisAlwaysOn = isMaster && jarvisModeActive;
+    if (isMaster && !isDM && (isTriggered(message) || repliedToBot || jarvisAlwaysOn)) {
       setMasterRoamingChannel(channelId);
     }
 
     if (silencedChannels.has(channelId) && !isDM) return;
-    if (!isDM && !repliedToBot && !isTriggered(message)) return;
+    if (!isDM && !repliedToBot && !isTriggered(message) && !jarvisAlwaysOn) return;
 
     const userText = message.content.replace(new RegExp(`<@!?${client.user.id}>`, "g"), "").trim();
     if (!userText) return;
@@ -6805,7 +6819,7 @@ async function init() {
     if (!isModUserBool && isToxicMessage(userText)) await handleToxic(message);
 
     if (isModUserBool) {
-      const cmd = detectMasterCommand(userTextNormalized, message);
+      const cmd = detectMasterCommand(userTextNormalized, message, isDM || isTriggered(message) || repliedToBot);
       if (cmd) {
         const actionPermMap = {
           purge_confirm: "canPurge", ban_confirm: "canBan", kick_confirm: "canKick",
