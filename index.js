@@ -1681,7 +1681,7 @@ async function rateLimitedGroqCall(messages, opts = {}) {
 // Even if the model is prompted to reveal them, they get redacted before sending.
 const SENSITIVE_PATTERNS = [];
 function buildSensitivePatterns() {
-  const keys = ["GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "DISCORD_TOKEN", "SUPABASE_URL", "SUPABASE_KEY"];
+  const keys = ["GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "DISCORD_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "TAVILY_API_KEY"];
   for (const key of keys) {
     const val = process.env[key];
     if (val && val.length > 6) {
@@ -1730,6 +1730,94 @@ function enforceDonClintAddress(text) {
   return clean;
 }
 buildSensitivePatterns();
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  WEB SEARCH (Tavily) — Jarvis Mode only. Gives Jarvis a way to answer
+//  questions that need information past the model's training data or that
+//  simply change too often to guess at (weather, scores, breaking news,
+//  "what's going on with X right now"). Cosa's normal persona never searches —
+//  this is scoped to Jarvis specifically, matching how it was asked for.
+// ══════════════════════════════════════════════════════════════════════════════
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
+
+// Heuristic, not an AI classification pass — cheap and fast, and false
+// negatives here just mean Jarvis answers from general knowledge (or admits
+// he doesn't know), which is a safe failure mode. A false positive costs one
+// extra HTTP call, also harmless. No need for anything fancier.
+const WEB_SEARCH_TRIGGERS = [
+  /\bweather\b/i, /\bforecast\b/i, /\btemperature\b/i, /\braining\b/i, /\bsnowing\b/i,
+  /\bwho won\b/i, /\bscore\b/i, /\bgame\s+(last night|yesterday|tonight|today)\b/i,
+  /\blatest news\b/i, /\bbreaking news\b/i, /\bwhat'?s happening\b/i, /\bwhat happened\b/i,
+  /\bnews (about|on)\b/i, /\btoday'?s\b/i, /\bright now\b/i, /\bcurrently\b/i,
+  /\bthis (week|weekend)\b/i, /\brelease date\b/i, /\bcame out\b/i,
+  /\bwho is\b.*\b(president|prime minister|ceo|mayor)\b/i,
+  /\bcurrent (price|value|version)\b/i, /\bexchange rate\b/i,
+  // Explicit asks — "Jarvis search for X" / "look up X" / "any update(s) on X" —
+  // are the clearest possible signal to search, regardless of subject matter.
+  /\bsearch\b/i, /\blook\s*up\b/i, /\bgoogle\b/i, /\bfind out\b/i,
+  /\bupdate[sd]?\s+(on|about|regarding)\b/i, /\blatest\s+on\b/i,
+];
+
+function needsWebSearch(text) {
+  if (!text) return false;
+  return WEB_SEARCH_TRIGGERS.some(p => p.test(text));
+}
+
+// Returns { answer, results: [{title, url, content}] } or null on any failure.
+// Never throws — a search failure should degrade to "answer without it", not
+// break the reply.
+async function webSearch(query) {
+  if (!TAVILY_API_KEY) return null;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: TAVILY_API_KEY,
+        query,
+        search_depth: "basic",
+        include_answer: true,
+        max_results: 4,
+      }),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout));
+    if (!res.ok) throw new Error(`Tavily ${res.status}`);
+    const data = await res.json();
+    return {
+      answer: data.answer || null,
+      results: (data.results || []).map(r => ({
+        title: r.title, url: r.url, content: (r.content || "").slice(0, 300),
+      })),
+    };
+  } catch (err) {
+    console.error("[WEB SEARCH]", err.message);
+    return null;
+  }
+}
+
+// Builds the ephemeral system-message block handed to the model for this one
+// reply. Never persisted to conversation history — search results go stale
+// and shouldn't linger in context for future unrelated turns.
+function formatSearchContext(query, search) {
+  if (!TAVILY_API_KEY) {
+    return `\n\nThe user just asked something that likely needs live/current information ("${query}"), but no web search is configured. ` +
+      `Answer from general knowledge if you can, but if the answer truly depends on real-time data (weather, live scores, breaking news), ` +
+      `say plainly that you don't have live web access right now instead of guessing or making something up.`;
+  }
+  if (!search || (!search.answer && search.results.length === 0)) {
+    return `\n\nA live web search for "${query}" was attempted but returned nothing useful. Say you looked but came up empty rather than guessing.`;
+  }
+  const sourceLines = search.results
+    .map((r, i) => `${i + 1}. ${r.title} — ${r.content} (${r.url})`)
+    .join("\n");
+  return `\n\nLIVE WEB SEARCH RESULTS (retrieved just now for "${query}"):\n` +
+    (search.answer ? `Quick answer: ${search.answer}\n` : "") +
+    (sourceLines ? `Sources:\n${sourceLines}\n` : "") +
+    `Use this to answer the user's question, in your own voice — don't just paste it in. ` +
+    `If it doesn't actually answer what they asked, say so honestly instead of forcing an answer out of it.`;
+}
 
 // ── Per-guild conversation history ────────────────────────────────────────────
 // guildId -> [{role, content}]. DMs (no guild) share a "dm" bucket.
@@ -1799,6 +1887,13 @@ async function getAIResponse(guildId, channelId, userMessage, username, systemOv
     ...getHistory(guildId),
   ];
   if (speakerCard) messages.push({ role: "system", content: speakerCard });
+
+  // Jarvis-only: if this looks like it needs current/live info, search the
+  // web and hand the results to the model as one-off context for this reply.
+  if (jarvisModeActive && needsWebSearch(userMessage)) {
+    const search = await webSearch(userMessage);
+    messages.push({ role: "system", content: formatSearchContext(userMessage, search) });
+  }
 
   const reply = await rateLimitedGroqCall(messages);
   let safeReply = sanitizeOutput(reply);
@@ -1979,7 +2074,9 @@ CRITICAL — DO NOT FABRICATE ACTIONS:
 You have NO ability to change the server from a conversational reply. Server changes only happen through the command system, which reports its own results separately.
 Therefore: NEVER say you created, made, assigned, gave, removed, deleted, renamed, banned, kicked, muted, locked, hoisted, or changed anything.
 NEVER use phrases like "Creating role...", "Assigning it to...", "Done, sir", "Consider it handled", "Right away, sir — banning them now" as a plain chat reply.
-If you are replying conversationally, the action did NOT happen. If the owner gave what sounds like an order, say you didn't register it as an instruction and ask him to say it again.`;
+If you are replying conversationally, the action did NOT happen. If the owner gave what sounds like an order, say you didn't register it as an instruction and ask him to say it again.
+
+WEB ACCESS: You normally have no internet access and can't know anything current (today's weather, live scores, breaking news) — say so plainly rather than guessing when asked. The ONE exception: if a message right before your reply is tagged "LIVE WEB SEARCH RESULTS", a search was just run for you — use that information to answer, in your own voice, and don't claim you looked it up yourself if that block isn't present.`;
    
 function jarvisResetInactivity(onExpire) {
   if (jarvisInactivityTimer) clearTimeout(jarvisInactivityTimer);
@@ -3228,6 +3325,10 @@ function isTriggered(message) {
   if (!message.guild) return true;
   if (message.mentions.has(client.user)) return true;
   if (/\bcosa\b/i.test(message.content)) return true;
+  // "Jarvis" only counts as a name while the persona is actually active —
+  // otherwise the word is just ordinary conversation (movie talk, etc.) and
+  // shouldn't wake the bot up.
+  if (jarvisModeActive && /\bjarvis\b/i.test(message.content)) return true;
   return false;
 }
 function isStopCommand(text) { return /\bcosa\s+(stop|shut up|be quiet|go silent|silence|enough)\b/i.test(text); }
@@ -3461,6 +3562,38 @@ const BETRAYAL_MSGS = [
   "{user} has **ABANDONED THEIR POST**. 😤\n*The Family does not mourn traitors.*",
   "{user} chose to **WALK AWAY** from the Family. 👋\n*Cosa has noted it. Don Clint has noted it. History has noted it.*",
 ];
+
+// ── Ambient command classification ────────────────────────────────────────────
+// Jarvis Mode runs detectMasterCommand's regex table on every message from Don,
+// triggered or not (see explicitTrigger below). For an untriggered message the
+// regexes are gated off entirely, which means a legitimately-phrased command
+// that never says "cosa" and isn't a mention/reply/DM just gets silently
+// dropped into conversation. Rather than open the regex gate on plain keyword
+// hits (too many false positives — "that guy got banned" isn't an order), ask
+// a fast/cheap AI call the same yes-or-no question aiParseGodCommands answers
+// for the free-form action table: is this actually a command directed at the
+// bot? Same fail-closed philosophy — unsure means false, fall through to chat.
+const AMBIENT_COMMAND_CLASSIFY_PROMPT = `You are a classifier for a Discord moderation bot's assistant persona (Jarvis). Don Clint, the server owner, is talking to Jarvis and every one of his messages is being read, even though most are just normal conversation and not aimed at the bot at all.
+
+Decide whether THIS message is Don Clint actually issuing a moderation/server-management command — things like: ban, kick, mute/timeout, unmute, unban, warn, view warnings, strip a title/role, exile/temp exile/unexile, watchlist, roast, purge/delete/nuke messages, slowmode, lockdown/unlock, bestow/revoke a title, shadow vote/court/list add/remove, bail, set or view a timer or chance, clear memory, delete the bot's last message, or trigger a fake raid — as opposed to him chatting, joking, telling a story, or discussing those same words/people without directing an action at the bot right now.
+
+Respond with raw JSON only, no markdown, no explanation: {"isCommand": true} or {"isCommand": false}. When unsure, prefer false — a missed command can just be repeated, but a false positive risks an unwanted mod action.`;
+
+async function aiClassifyAmbientCommand(text) {
+  try {
+    const reply = await rateLimitedGroqCall([
+      { role: "system", content: AMBIENT_COMMAND_CLASSIFY_PROMPT },
+      { role: "user", content: text },
+    ], { maxTokens: 20, temperature: 0, jsonMode: true });
+    const jsonMatch = reply.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return false;
+    const parsed = JSON.parse(jsonMatch[0]);
+    return parsed.isCommand === true;
+  } catch (e) {
+    console.error("[AMBIENT CMD CLASSIFY]", e.message);
+    return false; // fail closed — treat as conversation, not a command
+  }
+}
 
 // ── Command Detection ─────────────────────────────────────────────────────────
 function detectMasterCommand(text, message, explicitTrigger) {
@@ -6819,7 +6952,15 @@ async function init() {
     if (!isModUserBool && isToxicMessage(userText)) await handleToxic(message);
 
     if (isModUserBool) {
-      const cmd = detectMasterCommand(userTextNormalized, message, isDM || isTriggered(message) || repliedToBot);
+      let explicitTrigger = isDM || isTriggered(message) || repliedToBot;
+      // Ambient Jarvis message — no mention/reply/DM/"cosa" to gate the regex
+      // table open. Ask the fast/cheap classifier whether it's actually a
+      // command before letting detectMasterCommand's patterns run at all;
+      // explicitly-triggered messages skip this and keep the regex fast-path.
+      if (!explicitTrigger && jarvisAlwaysOn) {
+        explicitTrigger = await aiClassifyAmbientCommand(userTextNormalized);
+      }
+      const cmd = detectMasterCommand(userTextNormalized, message, explicitTrigger);
       if (cmd) {
         const actionPermMap = {
           purge_confirm: "canPurge", ban_confirm: "canBan", kick_confirm: "canKick",
