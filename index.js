@@ -6859,9 +6859,18 @@ async function init() {
     // ── GOD MODE / JARVIS MODE: Handle all messages from Don while either is active ──
     if (isMaster && (godModeActive || jarvisModeActive)) {
       const adminCh = message.guild?.channels.cache.get(LOCKDOWN_CHANNEL_ID);
-      const handled = await handleGodModeMessage(message, message.guild, adminCh);
-      if (handled) return;
-      // Not a god command — fall through to normal AI chat below (Jarvis persona applies if active)
+      try {
+        const handled = await handleGodModeMessage(message, message.guild, adminCh);
+        if (handled) return;
+      } catch (err) {
+        // Previously an exception here (bad JSON from the AI parser, Groq
+        // timeout, etc.) escaped straight out of the MessageCreate callback and
+        // was swallowed by the global unhandledRejection logger — the handler
+        // died before ever reaching getAIResponse, so the bot showed "typing"
+        // and then simply never replied. Now it degrades to normal chat.
+        console.error("[GOD/JARVIS HANDLER ERROR]", err.stack || err.message);
+      }
+      // Not a god command (or it errored) — fall through to normal AI chat below
     }
 
 
@@ -6895,6 +6904,12 @@ async function init() {
     if (isMaster && !isDM && (isTriggered(message) || repliedToBot || jarvisAlwaysOn)) {
       setMasterRoamingChannel(channelId);
     }
+
+    // While Jarvis is active, Cosa is Don Clint's assistant and nobody else's.
+    // Everyone else is ignored completely from here down — no chat, no public
+    // commands, no mod commands. Passive systems ABOVE this line (slur filter,
+    // AFK notices, trivia scoring, chat coin rewards) still run for everyone.
+    if (jarvisModeActive && !isMaster) return;
 
     if (silencedChannels.has(channelId) && !isDM) return;
     if (!isDM && !repliedToBot && !isTriggered(message) && !jarvisAlwaysOn) return;
@@ -6952,14 +6967,15 @@ async function init() {
     if (!isModUserBool && isToxicMessage(userText)) await handleToxic(message);
 
     if (isModUserBool) {
-      let explicitTrigger = isDM || isTriggered(message) || repliedToBot;
-      // Ambient Jarvis message — no mention/reply/DM/"cosa" to gate the regex
-      // table open. Ask the fast/cheap classifier whether it's actually a
-      // command before letting detectMasterCommand's patterns run at all;
-      // explicitly-triggered messages skip this and keep the regex fast-path.
-      if (!explicitTrigger && jarvisAlwaysOn) {
-        explicitTrigger = await aiClassifyAmbientCommand(userTextNormalized);
-      }
+      const explicitTrigger = isDM || isTriggered(message) || repliedToBot;
+      // NOTE: aiClassifyAmbientCommand() used to be called here for ambient
+      // Jarvis messages. It was a second Groq round-trip asking almost exactly
+      // what aiParseGodCommands() (already run above, inside
+      // handleGodModeMessage) had just answered — so every Jarvis message cost
+      // three sequential AI calls before a reply could be sent. If execution
+      // reaches this line while Jarvis is active, handleGodModeMessage has
+      // already decided it wasn't a command; there is nothing left to classify.
+      try {
       const cmd = detectMasterCommand(userTextNormalized, message, explicitTrigger);
       if (cmd) {
         const actionPermMap = {
@@ -6980,6 +6996,10 @@ async function init() {
           if (result) await message.reply(result).catch(()=>{});
         } catch (err) { await message.reply(`🔫 Something went wrong: ${err.message}`).catch(()=>{}); }
         return;
+      }
+      } catch (err) {
+        console.error("[MASTER CMD DETECT ERROR]", err.stack || err.message);
+        // fall through to normal chat rather than dying silently
       }
     }
 
