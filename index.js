@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits, Events, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, ChannelType, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle } = require("discord.js");
+const { Client, GatewayIntentBits, Events, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle } = require("discord.js");
 const Groq = require("groq-sdk");
 const { AttachmentBuilder } = require("discord.js");
 const chessModule = require("./chess.js");
@@ -271,22 +271,18 @@ const FRIEND_ID = "860781227362877460"; // XxProGodMasterDioxX — Cosa's drinki
 // bot's Discord application/user ID. Leave unset to disable the feature.
 const RIVAL_BOT_ID = process.env.RIVAL_BOT_ID || null;
 
-// These used to be hardcoded IDs from the old server. They're now populated by
-// the "Cosa setup" command (creates "The Hideout" category + everything Cosa
-// needs) and persisted to Supabase, then reloaded into these on every boot.
-// Until setup is run, these stay null and any feature that needs them no-ops safely.
+// These are populated by Boss-rank+ members running "cosa set channel <type>"
+// in whichever channel they want designated, and persisted to Supabase, then
+// reloaded into these on every boot. Until set, they stay null and any
+// feature that needs them no-ops safely.
 let ELDER_ROLE_ID = null;
 let LOCKDOWN_CHANNEL_ID = null;      // was LOCKDOWN_CHANNEL_ID — admin/nuclear-lockdown log channel
 let GENERAL_CHANNEL_ID = null;
-let FAMILY_LIST_CHANNEL_ID = null;   // was FAMILY_LIST_CHANNEL_ID
 let EXILE_CHANNEL_ID = null;
 let VERIFIED_ROLE_ID = null;
 let HELPER_ROLE_ID = null;
 let MOD_ROLE_ID_INACTIVITY = null;
-let HOLDING_CHANNEL_ID = null;
 let SHADOW_COURT_ID = null;
-let INSIDE_MAN_ID = null;           // "Inside Man" wall
-let CHESS_CHANNEL_ID = null;
 let MOD_LOG_CHANNEL_ID = null;
 let TALK_CHANNEL_ID = null;          // the only channel where casual AI chat is allowed
 let BOT_COMMANDS_CHANNEL_ID = null;  // the only channel where public/commoner commands work
@@ -313,15 +309,11 @@ function activateGuildConfig(guildId) {
   ELDER_ROLE_ID = cfg.ELDER_ROLE_ID || null;
   LOCKDOWN_CHANNEL_ID = cfg.LOCKDOWN_CHANNEL_ID || null;
   GENERAL_CHANNEL_ID = cfg.GENERAL_CHANNEL_ID || null;
-  FAMILY_LIST_CHANNEL_ID = cfg.FAMILY_LIST_CHANNEL_ID || null;
   EXILE_CHANNEL_ID = cfg.EXILE_CHANNEL_ID || null;
   VERIFIED_ROLE_ID = cfg.VERIFIED_ROLE_ID || null;
   HELPER_ROLE_ID = cfg.HELPER_ROLE_ID || null;
   MOD_ROLE_ID_INACTIVITY = cfg.MOD_ROLE_ID_INACTIVITY || null;
-  HOLDING_CHANNEL_ID = cfg.HOLDING_CHANNEL_ID || null;
   SHADOW_COURT_ID = cfg.SHADOW_COURT_ID || null;
-  INSIDE_MAN_ID = cfg.INSIDE_MAN_ID || null;
-  CHESS_CHANNEL_ID = cfg.CHESS_CHANNEL_ID || null;
   MOD_LOG_CHANNEL_ID = cfg.MOD_LOG_CHANNEL_ID || null;
   TALK_CHANNEL_ID = cfg.TALK_CHANNEL_ID || null;
   BOT_COMMANDS_CHANNEL_ID = cfg.BOT_COMMANDS_CHANNEL_ID || null;
@@ -333,10 +325,9 @@ function activateGuildConfig(guildId) {
 // just written into the globals.
 function captureGuildConfig(guildId) {
   guildConfigs.set(guildId, {
-    ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID, FAMILY_LIST_CHANNEL_ID,
+    ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID,
     EXILE_CHANNEL_ID, VERIFIED_ROLE_ID, HELPER_ROLE_ID, MOD_ROLE_ID_INACTIVITY,
-    HOLDING_CHANNEL_ID, SHADOW_COURT_ID, INSIDE_MAN_ID, CHESS_CHANNEL_ID,
-    MOD_LOG_CHANNEL_ID, TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
+    SHADOW_COURT_ID, MOD_LOG_CHANNEL_ID, TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
   });
 }
 
@@ -350,9 +341,9 @@ async function loadSetupConfig() {
       // Migrate legacy single-key config if it exists
       const { data: legacyData } = await supabase.from("empire_data").select("value").eq("key", SETUP_CONFIG_KEY).single();
       if (legacyData?.value) {
-        console.log("⚠️ Legacy single-guild setup config found — it will be migrated when that guild runs Cosa setup again.");
+        console.log("⚠️ Legacy single-guild setup config found — it will be migrated once that guild sets its channels again.");
       } else {
-        console.log("⚠️ No setup config found yet — run **Cosa setup** in your server.");
+        console.log("⚠️ No channel config found yet — Boss rank+ should run **cosa set channel <type>** in each channel.");
       }
       return;
     }
@@ -363,15 +354,11 @@ async function loadSetupConfig() {
         ELDER_ROLE_ID: v.ELDER_ROLE_ID || null,
         LOCKDOWN_CHANNEL_ID: v.LOCKDOWN_CHANNEL_ID || null,
         GENERAL_CHANNEL_ID: v.GENERAL_CHANNEL_ID || null,
-        FAMILY_LIST_CHANNEL_ID: v.FAMILY_LIST_CHANNEL_ID || null,
         EXILE_CHANNEL_ID: v.EXILE_CHANNEL_ID || null,
         VERIFIED_ROLE_ID: v.VERIFIED_ROLE_ID || null,
         HELPER_ROLE_ID: v.HELPER_ROLE_ID || null,
         MOD_ROLE_ID_INACTIVITY: v.MOD_ROLE_ID_INACTIVITY || null,
-        HOLDING_CHANNEL_ID: v.HOLDING_CHANNEL_ID || null,
         SHADOW_COURT_ID: v.SHADOW_COURT_ID || null,
-        INSIDE_MAN_ID: v.INSIDE_MAN_ID || null,
-        CHESS_CHANNEL_ID: v.CHESS_CHANNEL_ID || null,
         MOD_LOG_CHANNEL_ID: v.MOD_LOG_CHANNEL_ID || null,
         TALK_CHANNEL_ID: v.TALK_CHANNEL_ID || null,
         BOT_COMMANDS_CHANNEL_ID: v.BOT_COMMANDS_CHANNEL_ID || null,
@@ -379,7 +366,7 @@ async function loadSetupConfig() {
     }
     console.log("✅ Setup configs loaded for " + data.length + " guild(s) — Cosa knows where everything is.");
   } catch (e) {
-    console.log("⚠️ No setup config found yet — run **Cosa setup** in your server.");
+    console.log("⚠️ No channel config found yet — Boss rank+ should run **cosa set channel <type>** in each channel.");
   }
 }
 
@@ -389,10 +376,9 @@ async function saveSetupConfig(guildId) {
     await supabase.from("empire_data").upsert({
       key: SETUP_CONFIG_KEY + "_" + guildId,
       value: {
-        ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID, FAMILY_LIST_CHANNEL_ID,
+        ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID,
         EXILE_CHANNEL_ID, VERIFIED_ROLE_ID, HELPER_ROLE_ID, MOD_ROLE_ID_INACTIVITY,
-        HOLDING_CHANNEL_ID, SHADOW_COURT_ID, INSIDE_MAN_ID, CHESS_CHANNEL_ID, MOD_LOG_CHANNEL_ID,
-        TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
+        SHADOW_COURT_ID, MOD_LOG_CHANNEL_ID, TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
       },
     }, { onConflict: "key" });
     // Also update in-memory guildConfigs so activateGuildConfig works immediately
@@ -400,69 +386,37 @@ async function saveSetupConfig(guildId) {
   } catch (e) { console.error("[SETUP CONFIG SAVE]", e.message); }
 }
 
-// Runs "Cosa setup" — creates "The Hideout" category and every channel/role Cosa
-// needs to function, then saves the resulting IDs. Safe to re-run: it skips
-// anything that already exists by name, so it won't create duplicates.
-async function runCosaSetup(guild) {
-  const created = [];
-  const failed = [];
-  let category = guild.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name.toLowerCase() === "the hideout");
-  if (!category) {
-    category = await guild.channels.create({ name: "The Hideout", type: ChannelType.GuildCategory });
-    created.push("category: The Hideout");
-  }
+// Sets one of the channel-role config slots to the given channel, for THIS
+// guild, and persists it. Replaces the old one-shot "cosa setup" — Boss-rank+
+// members designate each channel individually via a command run inside it.
+const CHANNEL_SETTERS = {
+  general:     { label: "general chat",        set: (id) => { GENERAL_CHANNEL_ID = id; } },
+  lockdown:    { label: "lockdown/admin log",   set: (id) => { LOCKDOWN_CHANNEL_ID = id; } },
+  exile:       { label: "exile (doghouse)",     set: (id) => { EXILE_CHANNEL_ID = id; } },
+  shadowcourt: { label: "shadow court",         set: (id) => { SHADOW_COURT_ID = id; } },
+  modlogs:     { label: "mod action log",       set: (id) => { MOD_LOG_CHANNEL_ID = id; } },
+  talk:        { label: "talk-with-cosa",       set: (id) => { TALK_CHANNEL_ID = id; } },
+  botcommands: { label: "bot-commands",         set: (id) => { BOT_COMMANDS_CHANNEL_ID = id; } },
+};
 
-  // Wrapped so one failed create (rate limit, missing perms, etc.) doesn't abort
-  // every channel/role that comes after it. Small delay between creates avoids
-  // tripping Discord's aggressive create-burst throttling on brand new servers.
-  async function ensureChannel(name, topic) {
-    let ch = guild.channels.cache.find(c => c.parentId === category.id && c.name === name);
-    if (ch) return ch.id;
-    try {
-      ch = await guild.channels.create({ name, type: ChannelType.GuildText, parent: category.id, topic });
-      created.push(`channel: #${name}`);
-      await new Promise(r => setTimeout(r, 350));
-      return ch.id;
-    } catch (e) {
-      console.error(`[SETUP] Failed to create #${name}:`, e.message);
-      failed.push(`#${name} (${e.message})`);
-      return null;
-    }
-  }
+// Maps the many ways a mod might phrase a channel type ("bot commands",
+// "bot-commands", "mod logs", ...) onto the canonical CHANNEL_SETTERS key.
+const CHANNEL_TYPE_ALIASES = {
+  general: "general", "family-hq": "general", familyhq: "general",
+  lockdown: "lockdown", "lockdown-log": "lockdown", adminlog: "lockdown", "admin-log": "lockdown",
+  exile: "exile", doghouse: "exile", "the-doghouse": "exile",
+  shadowcourt: "shadowcourt", "shadow-court": "shadowcourt", court: "shadowcourt", "the-sit-down": "shadowcourt",
+  modlogs: "modlogs", "mod-logs": "modlogs", modlog: "modlogs", "mod-log": "modlogs",
+  talk: "talk", "talk-with-cosa": "talk", talkwithcosa: "talk",
+  botcommands: "botcommands", "bot-commands": "botcommands", commands: "botcommands",
+};
 
-  async function ensureRole(name, opts = {}) {
-    let role = guild.roles.cache.find(r => r.name === name);
-    if (role) return role.id;
-    try {
-      role = await guild.roles.create({ name, ...opts });
-      created.push(`role: ${name}`);
-      await new Promise(r => setTimeout(r, 350));
-      return role.id;
-    } catch (e) {
-      console.error(`[SETUP] Failed to create role ${name}:`, e.message);
-      failed.push(`role ${name} (${e.message})`);
-      return null;
-    }
-  }
-
-  // Reuse the server's existing #general if there is one; otherwise make one.
-  // (Previously this was hardcoded to a channel ID from the original server,
-  // which doesn't exist in any other guild — that's why setup looked broken.)
-  const existingGeneral = guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name === "general");
-  GENERAL_CHANNEL_ID = existingGeneral ? existingGeneral.id : await ensureChannel("family-hq", "General chat for the whole Family");
-  LOCKDOWN_CHANNEL_ID = await ensureChannel("lockdown-log", "Nuclear lockdown alerts and logs");
-  // family-list channel removed — use 'cosa family ledger' instead
-  EXILE_CHANNEL_ID = await ensureChannel("the-doghouse", "Where the exiled wait");
-  HOLDING_CHANNEL_ID = await ensureChannel("holding", "Holding cell for pending verification");
-  SHADOW_COURT_ID = await ensureChannel("the-sit-down", "Anonymous trials — vote exile or mercy");
-  INSIDE_MAN_ID = await ensureChannel("inside-man", "Cosa's tips and predictions");
-  CHESS_CHANNEL_ID = await ensureChannel("chess", "Play chess with Cosa or the Family");
-  MOD_LOG_CHANNEL_ID = await ensureChannel("mod-logs", "Moderation action log");
-  TALK_CHANNEL_ID = await ensureChannel("talk-with-cosa", "The only place to chat with Cosa — commands still work everywhere else");
-  BOT_COMMANDS_CHANNEL_ID = await ensureChannel("bot-commands", "The only place for member commands — gambling, economy, chess, etc. Mod commands still work everywhere.");
-
-  await saveSetupConfig(guild.id);
-  return { created, failed };
+async function setChannelType(guildId, type, channelId) {
+  const entry = CHANNEL_SETTERS[type];
+  if (!entry) return null;
+  entry.set(channelId);
+  await saveSetupConfig(guildId);
+  return entry.label;
 }
 
 function getInactivityConfig(timeLimitMs) {
@@ -499,10 +453,10 @@ function setInactivityTimers(game, channelId, guild) {
 }
 
 async function processChessQueue(guild) {
-  if (chessModule.getGame(CHESS_CHANNEL_ID)) return; // game still running
+  if (chessModule.getGame(BOT_COMMANDS_CHANNEL_ID)) return; // game still running
   if (chessQueue.length === 0) return;
   const next = chessQueue.shift();
-  const ch = guild.channels.cache.get(CHESS_CHANNEL_ID);
+  const ch = guild.channels.cache.get(BOT_COMMANDS_CHANNEL_ID);
   if (!ch) return;
   if (next.type === "bot") {
     await ch.send(`🔫 <@${next.challengerId}> you're up! Starting your game vs Cosa...`).catch(() => {});
@@ -513,12 +467,12 @@ async function processChessQueue(guild) {
     game.botDifficulty = next.difficulty;
     const playerIsWhite = Math.random() < 0.5;
     if (!playerIsWhite) { const tmp = game.white; game.white = game.black; game.black = tmp; }
-    chessModule.setGame(CHESS_CHANNEL_ID, game);
+    chessModule.setGame(BOT_COMMANDS_CHANNEL_ID, game);
     if (!next.timeLimit) {
       game.inactivityTimeout = setTimeout(async () => {
-        if (chessModule.getGame(CHESS_CHANNEL_ID)) {
+        if (chessModule.getGame(BOT_COMMANDS_CHANNEL_ID)) {
           clearTurnTimer(game);
-          chessModule.deleteGame(CHESS_CHANNEL_ID);
+          chessModule.deleteGame(BOT_COMMANDS_CHANNEL_ID);
           await ch.send("⏱️ **Chess match abandoned** — no moves for 10 minutes. The board has been cleared.").catch(() => {});
           processChessQueue(guild);
         }
@@ -554,7 +508,7 @@ ${chessModule.getStatusLine(game)}`, files: [att2] }).catch(() => {});
     } else {
       await ch.send(`♟️ Your move! Use **Cosa move [from] [to]** — e.g. \`Cosa move e2 e4\``).catch(() => {});
     }
-    if (next.timeLimit) startTurnTimer(game, CHESS_CHANNEL_ID, client, async (cId, g) => {
+    if (next.timeLimit) startTurnTimer(game, BOT_COMMANDS_CHANNEL_ID, client, async (cId, g) => {
       const loser = g.chess.turn() === "w" ? g.white : g.black;
       const winner = g.chess.turn() === "w" ? g.black : g.white;
       clearTurnTimer(g); chessModule.deleteGame(cId);
@@ -574,12 +528,12 @@ ${loser.id === "BOT" ? `**${loser.name}**` : `<@${loser.id}>`} ran out of time!
       `<@${next.opponentId}> — say **Cosa chess accept** to play or **Cosa chess decline** to skip.
 *You have 2 minutes.*`
     ).catch(() => {});
-    chessModule.createChallenge(CHESS_CHANNEL_ID, next.challengerId, next.challengerName, next.opponentId, next.opponentName);
-    chessModule.getChallenge(CHESS_CHANNEL_ID).timeLimit = next.timeLimit || null;
+    chessModule.createChallenge(BOT_COMMANDS_CHANNEL_ID, next.challengerId, next.challengerName, next.opponentId, next.opponentName);
+    chessModule.getChallenge(BOT_COMMANDS_CHANNEL_ID).timeLimit = next.timeLimit || null;
     // If they don't respond in 60s, skip to next
     setTimeout(async () => {
-      if (chessModule.getChallenge(CHESS_CHANNEL_ID)) {
-        chessModule.deleteChallenge(CHESS_CHANNEL_ID);
+      if (chessModule.getChallenge(BOT_COMMANDS_CHANNEL_ID)) {
+        chessModule.deleteChallenge(BOT_COMMANDS_CHANNEL_ID);
         await ch.send(`⏱️ <@${next.opponentId}> didn't respond in time. Skipping to next in queue.`).catch(() => {});
         processChessQueue(guild);
       }
@@ -652,31 +606,12 @@ function startMoodSystem(guild) {
       const newMoods = MOODS.filter(m => m.name !== oldMood.name);
       currentMood = newMoods[Math.floor(Math.random() * newMoods.length)];
       moodSetAt = Date.now();
-      const insideManChannel = guild.channels.cache.get(INSIDE_MAN_ID);
-      if (insideManChannel) {
-        await insideManChannel.send(
-          `${currentMood.emoji} **COSA'S MOOD HAS SHIFTED** ${currentMood.emoji}\n` +
-          `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-          `*The winds of the Family change...*\n\n` +
-          `**${currentMood.name}**\n${currentMood.desc}\n\n` +
-          `*The Family feels it.*`
-        ).catch(() => {});
-      }
       // Rare mood swing (15% chance of a second swing within 30 min)
       if (Math.random() < 0.15) {
         setTimeout(async () => {
           const swingMood = MOODS.filter(m => m.name !== currentMood.name)[Math.floor(Math.random() * (MOODS.length - 1))];
           currentMood = swingMood;
           moodSetAt = Date.now();
-          if (insideManChannel) {
-            await insideManChannel.send(
-              `⚠️ **MOOD SWING DETECTED** ⚠️\n` +
-              `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-              `*Cosa's temperament shifts without warning...*\n\n` +
-              `${currentMood.emoji} **${currentMood.name}**\n${currentMood.desc}\n\n` +
-              `*Even the Family did not see this coming.*`
-            ).catch(() => {});
-          }
         }, (20 + Math.random() * 10) * 60 * 1000);
       }
       moodInterval();
@@ -684,49 +619,6 @@ function startMoodSystem(guild) {
   };
   moodInterval();
   console.log(`🎭 Mood system started — current mood: ${currentMood.name}`);
-}
-
-// ── Inside Man Tips System ──────────────────────────────────────────────────
-function startInsideManTips(guild) {
-  // Post a tip every 6-10 hours
-  const tipInterval = () => {
-    const delay = (6 + Math.random() * 4) * 60 * 60 * 1000;
-    setTimeout(async () => {
-      const insideManChannel = guild.channels.cache.get(INSIDE_MAN_ID);
-      if (!insideManChannel) { tipInterval(); return; }
-      try {
-        const members = guild.members.cache.filter(m => !m.user.bot && m.id !== MASTER_ID);
-        const randomMember = members.random();
-        const madeMembers = [...familyRoster.entries()].map(([id, rank]) => `<@${id}> (${rank})`).join(", ") || "none";
-        const warned = [...warningStore.entries()].filter(([,v]) => v.count > 0).map(([id,v]) => `<@${id}> (${v.count} warnings)`).join(", ") || "none";
-        const prompt = `You are Cosa's Inside Man — a hushed informant feeding tips about the server and its members.
-Current mood of Cosa: ${currentMood.name} — ${currentMood.desc}
-Notable members: ${randomMember ? randomMember.user.username : "unknown faces"}
-Made members of the Family: ${madeMembers}
-Recently warned: ${warned}
-Exiled count: ${exileStore.size}
-Generate a 3-4 sentence tip-off that references real details above in a hushed, streetwise mafia way.
-Make it ominous, sharp, and feel like real intel from a man on the inside. End with one cryptic warning line in italics.
-NEVER mention API keys, tokens, or any technical information.`;
-        const tip = await rateLimitedGroqCall([
-          { role: "system", content: prompt },
-          { role: "user", content: "Give the Inside Man's tip for this hour." }
-        ]);
-        const safeTip = sanitizeOutput(tip);
-        await insideManChannel.send(
-          `🔮 **THE INSIDE MAN TALKS** 🔮\n` +
-          `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-          `${currentMood.emoji} *Cosa is ${currentMood.name} as these words are written...*\n\n` +
-          `${safeTip}\n\n` +
-          `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-          `*👁️ The Family sees what mortals cannot.*`
-        ).catch(() => {});
-      } catch (e) { console.error("[INSIDE MAN]", e.message); }
-      tipInterval();
-    }, delay);
-  };
-  tipInterval();
-  console.log("🔮 Inside Man tips system started");
 }
 
 // ── Shadow Court System ───────────────────────────────────────────────────────
@@ -2230,6 +2122,66 @@ function parseGodSentence(text) {
   return anyResolved ? resolved : null;
 }
 
+// ── Explicit permission grants ────────────────────────────────────────────────
+// Roles/channels must NEVER pick up permissions the human didn't ask for.
+// Discord's API defaults a new role's permissions to whatever @everyone has in
+// that guild if you don't pass a `permissions` field at all — which is exactly
+// how roles were silently coming out with things like "Mention Everyone".
+// Every path that creates/edits a role now always passes an explicit list
+// (empty by default), and that list is built ONLY from phrases the human
+// actually typed, via this map.
+const GOD_PERMISSION_ALIASES = {
+  "administrator": "Administrator", "admin": "Administrator", "full admin": "Administrator",
+  "mention everyone": "MentionEveryone", "ping everyone": "MentionEveryone",
+  "mention @everyone": "MentionEveryone", "ping @everyone": "MentionEveryone",
+  "mention all roles": "MentionEveryone",
+  "manage nicknames": "ManageNicknames", "set nick": "ManageNicknames", "set nickname": "ManageNicknames",
+  "change nicknames": "ManageNicknames", "nickname perm": "ManageNicknames",
+  "manage roles": "ManageRoles",
+  "manage channels": "ManageChannels",
+  "manage messages": "ManageMessages",
+  "manage server": "ManageGuild", "manage guild": "ManageGuild",
+  "manage webhooks": "ManageWebhooks",
+  "manage emojis": "ManageEmojisAndStickers", "manage emojis and stickers": "ManageEmojisAndStickers",
+  "manage events": "ManageEvents",
+  "manage threads": "ManageThreads",
+  "kick members": "KickMembers",
+  "ban members": "BanMembers",
+  "mute members": "MuteMembers", "voice mute": "MuteMembers",
+  "deafen members": "DeafenMembers",
+  "move members": "MoveMembers",
+  "timeout members": "ModerateMembers", "moderate members": "ModerateMembers",
+  "view audit log": "ViewAuditLog",
+  "priority speaker": "PrioritySpeaker",
+};
+// Longest phrase first, so e.g. "manage emojis and stickers" wins over "manage emojis".
+const GOD_PERMISSION_PHRASES = Object.keys(GOD_PERMISSION_ALIASES).sort((a, b) => b.length - a.length);
+
+function extractPermissionsFromText(text) {
+  const lower = (text || "").toLowerCase();
+  const found = new Set();
+  for (const phrase of GOD_PERMISSION_PHRASES) {
+    if (new RegExp(`\\b${phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(lower)) {
+      found.add(GOD_PERMISSION_ALIASES[phrase]);
+    }
+  }
+  return [...found];
+}
+
+// Normalizes an arbitrary AI-supplied permission list down to only names we
+// recognize — anything the model invents or mis-names is silently dropped
+// rather than passed through to Discord.
+function normalizePermissionList(arr) {
+  if (!Array.isArray(arr)) return [];
+  const out = new Set();
+  for (const raw of arr) {
+    if (typeof raw !== "string") continue;
+    const hit = extractPermissionsFromText(raw);
+    hit.forEach(p => out.add(p));
+  }
+  return [...out];
+}
+
 function parseGodCommand(text) {
   // Strip the bot's own self-mention (if present anywhere) and optional "cosa" prefix
   const selfMentionStripped = client?.user?.id ? text.replace(new RegExp(`<@!?${client.user.id}>`, "g"), "").trim() : text;
@@ -2247,6 +2199,9 @@ function parseGodCommand(text) {
   if (m) {
     let roleName = m[1].trim();
     let color = null, hoist = null, position = null;
+    // Only ever grants what was actually said — extracted from the whole
+    // sentence, not guessed. Empty array if nothing was requested.
+    const permissions = extractPermissionsFromText(t);
 
     // Strip and capture trailing modifiers from the role name itself
     let changed = true;
@@ -2259,8 +2214,13 @@ function parseGodCommand(text) {
       if ((mm = roleName.match(/^(.*?)\s+not\s+hoisted$/i))) { roleName = mm[1].trim(); hoist = false; changed = true; }
       if ((mm = roleName.match(/^(.*?)\s+(?:keep\s+its?\s+|set\s+its?\s+)?position\s+at\s+(?:the\s+)?top$/i))) { roleName = mm[1].trim(); position = "top"; changed = true; }
       if ((mm = roleName.match(/^(.*?)\s+(?:keep\s+its?\s+|set\s+its?\s+)?position\s+at\s+(?:the\s+)?bottom$/i))) { roleName = mm[1].trim(); position = "bottom"; changed = true; }
+      // Strip a trailing permission-phrase clause so it doesn't pollute the name
+      for (const phrase of GOD_PERMISSION_PHRASES) {
+        const permRe = new RegExp(`^(.*?)\\s+(?:with\\s+|give\\s+it\\s+|has\\s+|and\\s+)?${phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s+perm(?:ission)?s?)?$`, "i");
+        if ((mm = roleName.match(permRe))) { roleName = mm[1].trim(); changed = true; break; }
+      }
     }
-    if (roleName) return { action: "create_role", roleName, color, hoist, position };
+    if (roleName) return { action: "create_role", roleName, color, hoist, position, permissions };
   }
 
   // Remove role — supports both "remove @user op role" AND "remove op role from @user"
@@ -2310,10 +2270,9 @@ function parseGodCommand(text) {
   m = t.match(/delete\s+(?:the\s+)?categor(?:y|ie)\s+(?:called\s+|named\s+)?[#"]?([a-z0-9\-_ ]+)["]?/i);
   if (m) return { action: "delete_category", name: m[1].trim().toLowerCase() };
 
-  // Create channel
-  m = t.match(/create\s+(?:a\s+)?(?:channel|text channel)\s+(?:called\s+|named\s+)?[#"]?([a-z0-9\-_ ]+)["]?/i);
-  if (m) return { action: "create_channel", name: m[1].trim().toLowerCase().replace(/\s+/g, "-") };
-  if (m) return { action: "create_channel", name: m[1].trim().toLowerCase().replace(/\s+/g, "-") };
+  // Create channel — "private" only applies if the human actually said it
+  m = t.match(/create\s+(?:a\s+)?(private\s+)?(?:channel|text channel)\s+(?:called\s+|named\s+)?[#"]?([a-z0-9\-_ ]+)["]?/i);
+  if (m) return { action: "create_channel", name: m[2].trim().toLowerCase().replace(/\s+/g, "-"), private: !!m[1] };
 
   // Delete channel by mention
   m = t.match(/delete\s+<#(\d+)>/i);
@@ -2367,8 +2326,8 @@ function parseGodCommand(text) {
 //  same execute/cancel confirmation flow as regex-parsed commands.
 // ══════════════════════════════════════════════════════════════════════════════
 const GOD_AI_SCHEMAS = {
-  create_role:       { req: { roleName: "string" }, opt: { color: "string", hoist: "boolean", position: "position" } },
-  edit_role:         { req: { roleName: "string" }, opt: { color: "string", hoist: "boolean", position: "position" } },
+  create_role:       { req: { roleName: "string" }, opt: { color: "string", hoist: "boolean", position: "position", permissions: "permlist" } },
+  edit_role:         { req: { roleName: "string" }, opt: { color: "string", hoist: "boolean", position: "position", permissions: "permlist" } },
   give_role:         { req: { userId: "id", roleName: "string" } },
   remove_role:       { req: { userId: "id", roleName: "string" } },
   kick:              { req: { userId: "id" }, opt: { reason: "string" } },
@@ -2378,7 +2337,7 @@ const GOD_AI_SCHEMAS = {
   unmute:            { req: { userId: "id" } },
   create_category:   { req: { name: "string" } },
   delete_category:   { req: { name: "string" } },
-  create_channel:    { req: { name: "string" } },
+  create_channel:    { req: { name: "string" }, opt: { private: "boolean" } },
   delete_channel:    { req: { channelName: "string" } },
   delete_channel_id: { req: { channelId: "id" } },
   rename_channel:    { req: { channelId: "id", newName: "string" } },
@@ -2397,6 +2356,11 @@ function godCoerceField(val, type) {
   if (type === "boolean")  return typeof val === "boolean" ? val : null;
   if (type === "number")   { const n = Number(val); return Number.isFinite(n) && n > 0 ? Math.floor(n) : null; }
   if (type === "position") return val === "top" || val === "bottom" ? val : null;
+  if (type === "permlist") {
+    if (Array.isArray(val)) return normalizePermissionList(val);
+    if (typeof val === "string") return extractPermissionsFromText(val);
+    return null;
+  }
   if (type === "id") {
     const s = String(val ?? "").replace(/[<@!#&>]/g, "").trim();
     return /^\d{17,20}$/.test(s) ? s : null;
@@ -2479,8 +2443,8 @@ Respond with ONLY a valid JSON object, no other text, in this exact shape:
 If the message is just conversation, a question, a greeting, or anything that is NOT a request to change the server, respond with {"actions":[]}.
 
 AVAILABLE ACTIONS (use these exact field names):
-{"action":"create_role","roleName":"...","color":"red|#hex (optional)","hoist":true/false (optional),"position":"top|bottom (optional)"}
-{"action":"edit_role","roleName":"...","color":"...","hoist":...,"position":"..."} — change an EXISTING role
+{"action":"create_role","roleName":"...","color":"red|#hex (optional)","hoist":true/false (optional),"position":"top|bottom (optional)","permissions":["Administrator","MentionEveryone",...] (optional)}
+{"action":"edit_role","roleName":"...","color":"...","hoist":...,"position":"...","permissions":[...]} — change an EXISTING role
 {"action":"give_role","userId":"...","roleName":"..."}
 {"action":"remove_role","userId":"...","roleName":"..."}
 {"action":"kick","userId":"...","reason":"..."}
@@ -2488,7 +2452,7 @@ AVAILABLE ACTIONS (use these exact field names):
 {"action":"unban","userId":"..."}
 {"action":"mute","userId":"...","durationMs":600000} — convert durations to milliseconds ("an hour"=3600000, "a day"=86400000, default 600000)
 {"action":"unmute","userId":"..."}
-{"action":"create_channel","name":"..."}
+{"action":"create_channel","name":"...","private":true/false (optional)}
 {"action":"delete_channel","channelName":"..."} or {"action":"delete_channel_id","channelId":"..."}
 {"action":"create_category","name":"..."} / {"action":"delete_category","name":"..."}
 {"action":"rename_channel","channelId":"...","newName":"..."}
@@ -2504,6 +2468,9 @@ RULES:
 - For give_role/remove_role/edit_role/delete_channel/delete_category, match names against the EXISTING roles/channels in the context (case-insensitive, closest match). create_role/create_channel may use new names.
 - One sentence can contain several actions — output them all, in order.
 - "shut him up" / "silence him" = mute. "get rid of" a channel = delete. "get rid of"/"throw out" a person = kick. "make him X" where X is a role = give_role.
+- NEVER include "permissions" on create_role/edit_role unless the owner explicitly named a specific permission (e.g. "give it administrator", "with mention everyone perm", "manage nicknames"). If no permission was mentioned, omit the field entirely — do NOT guess, default, or add anything "reasonable". A new role must come out with NO permissions unless told otherwise.
+- Valid permission names: Administrator, MentionEveryone, ManageNicknames, ManageRoles, ManageChannels, ManageMessages, ManageGuild, ManageWebhooks, ManageEmojisAndStickers, ManageEvents, ManageThreads, KickMembers, BanMembers, MuteMembers, DeafenMembers, MoveMembers, ModerateMembers, ViewAuditLog, PrioritySpeaker.
+- NEVER include "private":true on create_channel unless the owner explicitly said "private" (or clearly equivalent, e.g. "hidden channel", "only staff can see it"). Default is a normal public channel.
 - Output raw JSON only. No markdown, no explanations.`;
 
 async function aiParseGodCommands(text, guild, message) {
@@ -2553,10 +2520,17 @@ async function executeGodAction(cmd, guild, adminCh) {
           if (/^#?[0-9a-f]{6}$/i.test(cmd.color)) color = cmd.color.startsWith("#") ? cmd.color : `#${cmd.color}`;
           else color = COLOR_NAMES[cmd.color.toLowerCase()] || null;
         }
+        // IMPORTANT: Discord's API defaults a new role's permissions to
+        // whatever @everyone has in this guild if `permissions` is omitted —
+        // that's how roles used to come out with things like Mention
+        // Everyone nobody asked for. Always pass an explicit list; empty
+        // unless the human named specific permissions.
+        const rolePerms = Array.isArray(cmd.permissions) ? cmd.permissions : [];
         const role = await guild.roles.create({
           name: cmd.roleName,
           color: color || undefined,
           hoist: cmd.hoist === true ? true : cmd.hoist === false ? false : undefined,
+          permissions: rolePerms,
           reason: "God Mode — Don Clint",
         });
         if (cmd.position === "top") {
@@ -2571,7 +2545,8 @@ async function executeGodAction(cmd, guild, adminCh) {
         if (cmd.hoist === true) extras.push("hoisted");
         if (cmd.hoist === false) extras.push("un-hoisted");
         if (cmd.position) extras.push(`positioned at the ${cmd.position}`);
-        if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Role **${role.name}** created by Don Clint.`).catch(() => {});
+        if (rolePerms.length) extras.push(`granted: ${rolePerms.join(", ")}`);
+        if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Role **${role.name}** created by Don Clint${rolePerms.length ? ` (perms: ${rolePerms.join(", ")})` : " (no permissions)"}.`).catch(() => {});
         return `✅ Role **${role.name}** has been forged${extras.length ? " — " + extras.join(", ") : ""}. 🔫`;
       }
       case "edit_role": {
@@ -2602,6 +2577,14 @@ async function executeGodAction(cmd, guild, adminCh) {
         } else if (cmd.position === "bottom") {
           await role.setPosition(1).catch(() => {});
           extras.push("positioned at the bottom");
+        }
+        // Only ever ADDS what was explicitly named — never touches any other
+        // permission the role already had, and does nothing at all if no
+        // permission was mentioned.
+        if (Array.isArray(cmd.permissions) && cmd.permissions.length) {
+          const newPerms = role.permissions.add(cmd.permissions);
+          await role.setPermissions(newPerms).catch(() => {});
+          extras.push(`granted: ${cmd.permissions.join(", ")}`);
         }
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Role **${role.name}** edited by Don Clint (${extras.join(", ") || "no changes"}).`).catch(() => {});
         return `✅ Role **${role.name}** updated${extras.length ? " — " + extras.join(", ") : ""}. 🔫`;
@@ -2681,8 +2664,13 @@ async function executeGodAction(cmd, guild, adminCh) {
       }
       case "create_channel": {
         const ch = await guild.channels.create({ name: cmd.name, type: 0 });
-        if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Channel **#${cmd.name}** created by Don Clint.`).catch(() => {});
-        return `✅ Channel <#${ch.id}> created. 🔫`;
+        // Only made private if explicitly requested — a normal channel is
+        // left fully visible, matching the parent category's defaults.
+        if (cmd.private) {
+          await ch.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: false }).catch(() => {});
+        }
+        if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Channel **#${cmd.name}** created by Don Clint${cmd.private ? " (private)" : ""}.`).catch(() => {});
+        return `✅ Channel <#${ch.id}> created${cmd.private ? " — **private**, hidden from everyone else" : ""}. 🔫`;
       }
       case "delete_channel": {
         const ch = guild.channels.cache.find(c => c.name.toLowerCase() === cmd.channelName.toLowerCase());
@@ -4283,18 +4271,6 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       }
       currentMood = found;
       moodSetAt = Date.now();
-      const insideManChannel = guild.channels.cache.get(INSIDE_MAN_ID);
-      if (insideManChannel) await insideManChannel.send(
-        `${currentMood.emoji} **DON CLINT HAS SET COSA'S MOOD** ${currentMood.emoji}
-` +
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-` +
-        `**${currentMood.name}**
-${currentMood.desc}
-
-` +
-        `*By order of the Family. 🔫*`
-      ).catch(() => {});
       return `${currentMood.emoji} Mood set to **${currentMood.name}**. The Family shall feel it.`;
     }
     case "bank_tiers": {
@@ -4790,7 +4766,7 @@ async function executePublicCommand(message, cmd, channelId) {
       return "🔫 Use **/eco** instead — it's private, only you'll see it.";
     }
     case "chess_bot": {
-      if (message.channelId !== CHESS_CHANNEL_ID) return `🔫 Chess is only available in <#${CHESS_CHANNEL_ID}> — take it to bot-cmds.`;
+      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
       const { difficulty, timeLimit } = cmd;
       const diff = DIFFICULTIES[difficulty] || DIFFICULTIES.intermediate;
       const existing = chessModule.getGame(message.channelId);
@@ -4870,7 +4846,7 @@ ${chessModule.getStatusLine(game)}`, files: [att2] }).catch(() => {});
       return null;
     }
     case "chess_challenge": {
-      if (message.channelId !== CHESS_CHANNEL_ID) return `🔫 Chess is only available in <#${CHESS_CHANNEL_ID}> — take it to bot-cmds.`;
+      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
       const { targetId: oppId } = cmd;
       if (oppId === message.author.id) return "🔫 You can't challenge yourself. Find a real opponent.";
       if (oppId === client.user.id) return "🔫 I don't play chess. I *oversee* it.";
@@ -4902,7 +4878,7 @@ ${chessModule.getStatusLine(game)}`, files: [att2] }).catch(() => {});
 *Challenge expires in 60 seconds.*`;
     }
     case "chess_accept": {
-      if (message.channelId !== CHESS_CHANNEL_ID) return `🔫 Chess is only available in <#${CHESS_CHANNEL_ID}> — take it to bot-cmds.`;
+      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
       const challenge = chessModule.getChallenge(message.channelId);
       if (!challenge) return "🔫 No pending chess challenge in this channel.";
       if (message.author.id !== challenge.opponentId) return "🔫 That challenge wasn't for you.";
@@ -4934,7 +4910,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return null;
     }
     case "chess_decline": {
-      if (message.channelId !== CHESS_CHANNEL_ID) return `🔫 Chess is only available in <#${CHESS_CHANNEL_ID}> — take it to bot-cmds.`;
+      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
       const challenge = chessModule.getChallenge(message.channelId);
       if (!challenge) return "🔫 No pending challenge to decline.";
       if (message.author.id !== challenge.opponentId) return "🔫 That challenge wasn't for you.";
@@ -4942,7 +4918,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return `🔫 <@${message.author.id}> declined the challenge. Coward. 💀`;
     }
     case "chess_end": {
-      if (message.channelId !== CHESS_CHANNEL_ID) return `🔫 Chess is only available in <#${CHESS_CHANNEL_ID}> — take it to bot-cmds.`;
+      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
       if (message.author.id !== MASTER_ID) return "🔫 Only Don Clint can force-end a chess match.";
       const game = chessModule.getGame(message.channelId);
       if (!game) return "🔫 No chess match in progress here.";
@@ -4952,7 +4928,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return "🔫 **Chess match ended by Don Clint.** The board has been cleared.";
     }
     case "chess_resign": {
-      if (message.channelId !== CHESS_CHANNEL_ID) return `🔫 Chess is only available in <#${CHESS_CHANNEL_ID}> — take it to bot-cmds.`;
+      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
       const game = chessModule.getGame(message.channelId);
       if (!game) return "🔫 No chess match in progress here.";
       const isPlayer = message.author.id === game.white.id || message.author.id === game.black.id;
@@ -4975,7 +4951,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return `📋 **CHESS QUEUE**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${qlist}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*${chessQueue.length} game(s) waiting.*`;
     }
     case "chess_timer": {
-      if (message.channelId !== CHESS_CHANNEL_ID) return `🔫 Chess is only available in <#${CHESS_CHANNEL_ID}> — take it to bot-cmds.`;
+      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
       const game = chessModule.getGame(message.channelId);
       if (!game) return "🔫 No chess match in progress here.";
       if (!game.timeLimit) return "🔫 This match has no timer — it's untimed.";
@@ -4998,7 +4974,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       );
     }
     case "chess_board": {
-      if (message.channelId !== CHESS_CHANNEL_ID) return `🔫 Chess is only available in <#${CHESS_CHANNEL_ID}> — take it to bot-cmds.`;
+      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
       const game = chessModule.getGame(message.channelId);
       if (!game) return "🔫 No chess match in progress here.";
       const board = await chessModule.renderBoard(game.chess, game.lastMove);
@@ -5007,7 +4983,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return null;
     }
     case "chess_move": {
-      if (message.channelId !== CHESS_CHANNEL_ID) return `🔫 Chess is only available in <#${CHESS_CHANNEL_ID}> — take it to bot-cmds.`;
+      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
       const game = chessModule.getGame(message.channelId);
       if (!game) return "🔫 No chess match in progress here.";
       const currentPlayer = chessModule.getCurrentPlayer(game);
@@ -6203,6 +6179,12 @@ function buildRankHelpText(userId) {
   if (isDon || rankData?.canSlowmode)  { modLines.push("🐢  SLOWMODE"); modLines.push("  Cosa slowmode [time]"); modLines.push(""); }
   if (isDon || rankData?.canLockdown)  { modLines.push("🔒  LOCKDOWN"); modLines.push("  Cosa lockdown / unlock"); modLines.push(""); }
   if (isDon || rankData?.canStrip)     { modLines.push("✂️  STRIP"); modLines.push("  Cosa strip @user"); modLines.push(""); }
+  if (isDon || rankKey === "boss") {
+    modLines.push("🏛️  CHANNEL SETUP");
+    modLines.push("  Cosa set channel [type]  ← run it IN the channel you want to designate");
+    modLines.push(`  Types: ${Object.keys(CHANNEL_SETTERS).join(", ")}`);
+    modLines.push("");
+  }
   if (isDon) {
     modLines.push("⛓️  EXILE"); modLines.push("  Cosa exile @user"); modLines.push("  Cosa temp exile @user [time]"); modLines.push("  Cosa unexile @user"); modLines.push("");
     modLines.push("👁️  SURVEILLANCE"); modLines.push("  Cosa watchlist @user"); modLines.push("  Cosa add @user to shadow list"); modLines.push("  Cosa remove @user from shadow list"); modLines.push("");
@@ -6432,7 +6414,6 @@ async function init() {
       startInactivityCheck(guild);
       startPsychologicalWarfare(guild);
       startMoodSystem(guild);
-      startInsideManTips(guild);
       startAutoShadowCourt(guild);
       await loadLoans();
       await loadCosaMemory();
@@ -6524,23 +6505,15 @@ async function init() {
       } else if (score >= 7) {
         try { await newMember.timeout(24 * 60 * 60 * 1000, "Suspicious fingerprint — pending review"); } catch {}
         holdingStore.set(newMember.id, true);
-        for (const [, channel] of newMember.guild.channels.cache) {
-          if (channel.id === HOLDING_CHANNEL_ID) await channel.permissionOverwrites.edit(newMember, { ViewChannel: true, SendMessages: true }).catch(() => {});
-          else await channel.permissionOverwrites.edit(newMember, { ViewChannel: false, SendMessages: false }).catch(() => {});
-        }
         if (adminChannel) {
-          for (let i = 0; i < 3; i++) { await adminChannel.send(`🚨 <@${MASTER_ID}> **SUSPICIOUS JOIN — MUTED & HELD!**`).catch(() => {}); await new Promise(r => setTimeout(r, 600)); }
-          await adminChannel.send(`🔴 **HOLDING CELL + AUTO-MUTE**\n**${newMember.user.username}** (${newMember.id}) flagged after verify.\n**Score: ${score}/12**\n${flags.join("\n")}\n\nSay **"Cosa ban @user"** to remove or **"Cosa unmute @user"** to release.`).catch(() => {});
+          for (let i = 0; i < 3; i++) { await adminChannel.send(`🚨 <@${MASTER_ID}> **SUSPICIOUS JOIN — MUTED & FLAGGED!**`).catch(() => {}); await new Promise(r => setTimeout(r, 600)); }
+          await adminChannel.send(`🔴 **AUTO-MUTE**\n**${newMember.user.username}** (${newMember.id}) flagged after verify.\n**Score: ${score}/12**\n${flags.join("\n")}\n\nSay **"Cosa ban @user"** to remove or **"Cosa unmute @user"** to release.`).catch(() => {});
         }
       } else if (score >= 5) {
         holdingStore.set(newMember.id, true);
-        for (const [, channel] of newMember.guild.channels.cache) {
-          if (channel.id === HOLDING_CHANNEL_ID) await channel.permissionOverwrites.edit(newMember, { ViewChannel: true, SendMessages: true }).catch(() => {});
-          else await channel.permissionOverwrites.edit(newMember, { ViewChannel: false, SendMessages: false }).catch(() => {});
-        }
         if (adminChannel) {
           for (let i = 0; i < 3; i++) { await adminChannel.send(`🚨 <@${MASTER_ID}> **SUSPICIOUS JOIN!**`).catch(() => {}); await new Promise(r => setTimeout(r, 600)); }
-          await adminChannel.send(`⚠️ **HOLDING CELL — FINGERPRINT ALERT**\n**${newMember.user.username}** (${newMember.id}) flagged after verify.\n**Score: ${score}/12**\n${flags.join("\n")}\n\nSay **"Cosa ban @user"** to remove or **"Cosa clear @user"** to release.`).catch(() => {});
+          await adminChannel.send(`⚠️ **FINGERPRINT ALERT**\n**${newMember.user.username}** (${newMember.id}) flagged after verify.\n**Score: ${score}/12**\n${flags.join("\n")}\n\nSay **"Cosa ban @user"** to remove or **"Cosa clear @user"** to release.`).catch(() => {});
         }
       } else if (score >= 3) {
         if (adminChannel) await adminChannel.send(`👁️ **SILENT FLAG** — <@${MASTER_ID}>\n**${newMember.user.username}** (${newMember.id}) joined. Score: **${score}/12**\n${flags.join("\n")}`).catch(() => {});
@@ -6611,22 +6584,25 @@ async function init() {
     const repliedToBot = await isReplyToBot(message);
     const lower = message.content.toLowerCase().trim();
 
-    // ── Cosa Setup — creates "The Hideout" category + everything Cosa needs ────
-    if (isMaster && message.guild && /^cosa\s+setup$/i.test(lower)) {
-      await message.channel.sendTyping().catch(() => {});
-      try {
-        const { created, failed } = await runCosaSetup(message.guild);
-        let summary = created.length
-          ? "✅ **Setup complete.**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nCreated:\n" + created.map(c => "• " + c).join("\n") + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Cosa knows where everything is now.*"
-          : "✅ **Setup re-checked.** Everything already existed — nothing new created.";
-        if (failed.length) {
-          summary += "\n\n⚠️ **Some things failed to create** (run `cosa setup` again to retry these):\n" + failed.map(f => "• " + f).join("\n");
-        }
-        await message.reply(summary).catch(() => {});
-      } catch (e) {
-        console.error("[COSA SETUP]", e.message);
-        await message.reply("🔫 Setup failed: " + e.message + "\nMake sure Cosa has **Manage Channels** and **Manage Roles** permissions.").catch(() => {});
+    // ── Set Channel — Boss rank (or Don) designates the current channel as a
+    // given type. Replaces "cosa setup"'s auto-provisioning: no channels are
+    // ever created automatically, staff just point Cosa at whichever channel
+    // they want each role to live in. ──────────────────────────────────────────
+    if (message.guild && /^cosa\s+set\s+channel\s+/i.test(lower)) {
+      const isBossPlus = isMaster || getFamilyRank(message.author.id) === "boss";
+      if (!isBossPlus) { await message.reply("🔫 Only the Boss or Don Clint can set up channels.").catch(() => {}); return; }
+      const typeRaw = lower.replace(/^cosa\s+set\s+channel\s+/i, "").trim().replace(/[\s_]+/g, "-");
+      const type = CHANNEL_TYPE_ALIASES[typeRaw];
+      if (!type) {
+        await message.reply(
+          "🔫 Unknown channel type. Available: " +
+          Object.keys(CHANNEL_SETTERS).map(k => `\`${k}\``).join(", ") +
+          "\nUsage: **cosa set channel <type>** — run it in the channel you want to designate."
+        ).catch(() => {});
+        return;
       }
+      const label = await setChannelType(message.guild.id, type, message.channelId);
+      await message.reply(`✅ This channel is now set as **${label}**.`).catch(() => {});
       return;
     }
 
