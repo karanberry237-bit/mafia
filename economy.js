@@ -2,52 +2,33 @@ const { createClient } = require("@supabase/supabase-js");
 const ws = require("ws");
 
 // ── Currency System ───────────────────────────────────────────────────────────
-// NOTE: internal `key` values (copper/silver/gold/stellar) are kept as-is because
-// they map 1:1 to existing Supabase column names in the `wallets` table. Only the
-// display `name` changed — renaming the keys would require a DB migration.
-const TIERS = [
-  { name: "Cash",     emoji: "💵", key: "copper",  rate: 1          },
-  { name: "Chips",    emoji: "🟣", key: "silver",  rate: 100        },
-  { name: "Gold",     emoji: "🥇", key: "gold",    rate: 10000      },
-  { name: "Diamonds", emoji: "💎", key: "stellar", rate: 1000000    },
-];
-
-function toCopper(amount, tierKey) {
-  const tier = TIERS.find(t => t.key === tierKey);
-  return tier ? amount * tier.rate : amount;
-}
-
-function fromCopper(copper) {
-  let remaining = Math.floor(copper);
-  const result = {};
-  for (let i = TIERS.length - 1; i >= 0; i--) {
-    const tier = TIERS[i];
-    result[tier.key] = Math.floor(remaining / tier.rate);
-    remaining = remaining % tier.rate;
-  }
-  return result;
-}
-
+// Single flat currency: Cash. 1 is just 1 — no denominations, no conversion.
+// `copper`/`silver`/`gold`/`stellar` remain the Supabase column names (renaming
+// requires a migration), but only `copper` is ever used now. Old wallets that
+// still have a balance sitting in silver/gold/stellar (from before the
+// flatten) are folded into `copper` automatically the moment they're read —
+// nobody's balance disappears, it just all becomes Cash going forward.
 function formatWallet(wallet) {
-  const parts = [];
-  if (wallet.stellar > 0) parts.push(`💎 ${wallet.stellar.toLocaleString()} Diamonds`);
-  if (wallet.gold    > 0) parts.push(`🥇 ${wallet.gold.toLocaleString()} Gold`);
-  if (wallet.silver  > 0) parts.push(`🟣 ${wallet.silver.toLocaleString()} Chips`);
-  if (wallet.copper  > 0) parts.push(`💵 ${wallet.copper.toLocaleString()} Cash`);
-  return parts.length > 0 ? parts.join(" | ") : "💵 0 Cash";
+  return `💵 ${Math.floor(wallet.copper || 0).toLocaleString()} Cash`;
 }
 
 function walletToCopper(wallet) {
-  return (wallet.stellar || 0) * 1000000 +
-         (wallet.gold    || 0) * 10000   +
-         (wallet.silver  || 0) * 100     +
-         (wallet.copper  || 0);
+  return Math.floor(
+    (wallet.copper  || 0) +
+    (wallet.silver  || 0) * 100 +
+    (wallet.gold    || 0) * 10000 +
+    (wallet.stellar || 0) * 1000000
+  );
 }
 
-function parseBet(amount, tierKey) {
+function fromCopper(copper) {
+  return { copper: Math.floor(copper), silver: 0, gold: 0, stellar: 0 };
+}
+
+function parseBet(amount) {
   const num = parseInt(amount);
   if (isNaN(num) || num <= 0) return null;
-  return toCopper(num, tierKey || "copper");
+  return num;
 }
 
 // ── Supabase Wallet Store ─────────────────────────────────────────────────────
@@ -70,7 +51,11 @@ async function getWallet(userId) {
     return empty;
   }
   if (!data || data.length === 0) return empty;
-  return data[0];
+  // Flatten on read — a wallet with a leftover balance in silver/gold/stellar
+  // from before the flatten shows up as Cash immediately, not just after its
+  // next transaction.
+  const w = data[0];
+  return { ...w, copper: walletToCopper(w), silver: 0, gold: 0, stellar: 0 };
 }
 
 async function saveWallet(wallet) {
@@ -144,26 +129,24 @@ async function getLeaderboard(limit = 10) {
 }
 
 // ── Daily Rewards by Rank ─────────────────────────────────────────────────────
-// Mirrors the 10-tier Family ladder. Don Clint's cut is effectively bottomless.
+// Mirrors the 10-tier Family ladder. Flat Cash amounts now (same effective
+// values as the old tiered rewards, just no denominations to think in).
+// Don Clint's cut is effectively bottomless.
 const DAILY_REWARDS = {
-  streetrat:  { copper: 0, silver: 1,  gold: 0,  stellar: 0 },
-  associate:  { copper: 0, silver: 5,  gold: 0,  stellar: 0 },
-  soldier:    { copper: 0, silver: 10, gold: 0,  stellar: 0 },
-  mademan:    { copper: 0, silver: 30, gold: 0,  stellar: 0 },
-  enforcer:   { copper: 0, silver: 0,  gold: 1,  stellar: 0 },
-  capo:       { copper: 0, silver: 0,  gold: 10, stellar: 0 },
-  underboss:  { copper: 0, silver: 0,  gold: 20, stellar: 0 },
-  consigliere:{ copper: 0, silver: 0,  gold: 0,  stellar: 1 },
-  boss:       { copper: 0, silver: 0,  gold: 0,  stellar: 5 },
-  donclint:   { copper: 0, silver: 0,  gold: 0,  stellar: 999999999 },
+  streetrat:   100,
+  associate:   500,
+  soldier:     1000,
+  mademan:     3000,
+  enforcer:    10000,
+  capo:        100000,
+  underboss:   200000,
+  consigliere: 1000000,
+  boss:        5000000,
+  donclint:    999999999,
 };
 
 function getDailyAmount(rankKey) {
-  const reward = DAILY_REWARDS[rankKey] || DAILY_REWARDS.streetrat;
-  return toCopper(reward.copper, "copper") +
-         toCopper(reward.silver, "silver") +
-         toCopper(reward.gold,   "gold")   +
-         toCopper(reward.stellar,"stellar");
+  return DAILY_REWARDS[rankKey] || DAILY_REWARDS.streetrat;
 }
 
 // ── Slots ─────────────────────────────────────────────────────────────────────
@@ -270,7 +253,7 @@ function shouldRewardChat(userId) {
 const bjGames = new Map();
 
 module.exports = {
-  TIERS, toCopper, fromCopper, formatWallet, walletToCopper, parseBet,
+  fromCopper, formatWallet, walletToCopper, parseBet,
   initEconomy, getWallet, saveWallet, addCopper, deductCopper, getLeaderboard,
   getDailyAmount, DAILY_REWARDS,
   playSlots, spinWheel, WHEEL_SEGMENTS,

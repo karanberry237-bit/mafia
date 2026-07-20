@@ -284,8 +284,13 @@ let HELPER_ROLE_ID = null;
 let MOD_ROLE_ID_INACTIVITY = null;
 let SHADOW_COURT_ID = null;
 let MOD_LOG_CHANNEL_ID = null;
-let TALK_CHANNEL_ID = null;          // the only channel where casual AI chat is allowed
-let BOT_COMMANDS_CHANNEL_ID = null;  // the only channel where public/commoner commands work
+let TALK_CHANNEL_ID = null;          // the FIRST talk channel set — used for redirects/announcements
+let BOT_COMMANDS_CHANNEL_ID = null;  // the FIRST bot-commands channel set — used for redirects/announcements
+// Every channel ID ever designated for each type, in the order they were set.
+// Index 0 always matches the singular *_CHANNEL_ID global above (the
+// "primary" channel used for redirects and announcements). Members can
+// interact with Cosa from ANY channel in the list, not just the first.
+let CHANNEL_ID_ARRAYS = { general: [], lockdown: [], exile: [], shadowcourt: [], modlogs: [], talk: [], botcommands: [] };
 const chessQueue = []; // { type: "pvp"|"bot", challengerId, challengerName, opponentId, opponentName, timeLimit, difficulty }
 
 // ── Per-guild config ──────────────────────────────────────────────────────────
@@ -317,6 +322,15 @@ function activateGuildConfig(guildId) {
   MOD_LOG_CHANNEL_ID = cfg.MOD_LOG_CHANNEL_ID || null;
   TALK_CHANNEL_ID = cfg.TALK_CHANNEL_ID || null;
   BOT_COMMANDS_CHANNEL_ID = cfg.BOT_COMMANDS_CHANNEL_ID || null;
+  CHANNEL_ID_ARRAYS = {
+    general: cfg.CHANNEL_ID_ARRAYS?.general || (GENERAL_CHANNEL_ID ? [GENERAL_CHANNEL_ID] : []),
+    lockdown: cfg.CHANNEL_ID_ARRAYS?.lockdown || (LOCKDOWN_CHANNEL_ID ? [LOCKDOWN_CHANNEL_ID] : []),
+    exile: cfg.CHANNEL_ID_ARRAYS?.exile || (EXILE_CHANNEL_ID ? [EXILE_CHANNEL_ID] : []),
+    shadowcourt: cfg.CHANNEL_ID_ARRAYS?.shadowcourt || (SHADOW_COURT_ID ? [SHADOW_COURT_ID] : []),
+    modlogs: cfg.CHANNEL_ID_ARRAYS?.modlogs || (MOD_LOG_CHANNEL_ID ? [MOD_LOG_CHANNEL_ID] : []),
+    talk: cfg.CHANNEL_ID_ARRAYS?.talk || (TALK_CHANNEL_ID ? [TALK_CHANNEL_ID] : []),
+    botcommands: cfg.CHANNEL_ID_ARRAYS?.botcommands || (BOT_COMMANDS_CHANNEL_ID ? [BOT_COMMANDS_CHANNEL_ID] : []),
+  };
 }
 
 // Saves the CURRENT active globals back into this guild's slot in the map —
@@ -328,6 +342,7 @@ function captureGuildConfig(guildId) {
     ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID,
     EXILE_CHANNEL_ID, VERIFIED_ROLE_ID, HELPER_ROLE_ID, MOD_ROLE_ID_INACTIVITY,
     SHADOW_COURT_ID, MOD_LOG_CHANNEL_ID, TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
+    CHANNEL_ID_ARRAYS,
   });
 }
 
@@ -362,6 +377,7 @@ async function loadSetupConfig() {
         MOD_LOG_CHANNEL_ID: v.MOD_LOG_CHANNEL_ID || null,
         TALK_CHANNEL_ID: v.TALK_CHANNEL_ID || null,
         BOT_COMMANDS_CHANNEL_ID: v.BOT_COMMANDS_CHANNEL_ID || null,
+        CHANNEL_ID_ARRAYS: v.CHANNEL_ID_ARRAYS || null,
       });
     }
     console.log("✅ Setup configs loaded for " + data.length + " guild(s) — Cosa knows where everything is.");
@@ -379,6 +395,7 @@ async function saveSetupConfig(guildId) {
         ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID,
         EXILE_CHANNEL_ID, VERIFIED_ROLE_ID, HELPER_ROLE_ID, MOD_ROLE_ID_INACTIVITY,
         SHADOW_COURT_ID, MOD_LOG_CHANNEL_ID, TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
+        CHANNEL_ID_ARRAYS,
       },
     }, { onConflict: "key" });
     // Also update in-memory guildConfigs so activateGuildConfig works immediately
@@ -411,12 +428,30 @@ const CHANNEL_TYPE_ALIASES = {
   botcommands: "botcommands", "bot-commands": "botcommands", commands: "botcommands",
 };
 
+// Adds channelId as another designated channel for `type` (members can
+// interact from any of them), keeps the singular *_CHANNEL_ID global pointed
+// at the FIRST one ever set (used for redirects/announcements), and reports
+// back which position this one landed at so the caller can tell the mod
+// "this is your 2nd/3rd/etc channel for X".
 async function setChannelType(guildId, type, channelId) {
   const entry = CHANNEL_SETTERS[type];
   if (!entry) return null;
-  entry.set(channelId);
+  const arr = CHANNEL_ID_ARRAYS[type] || (CHANNEL_ID_ARRAYS[type] = []);
+  const alreadySet = arr.includes(channelId);
+  if (!alreadySet) arr.push(channelId);
+  entry.set(arr[0]);
   await saveSetupConfig(guildId);
-  return entry.label;
+  return { label: entry.label, position: arr.indexOf(channelId) + 1, alreadySet, total: arr.length };
+}
+
+function isChannelOfType(type, channelId) {
+  return (CHANNEL_ID_ARRAYS[type] || []).includes(channelId);
+}
+
+function ordinal(n) {
+  const s = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
 }
 
 function getInactivityConfig(timeLimitMs) {
@@ -798,8 +833,8 @@ function setMasterRoamingChannel(channelId) {
 }
 function isMasterAllowedChannel(channelId) {
   if (!channelId) return false;
-  if (channelId === TALK_CHANNEL_ID) return true;
-  if (channelId === BOT_COMMANDS_CHANNEL_ID) return true;
+  if (isChannelOfType("talk", channelId)) return true;
+  if (isChannelOfType("botcommands", channelId)) return true;
   if (channelId === masterRoamingChannelId) return true;
   return false;
 }
@@ -876,23 +911,14 @@ function resolveRankKey(input) {
   return found || null;
 }
 
-// ── Currency tier aliases ─────────────────────────────────────────────────────
-// economy.js keeps internal keys (copper/silver/gold/stellar) tied to existing
-// Supabase columns, but the player-facing names are Cash/Chips/Gold/Diamonds.
-// Every command regex below needs to accept BOTH, or typing the displayed name
-// (e.g. "diamond") silently falls through to the copper/Cash default instead
-// of erroring — which is exactly the "pay diamond doesn't work" bug.
-// This pattern matches any accepted word, singular or plural.
+// ── Legacy currency-word parsing ──────────────────────────────────────────────
+// Economy is a single flat currency now (Cash) — no more Chips/Gold/Diamonds
+// conversion. Command regexes still optionally accept an old currency word
+// after the amount (e.g. someone typing "cosa slots 100 gold" out of habit),
+// but it's ignored — every amount is just that many Cash. Kept only so old
+// phrasing doesn't suddenly stop parsing.
 const TIER_ALIAS_PATTERN = "stellar|diamonds?|gold|chips?|silver|cash|copper";
-function normalizeTierAlias(word) {
-  if (!word) return "copper";
-  const w = word.toLowerCase().replace(/s$/, ""); // de-pluralize
-  if (w === "diamond" || w === "stellar") return "stellar";
-  if (w === "gold") return "gold";
-  if (w === "chip" || w === "silver") return "silver";
-  if (w === "cash" || w === "copper") return "copper";
-  return "copper";
-}
+function normalizeTierAlias() { return "copper"; }
 
 // ── Mod Log ───────────────────────────────────────────────────────────────────
 async function sendModLog(guild, { action, moderator, target, reason, extra }) {
@@ -1557,13 +1583,15 @@ async function rateLimitedGroqCall(messages, opts = {}) {
         const retryMatch = errMsg.match(/try again in ([\d.]+)s/);
         const retryAfter = retryMatch ? Math.ceil(parseFloat(retryMatch[1]) * 1000) : 65000;
         keyRateLimitedUntil[idx] = Date.now() + retryAfter;
-        console.log(`[GROQ] Key ${idx + 1} rate limited for ${Math.ceil(retryAfter/1000)}s — switching instantly`);
-        // No wait — just loop and pick next available key
-        continue;
+        console.log(`[GROQ] Key ${idx + 1} rate limited for ${Math.ceil(retryAfter/1000)}s — switching`);
+      } else {
+        console.error(`[GROQ] Attempt ${attempt} key ${idx + 1} failed:`, errMsg);
       }
-      console.error(`[GROQ] Attempt ${attempt} key ${idx + 1} failed:`, errMsg);
-      if (attempt < groqClients.length * 2) await new Promise(r => setTimeout(r, 300));
-      else throw err;
+      // Any failure (timeout, rate limit, whatever) rotates to the next key —
+      // a key that just failed never gets retried back-to-back. Cycles
+      // 1→2→3→1→2→3... until maxAttempts is exhausted.
+      rotateGroqKey();
+      if (attempt === groqClients.length * 2) throw err;
     }
   }
 }
@@ -3695,10 +3723,6 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+ultra\s+loan\b/.test(lower)) return { action: "loan", size: "ultra" };
   if (/\bcosa\s+pay\s+debt\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_debt", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
   if (/\bcosa\s+debt\b/.test(lower)) return { action: "check_debt" };
-  if (/\bcosa\s+convert\b/.test(lower)) {
-    const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)\s+to\s+(stellar|diamonds?|gold|chips?|silver|cash|copper)/i);
-    return m ? { action: "convert", amount: parseInt(m[1]), from: normalizeTierAlias(m[2]), to: normalizeTierAlias(m[3]) } : null;
-  }
   if (/\bcosa\s+slots\b/.test(lower)) {
     const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "slots", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) };
@@ -3922,10 +3946,6 @@ function detectPublicCommand(text, message) {
     return { action: "pay", targetId, amount: amtMatch?.[1], tier: normalizeTierAlias(amtMatch?.[2]) };
   }
   if (/\bcosa\s+rob\b/.test(lower) && targetId) return { action: "rob", targetId };
-  if (/\bcosa\s+convert\b/.test(lower)) {
-    const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)\s+to\s+(stellar|diamonds?|gold|chips?|silver|cash|copper)/i);
-    return m ? { action: "convert", amount: parseInt(m[1]), from: normalizeTierAlias(m[2]), to: normalizeTierAlias(m[3]) } : null;
-  }
   if (/\bcosa\s+loans?\b/.test(lower)) return { action: "loan_info" };
   if (/\bcosa\s+normal\s+loan\b/.test(lower)) return { action: "loan", size: "loan" };
   if (/\bcosa\s+elite\s+loan\b/.test(lower)) return { action: "loan", size: "elite" };
@@ -4051,20 +4071,20 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   }
   if (action === "eco_give") {
     if (userId !== MASTER_ID) return "🔫 Don only.";
-    const copper = eco.parseBet(cmd.amount, cmd.tier);
+    const copper = eco.parseBet(cmd.amount);
     if (!copper) return "🔫 Invalid amount.";
     const newW = await eco.addCopper(cmd.targetId, copper);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
-    return "✅ Gave **" + eco.toCopper(parseInt(cmd.amount), cmd.tier).toLocaleString() + " " + cmd.tier + "** to **" + (tu?.username||cmd.targetId) + "**. New balance: " + eco.formatWallet(newW) + ".";
+    return "✅ Gave **" + copper.toLocaleString() + " Cash** to **" + (tu?.username||cmd.targetId) + "**. New balance: " + eco.formatWallet(newW) + ".";
   }
   if (action === "eco_take") {
     if (userId !== MASTER_ID) return "🔫 Don only.";
-    const copper = eco.parseBet(cmd.amount, cmd.tier);
+    const copper = eco.parseBet(cmd.amount);
     if (!copper) return "🔫 Invalid amount.";
     const result = await eco.deductCopper(cmd.targetId, copper);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
     if (!result) return "🔫 They don't have enough.";
-    return "✅ Took **" + cmd.amount + " " + cmd.tier + "** from **" + (tu?.username||cmd.targetId) + "**. New balance: " + eco.formatWallet(result) + ".";
+    return "✅ Took **" + copper.toLocaleString() + " Cash** from **" + (tu?.username||cmd.targetId) + "**. New balance: " + eco.formatWallet(result) + ".";
   }
   if (action === "eco_tax") {
     if (userId !== MASTER_ID) return "🔫 Don only.";
@@ -4119,22 +4139,16 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   }
   if (action === "daily_rates") {
     return "📅 **DAILY CUT RATES**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-      "🥃 Street Rat — 🟣 1 Chip\n" +
-      "🥃 Associate — 🟣 5 Chips\n" +
-      "🔫 Soldier — 🟣 10 Chips\n" +
-      "🎩 Made Man — 🟣 30 Chips\n" +
-      "🥊 Enforcer — 🥇 1 Gold\n" +
-      "🎖️ Capo — 🥇 10 Gold\n" +
-      "🏛️ Underboss — 🥇 20 Gold\n" +
-      "🕴️ Consigliere — 💎 1 Diamond\n" +
-      "🤵 Boss — 💎 5 Diamonds\n" +
-      "🔱 Don Clint — 💎 999,999,999 Diamonds\n" +
-      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+      Object.entries(eco.DAILY_REWARDS).map(([rank, amount]) => {
+        const title = rank === "donclint" ? "🔱 Don Clint" : `${RANKS[rank]?.emoji || "🥃"} ${RANKS[rank]?.title || "Street Rat"}`;
+        return `${title} — 💵 ${amount.toLocaleString()} Cash`;
+      }).join("\n") +
+      "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
       "*Cooldown: 20 hours*";
   }
 
   // Route eco commands to public handler
-  const ecoActions = ["balance","daily","check_debt","pay_debt","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","convert","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb"];
+  const ecoActions = ["balance","daily","check_debt","pay_debt","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb"];
   if (ecoActions.includes(action)) {
     return await executePublicCommand(message, cmd, channelId);
   }
@@ -4433,14 +4447,16 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
 
     case "wipe_rich": {
       if (userId !== MASTER_ID) return "🔫 Don only.";
+      const WIPE_THRESHOLD = 10000000; // 10 "Diamonds" equivalent, pre-flatten
       try {
-        const { data } = await supabase.from("wallets").select("user_id, stellar").gte("stellar", 10);
-        if (!data || data.length === 0) return "📊 Nobody has 10+ Diamonds. Nothing to wipe.";
-        for (const row of data) {
+        const { data } = await supabase.from("wallets").select("user_id, copper, silver, gold, stellar");
+        const rich = (data || []).filter(row => eco.walletToCopper(row) >= WIPE_THRESHOLD);
+        if (rich.length === 0) return "📊 Nobody has 💵 10,000,000+ Cash. Nothing to wipe.";
+        for (const row of rich) {
           if (row.user_id === MASTER_ID) continue; // never wipe Don Clint
           await supabase.from("wallets").update({ copper: 0, silver: 0, gold: 0, stellar: 0, total_earned: 0 }).eq("user_id", row.user_id);
         }
-        return `💥 **${data.length} player(s) wiped** — anyone with 10+ Diamonds has been reset to 0. The Family rebalances. 🤵`;
+        return `💥 **${rich.length} player(s) wiped** — anyone with 💵 10,000,000+ Cash has been reset to 0. The Family rebalances. 🤵`;
       } catch (e) { return `🔫 Failed: ${e.message}`; }
     }
     case "ban_confirm": if (!guild) return "🔫 Server only."; setPendingConfirm(channelId, "ban", { targetId, reason }); return `⚠️ **Ban <@${targetId}>?** Reason: *${reason}*\nSay **"yes"** to confirm. *(30s)*`;
@@ -4766,7 +4782,7 @@ async function executePublicCommand(message, cmd, channelId) {
       return "🔫 Use **/eco** instead — it's private, only you'll see it.";
     }
     case "chess_bot": {
-      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const { difficulty, timeLimit } = cmd;
       const diff = DIFFICULTIES[difficulty] || DIFFICULTIES.intermediate;
       const existing = chessModule.getGame(message.channelId);
@@ -4846,7 +4862,7 @@ ${chessModule.getStatusLine(game)}`, files: [att2] }).catch(() => {});
       return null;
     }
     case "chess_challenge": {
-      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const { targetId: oppId } = cmd;
       if (oppId === message.author.id) return "🔫 You can't challenge yourself. Find a real opponent.";
       if (oppId === client.user.id) return "🔫 I don't play chess. I *oversee* it.";
@@ -4878,7 +4894,7 @@ ${chessModule.getStatusLine(game)}`, files: [att2] }).catch(() => {});
 *Challenge expires in 60 seconds.*`;
     }
     case "chess_accept": {
-      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const challenge = chessModule.getChallenge(message.channelId);
       if (!challenge) return "🔫 No pending chess challenge in this channel.";
       if (message.author.id !== challenge.opponentId) return "🔫 That challenge wasn't for you.";
@@ -4910,7 +4926,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return null;
     }
     case "chess_decline": {
-      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const challenge = chessModule.getChallenge(message.channelId);
       if (!challenge) return "🔫 No pending challenge to decline.";
       if (message.author.id !== challenge.opponentId) return "🔫 That challenge wasn't for you.";
@@ -4918,7 +4934,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return `🔫 <@${message.author.id}> declined the challenge. Coward. 💀`;
     }
     case "chess_end": {
-      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       if (message.author.id !== MASTER_ID) return "🔫 Only Don Clint can force-end a chess match.";
       const game = chessModule.getGame(message.channelId);
       if (!game) return "🔫 No chess match in progress here.";
@@ -4928,7 +4944,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return "🔫 **Chess match ended by Don Clint.** The board has been cleared.";
     }
     case "chess_resign": {
-      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const game = chessModule.getGame(message.channelId);
       if (!game) return "🔫 No chess match in progress here.";
       const isPlayer = message.author.id === game.white.id || message.author.id === game.black.id;
@@ -4951,7 +4967,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return `📋 **CHESS QUEUE**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${qlist}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*${chessQueue.length} game(s) waiting.*`;
     }
     case "chess_timer": {
-      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const game = chessModule.getGame(message.channelId);
       if (!game) return "🔫 No chess match in progress here.";
       if (!game.timeLimit) return "🔫 This match has no timer — it's untimed.";
@@ -4974,7 +4990,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       );
     }
     case "chess_board": {
-      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const game = chessModule.getGame(message.channelId);
       if (!game) return "🔫 No chess match in progress here.";
       const board = await chessModule.renderBoard(game.chess, game.lastMove);
@@ -4983,7 +4999,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return null;
     }
     case "chess_move": {
-      if (message.channelId !== BOT_COMMANDS_CHANNEL_ID) return `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.`;
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const game = chessModule.getGame(message.channelId);
       if (!game) return "🔫 No chess match in progress here.";
       const currentPlayer = chessModule.getCurrentPlayer(game);
@@ -5283,8 +5299,9 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
     case "daily": {
       console.log("[DAILY] triggered by", message.author.id);
       if (message.author.id === MASTER_ID) {
-        await eco.addCopper(MASTER_ID, 999999999 * 1000000).catch(e => console.error("[DAILY DON]", e.message));
-        return "🤵 **The Vig overflows.** 💎 999,999,999 Diamonds deposited.";
+        const donAmt = eco.getDailyAmount("donclint");
+        await eco.addCopper(MASTER_ID, donAmt).catch(e => console.error("[DAILY DON]", e.message));
+        return `🤵 **The Vig overflows.** 💵 ${donAmt.toLocaleString()} Cash deposited.`;
       }
       const w = await eco.getWallet(message.author.id);
       const now = Date.now();
@@ -5321,7 +5338,6 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const newW = await eco.addCopper(message.author.id, finalReward);
       newW.last_daily = new Date().toISOString();
       await eco.saveWallet(newW);
-      const rewardData = eco.DAILY_REWARDS[rankKey] || eco.DAILY_REWARDS.streetrat;
       const marriageLine = marriageBonus > 0 ? `\n💍 **Marriage bonus:** +10% applied!` : "";
       const boostLine = hasBoost ? `\n💎 **Daily Boost:** 2x applied!` : "";
       return "📅 **Daily Cut Claimed!**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou received: " + eco.formatWallet(eco.fromCopper(finalReward)) + marriageLine + boostLine + "\nNew balance: " + eco.formatWallet(newW) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Higher rank in the Family = better daily cut.*" + debtReminderSuffix;
@@ -5360,20 +5376,6 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       await eco.addCopper(cmd.targetId, copperAmt);
       const targetUser = await client.users.fetch(cmd.targetId).catch(() => null);
       return `💸 You sent **${copperAmt.toLocaleString()} Cash** to **${targetUser?.username || `<@${cmd.targetId}>`}**.`;
-    }
-    case "convert": {
-      const { amount, from, to } = cmd;
-      if (from === to) return "🔫 Same currency, nothing to convert.";
-      const copperIn = eco.toCopper(amount, from);
-      const tierTo = eco.TIERS.find(t => t.key === to);
-      if (!tierTo) return "🔫 Invalid currency.";
-      if (copperIn < tierTo.rate) return `🔫 Not enough to convert into ${to}. Minimum: ${tierTo.rate} copper equivalent.`;
-      const outAmount = Math.floor(copperIn / tierTo.rate);
-      const remainder = copperIn % tierTo.rate;
-      const deducted = await eco.deductCopper(message.author.id, copperIn - remainder);
-      if (!deducted) return "🔫 Insufficient funds.";
-      await eco.addCopper(message.author.id, outAmount * tierTo.rate);
-      return `💱 Converted **${amount} ${from}** → **${outAmount} ${tierTo.emoji} ${to}**`;
     }
     case "rob": {
       if (cmd.targetId === MASTER_ID) return "🤵 You dare rob Don Clint? The audacity. Watch yourself!";
@@ -5428,8 +5430,8 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (!bet) return "🔫 Invalid bet.";
       const cooldownMsgSL = await checkGambleCooldown(message.author.id);
       if (cooldownMsgSL) return cooldownMsgSL;
-      const MAX_BET = eco.toCopper(100, "stellar");
-      if (bet > MAX_BET && message.author.id !== MASTER_ID) return "🔫 Max bet is **100 Diamonds** per spin. The house has limits.";
+      const MAX_BET = 100000000; // 100 "Diamonds" equivalent, pre-flatten
+      if (bet > MAX_BET && message.author.id !== MASTER_ID) return "🔫 Max bet is **💵 100,000,000 Cash** per spin. The house has limits.";
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "🔫 Insufficient funds. Check your balance with **Cosa balance**.";
@@ -5455,8 +5457,8 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (!bet) return "🔫 Invalid bet.";
       const cooldownMsgCO = await checkGambleCooldown(message.author.id);
       if (cooldownMsgCO) return cooldownMsgCO;
-      const MAX_CF = eco.toCopper(100, "stellar");
-      if (bet > MAX_CF && message.author.id !== MASTER_ID) return "🔫 Max bet is **100 Diamonds** per flip.";
+      const MAX_CF = 100000000; // 100 "Diamonds" equivalent, pre-flatten
+      if (bet > MAX_CF && message.author.id !== MASTER_ID) return "🔫 Max bet is **💵 100,000,000 Cash** per flip.";
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "🔫 Insufficient funds.";
@@ -5479,8 +5481,8 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (!bet) return "🔫 Invalid bet.";
       const cooldownMsgWH = await checkGambleCooldown(message.author.id);
       if (cooldownMsgWH) return cooldownMsgWH;
-      const MAX_WHEEL = eco.toCopper(100, "stellar");
-      if (bet > MAX_WHEEL && message.author.id !== MASTER_ID) return "🔫 Max bet is **100 Diamonds** per spin. The Family controls the wheel.";
+      const MAX_WHEEL = 100000000; // 100 "Diamonds" equivalent, pre-flatten
+      if (bet > MAX_WHEEL && message.author.id !== MASTER_ID) return "🔫 Max bet is **💵 100,000,000 Cash** per spin. The Family controls the wheel.";
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "🔫 Insufficient funds.";
@@ -5579,8 +5581,8 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       if (!bet) return "🔫 Invalid bet.";
       const cooldownMsgRA = await checkGambleCooldown(message.author.id);
       if (cooldownMsgRA) return cooldownMsgRA;
-      const MAX_RACE = eco.toCopper(100, "stellar");
-      if (bet > MAX_RACE && message.author.id !== MASTER_ID) return "🔫 Max race bet is **100 Diamonds**.";
+      const MAX_RACE = 100000000; // 100 "Diamonds" equivalent, pre-flatten
+      if (bet > MAX_RACE && message.author.id !== MASTER_ID) return "🔫 Max race bet is **💵 100,000,000 Cash**.";
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "🔫 Insufficient funds.";
@@ -5636,7 +5638,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
 
     // ── Giveaway ────────────────────────────────────────────────────────────────
     case "giveaway_help":
-      return "🎉 **GIVEAWAY USAGE**\n`Cosa giveaway [amount] [tier] [duration]`\nExample: `Cosa giveaway 1000 gold 10m`\nDuration: use `m` for minutes, `h` for hours";
+      return "🎉 **GIVEAWAY USAGE**\n`Cosa giveaway [amount] [duration]`\nExample: `Cosa giveaway 1000 10m`\nDuration: use `m` for minutes, `h` for hours";
     case "giveaway": {
       if (message.author.id !== MASTER_ID) return "🔫 Only Don Clint can start giveaways.";
       const gCash = eco.parseBet(cmd.amount, cmd.tier);
@@ -5853,14 +5855,14 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
         await message.channel.send(
           `🤵 <@${MASTER_ID}> — **THE DON'S CALL HAS BEEN INVOKED!**\n` +
           `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-          `**${caller?.username || "Someone"}** has spent **10 Diamonds** to summon your market intervention!\n\n` +
+          `**${caller?.username || "Someone"}** has spent **💵 10,000,000 Cash** to summon your market intervention!\n\n` +
           `🤵 Don Clint — the market awaits your decree:\n` +
           `📈 Pump: \`Cosa market pump [TICKER] [rounds]\`\n` +
           `📉 Crash: \`Cosa market crash [TICKER] [rounds]\`\n\n` +
           `*You may intervene in any stock you choose. Or none at all. 😈*\n` +
           `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
         ).catch(() => {});
-        return `🤵 **Don Clint has been summoned!** Your 10 Diamonds is spent — his intervention is coming... or not. That's his choice. 🎲`;
+        return `🤵 **Don Clint has been summoned!** Your 💵 10,000,000 Cash is spent — his intervention is coming... or not. That's his choice. 🎲`;
       }
       return useResult;
     }
@@ -6182,6 +6184,7 @@ function buildRankHelpText(userId) {
   if (isDon || rankKey === "boss") {
     modLines.push("🏛️  CHANNEL SETUP");
     modLines.push("  Cosa set channel [type]  ← run it IN the channel you want to designate");
+    modLines.push("  Run it again in another channel to add a 2nd/3rd/etc — members can use any of them");
     modLines.push(`  Types: ${Object.keys(CHANNEL_SETTERS).join(", ")}`);
     modLines.push("");
   }
@@ -6208,7 +6211,7 @@ function buildRankHelpText(userId) {
     modLines.push("  Cosa blacklist gamble @user  ← ban from gambling");
     modLines.push("  Cosa unblacklist @user  ← remove gambling ban");
     modLines.push("  Cosa eco stats  ← economy overview");
-    modLines.push("  Cosa eco wipe rich  ← ⚠️ wipe all wallets with 10+ Diamonds");
+    modLines.push("  Cosa eco wipe rich  ← ⚠️ wipe all wallets with 💵 10,000,000+ Cash");
     modLines.push("  Cosa bank wipe all  ← ⚠️ wipe ALL bank balances");
     modLines.push("");
     modLines.push("📊  STOCK MARKET  (Don only)");
@@ -6601,8 +6604,14 @@ async function init() {
         ).catch(() => {});
         return;
       }
-      const label = await setChannelType(message.guild.id, type, message.channelId);
-      await message.reply(`✅ This channel is now set as **${label}**.`).catch(() => {});
+      const result = await setChannelType(message.guild.id, type, message.channelId);
+      if (result.alreadySet) {
+        await message.reply(`🔫 This channel is already set as **${result.label}** (#${result.position}).`).catch(() => {});
+      } else if (result.position === 1) {
+        await message.reply(`✅ This channel is now set as **${result.label}**.`).catch(() => {});
+      } else {
+        await message.reply(`✅ This channel is now set as **${result.label}** — this is your ${ordinal(result.position)} channel for it. Members can use any of the ${result.total}.`).catch(() => {});
+      }
       return;
     }
 
@@ -6990,7 +6999,7 @@ async function init() {
       // ── Restrict commoner commands to #bot-commands only ──────────────────
       // Mod/master commands are handled separately above this block and are
       // unaffected. DMs and master roaming channel are exempt.
-      if (!isDM && !isMaster && BOT_COMMANDS_CHANNEL_ID && channelId !== BOT_COMMANDS_CHANNEL_ID) {
+      if (!isDM && !isMaster && BOT_COMMANDS_CHANNEL_ID && !isChannelOfType("botcommands", channelId)) {
         const lastRedirect = botCommandsRedirects.get(channelId) || 0;
         if (Date.now() - lastRedirect > BOT_COMMANDS_REDIRECT_COOLDOWN_MS) {
           botCommandsRedirects.set(channelId, Date.now());
@@ -7017,7 +7026,7 @@ async function init() {
     // ── Restrict casual AI chat to #talk-with-cosa only ─────────────────────
     // Master is exempt if they activated roaming in this channel.
     // DMs are always exempt.
-    if (!isDM && TALK_CHANNEL_ID && channelId !== TALK_CHANNEL_ID) {
+    if (!isDM && TALK_CHANNEL_ID && !isChannelOfType("talk", channelId)) {
       if (isMaster && masterRoamingChannelId === channelId) {
         // Don is active here — let it through
       } else {
