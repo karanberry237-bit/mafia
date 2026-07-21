@@ -7444,4 +7444,4 @@ async function init() {
   client.login(process.env.DISCORD_TOKEN);
 }
 
-init().catch(err => { console.error("Fatal startup error:", err.message); process.exit(1); });
+init().catch(err => { console.error("Fatal startup error:", err.message); process.exit(1); }); // redeploy trigger
