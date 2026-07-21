@@ -13,11 +13,15 @@ const stockChart = require("./stockchart.js");
 const { tickFirmCandles } = require("./firmchart.js");
 const leaderboard = require("./leaderboard.js");
 const { cloneServerStructure } = require("./cloneServer.js");
-const chessCooldowns = new Map();
-const CHESS_COOLDOWN_MS = 30000;
-const gambleCooldowns = new Map();
-const GAMBLE_COOLDOWN_MS = 15000;
+// chessCooldowns, gambleCooldowns: per-guild, see the guildDataStore accessor
+// block below (defined once activateGuildConfig exists). gamblingBlacklist
+// stays a single shared Set — it's tied to the loan/debt system (loans.js),
+// which is one shared pool across every guild (Tier 2, out of scope here),
+// so splitting the blacklist per-guild would let a defaulted loan blacklist
+// someone in only one guild while the shared debt followed them everywhere.
 const gamblingBlacklist = new Set();
+const CHESS_COOLDOWN_MS = 30000;
+const GAMBLE_COOLDOWN_MS = 15000;
 // Treasury tracking
 const treasuryStats = {
   bankFees: 0,
@@ -42,7 +46,13 @@ async function saveTreasuryStats() {
 }
 
 // ── Lockdown State Persistence ───────────────────────────────────────────────
-const LOCKDOWN_STATE_KEY = "lockdown_state";
+// Used to be one shared key — one guild's blackout backup (locked channels,
+// stripped roles) could overwrite another guild's. Now namespaced per guild.
+// Always read through this getter (never the bare string) so every call site
+// automatically targets whichever guild is currently active.
+function lockdownStateKey(guildId) {
+  return "lockdown_state_" + (guildId || _activeGuildDataId);
+}
 
 // Save is called on FIRST YES — before execution — so data is safe before anything happens.
 // The saved data is kept for 5 hours after lift as a safety net (undo blackout strip).
@@ -57,7 +67,7 @@ async function saveLockdownState(pendingOnly = false) {
     expiresAt: null,
   };
   console.log("[BLACKOUT SAVE] Attempting — channels:", lockedChannelsBackup.length, "members:", strippedRolesBackup.size, "payload keys:", Object.keys(payload.strippedRoles).length);
-  const { error } = await supabase.from("empire_data").upsert({ key: LOCKDOWN_STATE_KEY, value: payload }, { onConflict: "key" });
+  const { error } = await supabase.from("empire_data").upsert({ key: lockdownStateKey(), value: payload }, { onConflict: "key" });
   if (error) {
     console.error("[BLACKOUT SAVE ERROR]", error.message, error.code, error.details);
     // Try to notify via admin channel if possible
@@ -72,10 +82,10 @@ async function saveLockdownState(pendingOnly = false) {
 // After lift: mark as lifted + set 5h expiry (kept for undo blackout strip)
 async function markLockdownLifted() {
   try {
-    const { data } = await supabase.from("empire_data").select("value").eq("key", LOCKDOWN_STATE_KEY).single();
+    const { data } = await supabase.from("empire_data").select("value").eq("key", lockdownStateKey()).single();
     if (!data?.value) return;
     await supabase.from("empire_data").upsert({
-      key: LOCKDOWN_STATE_KEY,
+      key: lockdownStateKey(),
       value: {
         ...data.value,
         active: false,
@@ -85,22 +95,23 @@ async function markLockdownLifted() {
       }
     }, { onConflict: "key" });
     // Auto-delete after 5 hours
+    const guildIdForExpiry = _activeGuildDataId;
     setTimeout(async () => {
-      await supabase.from("empire_data").delete().eq("key", LOCKDOWN_STATE_KEY).catch(() => {});
+      await supabase.from("empire_data").delete().eq("key", lockdownStateKey(guildIdForExpiry)).catch(() => {});
       console.log("[BLACKOUT] Saved state expired and cleared.");
     }, 5 * 60 * 60 * 1000);
     console.log("[BLACKOUT] Lift recorded. Data kept for 5 hours for undo.");
   } catch (e) { console.error("[BLACKOUT LIFT MARK]", e.message); }
 }
 
-async function loadLockdownState() {
+async function loadLockdownState(guildId) {
   try {
-    const { data } = await supabase.from("empire_data").select("value").eq("key", LOCKDOWN_STATE_KEY).single();
+    const { data } = await supabase.from("empire_data").select("value").eq("key", lockdownStateKey(guildId)).single();
     if (!data?.value) return;
     const v = data.value;
     // Expired?
     if (v.expiresAt && new Date(v.expiresAt).getTime() < Date.now()) {
-      await supabase.from("empire_data").delete().eq("key", LOCKDOWN_STATE_KEY).catch(() => {});
+      await supabase.from("empire_data").delete().eq("key", lockdownStateKey(guildId)).catch(() => {});
       return;
     }
     if (v.active) {
@@ -117,7 +128,7 @@ async function loadLockdownState() {
 // Returns the saved role data from Supabase for undo — regardless of current lock state
 async function getBlackoutRoleBackup() {
   try {
-    const { data } = await supabase.from("empire_data").select("value").eq("key", LOCKDOWN_STATE_KEY).single();
+    const { data } = await supabase.from("empire_data").select("value").eq("key", lockdownStateKey()).single();
     if (!data?.value) return null;
     if (data.value.expiresAt && new Date(data.value.expiresAt).getTime() < Date.now()) return null;
     return data.value.strippedRoles || null;
@@ -129,9 +140,8 @@ function addToTreasuryFees(amount, type) {
   else treasuryStats.gamblingLosses += amount;
   saveTreasuryStats().catch(() => {});
 }
-const robCooldowns = new Map();
+// robCooldowns, coinflipCooldowns: per-guild, see guildDataStore below.
 const ROB_COOLDOWN_MS = 5 * 60 * 1000;
-const coinflipCooldowns = new Map();
 const COINFLIP_COOLDOWN_MS = 5 * 60 * 1000;
 const loanCooldowns = new Map();
 const activeLoanData = new Map(); // userId -> { amount, dueDate, rankKey }
@@ -230,22 +240,40 @@ async function loadLoans() {
   } catch (e) { console.error("[LOAD LOANS]", e.message); }
 }
 
-async function loadData() {
+// Used to live under one shared "main" key for every guild the bot was in —
+// promoting/warning/exiling someone in one server affected every other
+// server. Each guild now gets its own "main_<guildId>" row.
+async function loadDataForGuild(guildId) {
   try {
-    const { data, error } = await supabase
-      .from("empire_data")
-      .select("value")
-      .eq("key", "main")
-      .single();
-    if (error || !data) return { familyRoster: {}, warningStore: {}, exileStore: {}, watchlist: {}, bannedFingerprints: [], tempExiles: {} };
-    return data.value;
-  } catch (e) {
-    console.error("Failed to load data:", e);
-    return { familyRoster: {}, warningStore: {}, exileStore: {}, watchlist: {}, bannedFingerprints: [], tempExiles: {} };
-  }
+    const { data, error } = await supabase.from("empire_data").select("value").eq("key", "main_" + guildId).single();
+    if (!error && data?.value) return data.value;
+  } catch (e) { console.error("Failed to load data for guild " + guildId + ":", e.message); }
+  return { familyRoster: {}, warningStore: {}, exileStore: {}, watchlist: {}, bannedFingerprints: [], tempExiles: {} };
+}
+
+// One-time migration read for the legacy shared "main" row (pre-per-guild).
+// Only the FIRST guild the bot starts up in inherits it — there was really
+// only ever one guild's worth of real data tracked under the old shared key.
+async function loadLegacyMainData() {
+  try {
+    const { data, error } = await supabase.from("empire_data").select("value").eq("key", "main").single();
+    if (!error && data?.value) return data.value;
+  } catch (e) { /* no legacy row, fine */ }
+  return null;
+}
+
+function applyLoadedGuildData(v) {
+  familyRoster = new Map(Object.entries(v.familyRoster || {}));
+  warningStore = new Map(Object.entries(v.warningStore || {}));
+  exileStore = new Map(Object.entries(v.exileStore || {}));
+  watchlist = new Map(Object.entries(v.watchlist || {}));
+  tempExiles = new Map(Object.entries(v.tempExiles || {}));
+  bannedFingerprints = v.bannedFingerprints || [];
 }
 
 async function saveData() {
+  const guildId = _activeGuildDataId;
+  if (!guildId || guildId === "__dm__") return; // nothing guild-specific to persist for DMs
   try {
     const data = {
       familyRoster: Object.fromEntries(familyRoster),
@@ -255,7 +283,7 @@ async function saveData() {
       bannedFingerprints,
       tempExiles: Object.fromEntries(tempExiles),
     };
-    await supabase.from("empire_data").upsert({ key: "main", value: data });
+    await supabase.from("empire_data").upsert({ key: "main_" + guildId, value: data }, { onConflict: "key" });
   } catch (e) {
     console.error("Failed to save data:", e);
   }
@@ -308,11 +336,96 @@ const chessQueue = []; // { type: "pvp"|"bot", challengerId, challengerName, opp
 // guild's values were most recently activated for the message being processed.
 const guildConfigs = new Map(); // guildId -> { ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, ... }
 
+// ── Per-guild moderation / session state ────────────────────────────────────
+// Everything below (family roster, warnings, exile, watchlist, mood, shadow
+// court, lockdown, god/jarvis mode, toxicity tracking, cooldowns, etc.) used
+// to be plain module-level variables shared across every guild the bot is
+// in — promoting someone in one server made them a "Made Man" in every
+// server, one guild's Shadow Court blocked every other guild's, etc.
+//
+// Rather than hunting down and rewriting every one of the ~250 read/write
+// sites across this file (`familyRoster.set(...)`, `currentMood = x`,
+// `lockdownActive`, ...), each name below is turned into a getter/setter
+// property on the global object, backed by a per-guildId store. Since this
+// file has no "use strict" pragma and none of these names are declared with
+// their own `let`/`const` anymore (that declaration was removed at each
+// site — see the "per-guild, see guildDataStore below" comments), every
+// existing bare reference to e.g. `familyRoster` anywhere in the file keeps
+// compiling and working completely unchanged — reads, writes, `.set()`/
+// `.push()` mutation, `X++`, all of it — but now transparently resolves to
+// whichever guild activateGuildConfig() most recently activated, instead of
+// one shared value for the whole bot.
+//
+// IMPORTANT: this only stays correct while accessed synchronously within a
+// runGuildEvent()-wrapped handler. Any setTimeout/setInterval callback that
+// touches one of these names — because it was scheduled from inside a
+// handler but fires later, after other guilds' events have run — MUST call
+// activateGuildConfig(theGuildIdThatScheduledIt) as its very first line to
+// reactivate the right guild's bucket before reading/writing anything here.
+// (Every such timer in this file has already been given that call — search
+// for "reactivate" to find them all.)
+const guildDataDefaults = () => ({
+  familyRoster: new Map(),
+  warningStore: new Map(),
+  exileStore: new Map(),
+  watchlist: new Map(),
+  tempExiles: new Map(),
+  bannedFingerprints: [],
+  shadowVotes: new Map(),        // targetId -> { exileVotes: Set, mercyVotes: Set, startedAt, targetName, counterMsgId }
+  activeShadowTargetId: null,
+  currentMood: MOODS[Math.floor(Math.random() * MOODS.length)],
+  moodSetAt: Date.now(),
+  MOD_ROLE_IDS: new Set(),       // populated by setup if you add more staff roles later
+  lockdownActive: false,
+  lockdownConfirmStep: 0,
+  wickAlertPending: false,
+  strippedRolesBackup: new Map(),
+  lockedChannelsBackup: [],
+  lastMessageTime: new Map(),
+  masterRoamingChannelId: null,
+  masterRoamingTimer: null,
+  deadManInterval: null,
+  recentJoins: [],
+  recentBanTime: { time: 0 },
+  toxicTracker: new Map(),
+  psychoWarfareInterval: null,
+  inactivityInterval: null,
+  rivalDissChancePercent: 8,     // % chance per rival message, adjustable via command
+  godModeActive: false,
+  godModeInactivityTimer: null,
+  godModeSavedHistory: [],
+  godModeGuildId: null,
+  godModeSavedMood: null,
+  jarvisModeActive: false,
+  jarvisModeGuildId: null,
+  jarvisModeSavedMood: null,
+  jarvisModeSavedHistory: [],
+  jarvisInactivityTimer: null,
+  chessCooldowns: new Map(),
+  gambleCooldowns: new Map(),
+  robCooldowns: new Map(),
+  coinflipCooldowns: new Map(),
+});
+const guildDataStore = new Map(); // guildId (or "__dm__") -> the object shape above
+let _activeGuildDataId = null;
+function _guildData() {
+  if (!guildDataStore.has(_activeGuildDataId)) guildDataStore.set(_activeGuildDataId, guildDataDefaults());
+  return guildDataStore.get(_activeGuildDataId);
+}
+for (const key of Object.keys(guildDataDefaults())) {
+  Object.defineProperty(globalThis, key, {
+    configurable: true,
+    get() { return _guildData()[key]; },
+    set(v) { _guildData()[key] = v; },
+  });
+}
+
 // Copies the given guild's saved config into the active globals. Call this
 // first thing whenever a message/interaction for a specific guild comes in.
 // Falls back to all-null (safe defaults — most things just no-op without a
 // channel ID) if that guild has never run setup.
 function activateGuildConfig(guildId) {
+  _activeGuildDataId = guildId || "__dm__"; // repoints every accessor in the guildDataStore block below
   const cfg = guildConfigs.get(guildId) || {};
   ELDER_ROLE_ID = cfg.ELDER_ROLE_ID || null;
   LOCKDOWN_CHANNEL_ID = cfg.LOCKDOWN_CHANNEL_ID || null;
@@ -348,6 +461,31 @@ function captureGuildConfig(guildId) {
     SHADOW_COURT_ID, MOD_LOG_CHANNEL_ID, TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
     PROTECTED_ROLE_IDS, CHANNEL_ID_ARRAYS,
   });
+}
+
+// ── Guild event queue ────────────────────────────────────────────────────────
+// activateGuildConfig() points the globals above at one guild's config, but
+// every event handler is async and awaits partway through (AI calls, DB
+// writes, Discord API calls). Node's event loop can start processing a
+// DIFFERENT guild's event during any of those awaits, and that handler's own
+// activateGuildConfig() call overwrites the globals out from under the first
+// handler — so guild A can end up reading guild B's channel IDs mid-flight
+// (e.g. redirecting a user to a completely different server's #bot-commands).
+// Routing every guild-config-dependent event through this queue guarantees
+// each event's activateGuildConfig() call and everything it does with the
+// globals afterward complete atomically before the next event is allowed to
+// activate a (possibly different) guild's config.
+let guildEventQueue = Promise.resolve();
+function runGuildEvent(guildId, handler) {
+  guildEventQueue = guildEventQueue.then(async () => {
+    activateGuildConfig(guildId); // guildId undefined (DMs) resolves to the shared "__dm__" bucket
+    try {
+      await handler();
+    } catch (e) {
+      console.error("[GUILD EVENT]", e.stack || e.message);
+    }
+  });
+  return guildEventQueue;
 }
 
 const SETUP_CONFIG_KEY = "cosa_setup_ids";
@@ -616,8 +754,7 @@ const MOODS = [
   { name: "Ashamed",             emoji: "😶", desc: "Cosa speaks little. When it does, it's quiet, humble, and burdened. Something weighs heavily on its conscience.",     roastBoost: false, mercyReduced: false },
 ];
 
-let currentMood = MOODS[Math.floor(Math.random() * MOODS.length)];
-let moodSetAt = Date.now();
+// currentMood, moodSetAt: per-guild, see guildDataStore below.
 
 function getMoodPersonality() {
   let extra = "";
@@ -638,10 +775,12 @@ function getMoodPersonality() {
 }
 
 function startMoodSystem(guild) {
+  const guildId = guild.id;
   // Change mood every 4-6 hours
   const moodInterval = () => {
     const delay = (4 + Math.random() * 2) * 60 * 60 * 1000;
     setTimeout(async () => {
+      activateGuildConfig(guildId); // reactivate — this timer fires long after any per-guild event
       const oldMood = currentMood;
       const newMoods = MOODS.filter(m => m.name !== oldMood.name);
       currentMood = newMoods[Math.floor(Math.random() * newMoods.length)];
@@ -649,6 +788,7 @@ function startMoodSystem(guild) {
       // Rare mood swing (15% chance of a second swing within 30 min)
       if (Math.random() < 0.15) {
         setTimeout(async () => {
+          activateGuildConfig(guildId);
           const swingMood = MOODS.filter(m => m.name !== currentMood.name)[Math.floor(Math.random() * (MOODS.length - 1))];
           currentMood = swingMood;
           moodSetAt = Date.now();
@@ -657,13 +797,13 @@ function startMoodSystem(guild) {
       moodInterval();
     }, delay);
   };
+  activateGuildConfig(guildId);
   moodInterval();
-  console.log(`🎭 Mood system started — current mood: ${currentMood.name}`);
+  console.log(`🎭 Mood system started for ${guild.name} — current mood: ${currentMood.name}`);
 }
 
 // ── Shadow Court System ───────────────────────────────────────────────────────
-const shadowVotes = new Map(); // targetId -> { exileVotes: Set, mercyVotes: Set, startedAt, targetName, counterMsgId }
-let activeShadowTargetId = null;
+// shadowVotes, activeShadowTargetId: per-guild, see guildDataStore below.
 
 async function updateCourtCounter(guild, targetId) {
   const voteData = shadowVotes.get(targetId);
@@ -725,6 +865,7 @@ async function startShadowVote(guild, targetId, targetName, initiatorId, isAuto 
 
   // Tally after 24h
   setTimeout(async () => {
+    activateGuildConfig(guild.id); // reactivate — this timer fires long after any per-guild event
     const voteData = shadowVotes.get(targetId);
     if (!voteData) return;
     shadowVotes.delete(targetId);
@@ -757,6 +898,7 @@ async function startShadowVote(guild, targetId, targetName, initiatorId, isAuto 
 function startAutoShadowCourt(guild) {
   // Run every 24 hours, pick a random Helper+ member
   const runCourt = async () => {
+    activateGuildConfig(guild.id); // reactivate — this timer fires long after any per-guild event
     if (activeShadowTargetId) { setTimeout(runCourt, 24 * 60 * 60 * 1000); return; }
     try {
       await guild.members.fetch();
@@ -771,9 +913,9 @@ function startAutoShadowCourt(guild) {
     setTimeout(runCourt, 24 * 60 * 60 * 1000);
   };
   setTimeout(runCourt, 24 * 60 * 60 * 1000);
-  console.log("👁️ Auto Shadow Court started — first trial in 24h");
+  console.log(`👁️ Auto Shadow Court started for ${guild.name} — first trial in 24h`);
 }
-let MOD_ROLE_IDS = new Set(); // populated by setup if you add more staff roles later
+// MOD_ROLE_IDS: per-guild, see guildDataStore below.
 
 // ── Family Ranks ──────────────────────────────────────────────────────────────
 // "streetrat" is the implicit default for anyone not in familyRoster (not a key here,
@@ -795,20 +937,11 @@ const RANKS = {
 const VALID_RANK_NAMES = Object.keys(RANKS).map(k => RANKS[k].title);
 
 // ── State (will be populated after loadData) ──────────────────────────────────
-let familyRoster;
-let warningStore;
-let exileStore;
-let watchlist;
-let tempExiles;
-let bannedFingerprints;
-
-let lockdownActive = false;
-let lockdownConfirmStep = 0;
-let wickAlertPending = false;
-let strippedRolesBackup = new Map();
-let lockedChannelsBackup = [];
+// familyRoster, warningStore, exileStore, watchlist, tempExiles,
+// bannedFingerprints, lockdownActive, lockdownConfirmStep, wickAlertPending,
+// strippedRolesBackup, lockedChannelsBackup, lastMessageTime: all per-guild,
+// see guildDataStore below.
 const pendingConfirmations = new Map();
-const lastMessageTime = new Map();
 // Tracks the last time Cosa redirected someone to #talk-with-cosa, per channel.
 // Prevents spamming a redirect notice on every single message in a busy
 // off-topic channel — only nudges once per cooldown window, then goes quiet.
@@ -818,12 +951,12 @@ const botCommandsRedirects = new Map(); // channelId -> timestamp
 const BOT_COMMANDS_REDIRECT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
 // ── Master roaming channel (Don talks anywhere for 10 min) ────────────────────
-let masterRoamingChannelId = null;
-let masterRoamingTimer = null;
-function setMasterRoamingChannel(channelId) {
+// masterRoamingChannelId, masterRoamingTimer: per-guild, see guildDataStore below.
+function setMasterRoamingChannel(guildId, channelId) {
   masterRoamingChannelId = channelId;
   if (masterRoamingTimer) clearTimeout(masterRoamingTimer);
   masterRoamingTimer = setTimeout(() => {
+    activateGuildConfig(guildId); // this fires long after the event that scheduled it — reactivate its guild first
     masterRoamingChannelId = null;
     masterRoamingTimer = null;
   }, 10 * 60 * 1000);
@@ -835,9 +968,7 @@ function isMasterAllowedChannel(channelId) {
   if (channelId === masterRoamingChannelId) return true;
   return false;
 }
-let deadManInterval = null;
-const recentJoins = [];
-const recentBanTime = { time: 0 };
+// deadManInterval, recentJoins, recentBanTime: per-guild, see guildDataStore below.
 const holdingStore = new Map();
 const pendingLastWords = new Map();
 
@@ -1157,7 +1288,7 @@ const TOXIC_WORDS = [
   "spastic","faggot","fag","cunt","bastard","piss off cosa",
   "loser bot","bot sucks","you suck","ur trash","ur garbage","ur stupid","ur dumb",
 ];
-const toxicTracker = new Map();
+// toxicTracker: per-guild, see guildDataStore below.
 function getToxicData(userId) {
   if (!toxicTracker.has(userId)) toxicTracker.set(userId, { toxicCount: 0, offenseLevel: 0, warned: false });
   return toxicTracker.get(userId);
@@ -1216,8 +1347,10 @@ const DEAD_MANS_MESSAGES = [
 ];
 
 function startDeadMansSwitch(guild) {
+  activateGuildConfig(guild.id);
   if (deadManInterval) { clearTimeout(deadManInterval); deadManInterval = null; }
   const fire = async () => {
+    activateGuildConfig(guild.id); // reactivate — this timer fires long after any per-guild event
     const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
     // Dead man message removed
     deadManInterval = setTimeout(fire, timerConfig.deadman);
@@ -1253,12 +1386,14 @@ const WATCHED_DMS = [
   "👁️ Don Clint knows. Cosa knows. Sleep tight.",
 ];
 
-let psychoWarfareInterval = null;
+// psychoWarfareInterval: per-guild, see guildDataStore below.
 
 function startPsychologicalWarfare(guild) {
+  activateGuildConfig(guild.id);
   if (psychoWarfareInterval) { clearTimeout(psychoWarfareInterval); psychoWarfareInterval = null; }
 
   const doWarfare = async () => {
+    activateGuildConfig(guild.id); // reactivate — this timer fires long after any per-guild event
     const total = psychChances.summon + psychChances.lockdown + psychChances.dm + psychChances.wanted;
     if (total <= 0) {
       // Everything's been turned off — skip this round entirely instead of
@@ -1454,10 +1589,12 @@ async function applyExileToNewChannel(channel) {
 }
 
 // ── Inactivity Check ──────────────────────────────────────────────────────────
-let inactivityInterval = null;
+// inactivityInterval: per-guild, see guildDataStore below.
 function startInactivityCheck(guild) {
+  activateGuildConfig(guild.id);
   if (inactivityInterval) { clearInterval(inactivityInterval); inactivityInterval = null; }
   inactivityInterval = setInterval(async () => {
+    activateGuildConfig(guild.id); // reactivate — this timer fires long after any per-guild event
     try {
       const now = Date.now();
       await guild.members.fetch();
@@ -1825,7 +1962,7 @@ async function getAIResponse(guildId, channelId, userMessage, username, systemOv
 // Lets Cosa take random or commanded shots at another bot in the server.
 // Deliberately kept OUT of the per-guild history — this is one-off flavor, not a real
 // conversation, and shouldn't bias Cosa's memory of actual member interactions.
-let rivalDissChancePercent = 8;     // % chance per rival message, adjustable via command
+// rivalDissChancePercent: per-guild, see guildDataStore below.
 const RIVAL_DISS_COOLDOWN_MS = 60000;  // min gap between ambient (non-command) disses per channel
 const RIVAL_CHAIN_LIMIT = 3;           // max consecutive bot-vs-bot exchanges before Cosa goes quiet
 const RIVAL_CHAIN_WINDOW_MS = 45000;   // chain resets if rival hasn't spoken again within this window
@@ -1887,11 +2024,8 @@ const HIGH_RISK_ROLE_NAMES = new Set([
 const NUCLEAR_GOD_ACTIONS = new Set(["ban", "kick", "delete_channel", "delete_channel_id", "ban_everyone"]);
 const GOD_MODE_INACTIVITY_MS = 10 * 60 * 1000;
 
-let godModeActive        = false;
-let godModeInactivityTimer = null;
-let godModeSavedHistory  = [];
-let godModeGuildId       = null;
-let godModeSavedMood     = null;
+// godModeActive, godModeInactivityTimer, godModeSavedHistory, godModeGuildId,
+// godModeSavedMood: per-guild, see guildDataStore below.
 
 // Guild-scoped pending confirmations. Previously this was a single global
 // (`pendingGodAction`), which meant a confirmation staged in one guild could
@@ -1973,11 +2107,8 @@ function deactivateGodMode() {
 //  before anything else. Independent toggle — works with or without Loyalty
 //  Mode being on. Same execute/cancel/nuclear confirmation safety underneath.
 // ══════════════════════════════════════════════════════════════════════════════
-let jarvisModeActive         = false;
-let jarvisModeGuildId        = null;
-let jarvisModeSavedMood      = null;
-let jarvisModeSavedHistory   = [];
-let jarvisInactivityTimer    = null;
+// jarvisModeActive, jarvisModeGuildId, jarvisModeSavedMood,
+// jarvisModeSavedHistory, jarvisInactivityTimer: per-guild, see guildDataStore below.
 const JARVIS_INACTIVITY_MS   = 10 * 60 * 1000;
 
 const JARVIS_PERSONALITY = `You are JARVIS — Tony Stark's AI from the Avengers. Calm, dry, hyper-competent, quietly amused by everything.
@@ -3170,6 +3301,7 @@ async function handleGodModeMessage(message, guild, adminCh) {
   // Reset inactivity on every Don message while in God Mode (Loyalty Mode)
   if (godModeActive) {
     godResetInactivity(async () => {
+      activateGuildConfig(guild?.id); // reactivate — this timer fires long after the message that scheduled it
       deactivateGodMode();
       if (adminCh) await adminCh.send(`⏳ **[GOD MODE LOG] Loyalty Mode auto-deactivated** — 10 min inactivity.`).catch(() => {});
       const ch = await client.channels.fetch(message.channelId).catch(() => null);
@@ -3179,6 +3311,7 @@ async function handleGodModeMessage(message, guild, adminCh) {
   // Reset inactivity on every Don message while Jarvis Mode is active (independent toggle)
   if (jarvisModeActive) {
     jarvisResetInactivity(async () => {
+      activateGuildConfig(guild?.id); // reactivate — this timer fires long after the message that scheduled it
       deactivateJarvisMode();
       if (adminCh) await adminCh.send(`⏳ **[JARVIS MODE LOG] Jarvis Mode auto-deactivated** — 10 min inactivity.`).catch(() => {});
       const ch = await client.channels.fetch(message.channelId).catch(() => null);
@@ -3489,7 +3622,7 @@ async function liftLockdown(guild) {
   // Check Supabase too — lockdownActive may be false after a bot restart
   if (!lockdownActive) {
     try {
-      const { data } = await supabase.from("empire_data").select("value").eq("key", LOCKDOWN_STATE_KEY).single();
+      const { data } = await supabase.from("empire_data").select("value").eq("key", lockdownStateKey(guild.id)).single();
       if (data?.value?.active) {
         // Restore in-memory state from Supabase then proceed
         lockdownActive = true;
@@ -3507,7 +3640,7 @@ async function liftLockdown(guild) {
   let liftChannels = [...lockedChannelsBackup];
   let liftRoles = new Map(strippedRolesBackup);
   try {
-    const { data } = await supabase.from("empire_data").select("value").eq("key", LOCKDOWN_STATE_KEY).single();
+    const { data } = await supabase.from("empire_data").select("value").eq("key", lockdownStateKey(guild.id)).single();
     if (data?.value) {
       if (data.value.lockedChannels?.length) liftChannels = data.value.lockedChannels;
       if (data.value.strippedRoles && Object.keys(data.value.strippedRoles).length) {
@@ -6488,37 +6621,52 @@ async function init() {
   if (!process.env.DISCORD_TOKEN)   throw new Error("DISCORD_TOKEN is not set!");
   if (!process.env.SUPABASE_URL)    throw new Error("SUPABASE_URL is not set!");
   if (!process.env.SUPABASE_KEY)    throw new Error("SUPABASE_KEY is not set!");
-  console.log("⏳ Loading data from Supabase...");
-  const savedData = await loadData();
-
-  familyRoster   = new Map(Object.entries(savedData.familyRoster || {}));
-  warningStore     = new Map(Object.entries(savedData.warningStore || {}));
-  exileStore       = new Map(Object.entries(savedData.exileStore || {}));
-  watchlist        = new Map(Object.entries(savedData.watchlist || {}));
-  tempExiles       = new Map(Object.entries(savedData.tempExiles || {}));
-  bannedFingerprints = savedData.bannedFingerprints || [];
-
-  console.log(`✅ Data loaded. ${familyRoster.size} made members, ${warningStore.size} warned users.`);
+  console.log("⏳ Loading setup config from Supabase...");
   await loadSetupConfig();
+  // Per-guild moderation data (roster/warnings/exile/watchlist/etc.) is loaded
+  // once the client is ready and we actually know which guilds we're in —
+  // see the ClientReady handler below.
 
   // ── Ready ───────────────────────────────────────────────────────────────────
   client.once(Events.ClientReady, async (readyClient) => {
     console.log(`✅ The Family's Cosa is online as ${readyClient.user.tag}`);
     readyClient.user.setActivity("watching over the Family 🔫");
     console.log(`✅ Active in ${readyClient.guilds.cache.size} guild(s): ${[...readyClient.guilds.cache.values()].map(g => g.name).join(", ")}`);
+
+    // Load each guild's own moderation data (roster/warnings/exile/watchlist/
+    // etc.) and start each guild's own copy of the five background
+    // subsystems (dead-man's switch, inactivity check, psych warfare, mood,
+    // auto shadow court). These used to only ever run for whichever guild
+    // happened to be readyClient.guilds.cache.first() — every other guild
+    // silently got none of this behavior at all.
+    let isFirstGuild = true;
+    for (const guildInLoop of readyClient.guilds.cache.values()) {
+      activateGuildConfig(guildInLoop.id);
+      let loaded = await loadDataForGuild(guildInLoop.id);
+      if (isFirstGuild && (!loaded || (!Object.keys(loaded.familyRoster || {}).length && !Object.keys(loaded.warningStore || {}).length && !Object.keys(loaded.exileStore || {}).length))) {
+        const legacy = await loadLegacyMainData();
+        if (legacy) { loaded = legacy; console.log(`⚠️ Migrated legacy shared moderation data to ${guildInLoop.name} — it will be saved under this guild's own key from now on.`); }
+      }
+      applyLoadedGuildData(loaded);
+      isFirstGuild = false;
+      await loadLockdownState(guildInLoop.id); // resume lockdown if bot restarted mid-lockdown
+      startDeadMansSwitch(guildInLoop);
+      startInactivityCheck(guildInLoop);
+      startPsychologicalWarfare(guildInLoop);
+      startMoodSystem(guildInLoop);
+      startAutoShadowCourt(guildInLoop);
+      console.log(`✅ Guild data + background subsystems loaded for ${guildInLoop.name} (${familyRoster.size} made members, ${warningStore.size} warned users)`);
+    }
+
     const guild = readyClient.guilds.cache.first();
     if (guild) {
-      // Activate the first guild's config for startup tasks (mood, tips, etc.)
+      // Re-activate the first guild's config — everything below this point
+      // (loans, giveaways, stock market, firms, leaderboard, bank) is still
+      // intentionally one shared instance across every guild the bot is in.
       activateGuildConfig(guild.id);
-      startDeadMansSwitch(guild);
-      startInactivityCheck(guild);
-      startPsychologicalWarfare(guild);
-      startMoodSystem(guild);
-      startAutoShadowCourt(guild);
       await loadLoans();
       await loadCosaMemory();
       await loadTreasuryStats();
-      await loadLockdownState(); // resume lockdown if bot restarted mid-lockdown
       await features.loadGiveaways(guild);
       await features.loadPortfolios();
       await features.loadStockPrices();
@@ -6556,13 +6704,21 @@ async function init() {
       setTimeout(syncDonBank, 60 * 60 * 1000);
       setTimeout(runBank, 24 * 60 * 60 * 1000);
       console.log("🏦 Bank daily processing scheduled");
+    }
+
+    // Re-register temp-exile expiry timers for EVERY guild (not just the
+    // first) — each guild's own tempExiles/exileStore, activated in turn.
+    for (const guildInLoop of readyClient.guilds.cache.values()) {
+      activateGuildConfig(guildInLoop.id);
       for (const [userId, data] of tempExiles) {
         const remaining = data.expiresAt - Date.now();
+        const guildId = guildInLoop.id;
         if (remaining <= 0) {
-          if (exileStore.has(userId)) await unexileUser(guild, userId, true);
+          if (exileStore.has(userId)) await unexileUser(guildInLoop, userId, true);
         } else {
           setTimeout(async () => {
-            if (exileStore.has(userId)) await unexileUser(guild, userId, true);
+            activateGuildConfig(guildId); // reactivate — fires long after boot's per-guild loop moved on
+            if (exileStore.has(userId)) await unexileUser(guildInLoop, userId, true);
           }, remaining);
         }
       }
@@ -6575,26 +6731,38 @@ async function init() {
   });
 
   // ── New Channel ─────────────────────────────────────────────────────────────
-  client.on(Events.ChannelCreate, async (channel) => { await applyExileToNewChannel(channel); });
+  client.on(Events.ChannelCreate, (channel) => {
+    runGuildEvent(channel.guild?.id, async () => { await applyExileToNewChannel(channel); });
+  });
 
   // ── Member Leave ────────────────────────────────────────────────────────────
-  client.on(Events.GuildMemberRemove, async (member) => {
-    if (member.user.bot) return;
-    const genChannel = member.guild.channels.cache.get(GENERAL_CHANNEL_ID);
-    if (!genChannel) return;
-    const msg = BETRAYAL_MSGS[Math.floor(Math.random() * BETRAYAL_MSGS.length)].replace("{user}", `**${member.user.username}**`);
-    await genChannel.send(msg).catch(() => {});
+  client.on(Events.GuildMemberRemove, (member) => {
+    runGuildEvent(member.guild.id, async () => {
+      if (member.user.bot) return;
+      const genChannel = member.guild.channels.cache.get(GENERAL_CHANNEL_ID);
+      if (!genChannel) return;
+      const msg = BETRAYAL_MSGS[Math.floor(Math.random() * BETRAYAL_MSGS.length)].replace("{user}", `**${member.user.username}**`);
+      await genChannel.send(msg).catch(() => {});
+    });
   });
 
   // ── Member Join / Verify ────────────────────────────────────────────────────
-  client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+  client.on(Events.GuildMemberUpdate, (oldMember, newMember) => {
+    runGuildEvent(newMember.guild.id, async () => {
     const hadVerified = oldMember.roles.cache.has(VERIFIED_ROLE_ID);
     const hasVerified = newMember.roles.cache.has(VERIFIED_ROLE_ID);
     if (hadVerified || !hasVerified) return;
     const delay = (10 + Math.random() * 20) * 1000;
+    // Captured now, synchronously, while this guild's config is active — the
+    // setTimeout callback below fires 10-30s from now, by which point the
+    // queue may have moved on to other guilds and the globals may point
+    // elsewhere, so LOCKDOWN_CHANNEL_ID itself must not be read inside it.
+    const lockdownChannelId = LOCKDOWN_CHANNEL_ID;
+    const guildIdForFingerprint = newMember.guild.id;
     setTimeout(async () => {
+      activateGuildConfig(guildIdForFingerprint); // reactivate — this timer fires long after the event that scheduled it
       const { score, flags } = await scoreFingerprint(newMember);
-      const adminChannel = newMember.guild.channels.cache.get(LOCKDOWN_CHANNEL_ID);
+      const adminChannel = newMember.guild.channels.cache.get(lockdownChannelId);
       if (score >= 10) {
         try {
           storeBanFingerprint(newMember.user);
@@ -6619,10 +6787,12 @@ async function init() {
         if (adminChannel) await adminChannel.send(`👁️ **SILENT FLAG** — <@${MASTER_ID}>\n**${newMember.user.username}** (${newMember.id}) joined. Score: **${score}/12**\n${flags.join("\n")}`).catch(() => {});
       }
     }, delay);
+    });
   });
 
   // ── Message Handler ─────────────────────────────────────────────────────────
-  client.on(Events.MessageCreate, async (message) => {
+  client.on(Events.MessageCreate, (message) => {
+    runGuildEvent(message.guild?.id, async () => {
     if (message.author.bot) {
       // Delete Carl-bot logs that contain slur variants
       if (message.author.id === "235148962103951360") {
@@ -6673,9 +6843,8 @@ async function init() {
     }
 
     const isDM = !message.guild;
-    // Activate this guild's saved config so all channel/role IDs are correct
-    // for THIS guild — prevents cross-guild bleed when bot is in multiple servers.
-    if (message.guild) activateGuildConfig(message.guild.id);
+    // Guild config for this event was already activated by runGuildEvent()
+    // above, atomically with respect to every other guild's events.
     const channelId = message.channelId;
     const isMaster = message.author.id === MASTER_ID;
     const isMadeMan = familyRoster.has(message.author.id);
@@ -7023,7 +7192,7 @@ async function init() {
     // or the bot pinged first, same as a real assistant would.
     const jarvisAlwaysOn = isMaster && jarvisModeActive;
     if (isMaster && !isDM && (isTriggered(message) || repliedToBot || jarvisAlwaysOn)) {
-      setMasterRoamingChannel(channelId);
+      setMasterRoamingChannel(message.guild.id, channelId);
     }
 
     // While Jarvis is active, Cosa is Don Clint's assistant and nobody else's.
@@ -7205,12 +7374,12 @@ async function init() {
       if (e.includes("rate limit") || e.includes("429")) await message.reply("give me a sec 🔫").catch(()=>{});
       else await message.reply(`🔫 Something went wrong on my end. Try again.`).catch(()=>{});
     }
+    });
   });
 
   // ── Slash Command Handler ───────────────────────────────────────────────────
-  client.on(Events.InteractionCreate, async (interaction) => {
-    // Activate per-guild config for this interaction
-    if (interaction.guild) activateGuildConfig(interaction.guild.id);
+  client.on(Events.InteractionCreate, (interaction) => {
+    runGuildEvent(interaction.guild?.id, async () => {
 
     // ── Mass-ban "Expand full list" button ────────────────────────────────────
     if (interaction.isButton() && interaction.customId.startsWith("massban_expand:")) {
@@ -7435,6 +7604,7 @@ async function init() {
         return;
       }
     }
+    });
   });
 
   client.login(process.env.DISCORD_TOKEN);
