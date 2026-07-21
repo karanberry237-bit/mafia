@@ -2533,8 +2533,9 @@ async function aiParseGodCommands(text, guild, message) {
 }
 
 async function executeGodAction(cmd, guild, adminCh) {
-  // SAFETY: never act against Don Clint himself
-  if (cmd.userId === MASTER_ID) return "I will never act against Don Clint himself. Command rejected.";
+  // SAFETY: never act against Don Clint himself — except granting him a role,
+  // which is how Don assigns himself roles in Jarvis Mode and is never harmful.
+  if (cmd.userId === MASTER_ID && cmd.action !== "give_role") return "I will never act against Don Clint himself. Command rejected.";
   try {
     switch (cmd.action) {
       case "create_role": {
