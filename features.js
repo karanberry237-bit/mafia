@@ -155,6 +155,12 @@ async function endGiveaway(messageId, guild) {
 }
 
 async function rerollGiveaway(messageId, guild) {
+  let hostId = null;
+  try {
+    const { data } = await supabase.from("giveaways").select("host_id").eq("message_id", messageId).single();
+    hostId = data?.host_id || null;
+  } catch {}
+
   for (const [, ch] of guild.channels.cache) {
     if (!ch.isTextBased()) continue;
     try {
@@ -162,7 +168,7 @@ async function rerollGiveaway(messageId, guild) {
       const reaction = msg.reactions.cache.get("🎉");
       if (!reaction) return "🔫 No entries found.";
       const users = await reaction.users.fetch();
-      const entries = [...users.values()].filter(u => !u.bot);
+      const entries = [...users.values()].filter(u => !u.bot && u.id !== hostId);
       if (!entries.length) return "🔫 No entries to reroll from.";
       const winner = entries[Math.floor(Math.random() * entries.length)];
       await ch.send(`🎉 **REROLL!** New winner: <@${winner.id}>! Congratulations! 🏆`).catch(() => {});
@@ -1160,6 +1166,13 @@ async function acceptProposal(targetId, guild, channelId) {
 
   clearTimeout(proposal.timeout);
   pendingProposals.delete(targetId);
+
+  // Proposer may have accepted a different proposal (to another target) in the meantime
+  const proposerMarriage = await getMarriage(proposal.proposerId);
+  if (proposerMarriage) {
+    await eco.addCopper(proposal.proposerId, MARRIAGE_COST).catch(() => {});
+    return `🔫 <@${proposal.proposerId}> is already married to <@${proposerMarriage.partnerId}>. Proposal cancelled — ring refunded.`;
+  }
 
   const marriedAt = new Date().toISOString();
   await supabase.from("marriages").upsert([

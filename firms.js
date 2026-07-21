@@ -394,12 +394,15 @@ async function buyFirmShares(userId, ticker, amount) {
   const tradeBan = firm.sanctions.some(s => s.type === "trading_ban");
   if (tradeBan) return `⛔ **${firm.name}** (\`${ticker.toUpperCase()}\`) is under a **trading ban** — no purchases allowed.`;
 
+  const shareLock = firm.sanctions.some(s => s.type === "share_lock");
+  if (shareLock) return `⛔ **${firm.name}** is under a **share lock** — no buying or selling allowed.`;
+
   if (amount < 1) return "🔫 Minimum 1 share.";
   const availableShares = firm.total_shares - Object.values(firm.holdings).reduce((a, b) => a + b, 0);
   if (amount > availableShares) return `🔫 Only **${availableShares.toLocaleString()}** shares available to buy.`;
 
   const cost = firm.share_price * amount;
-  const isSanctioned = firm.sanctions.length > 0;
+  const isSanctioned = firm.sanctions.some(s => s.type === "capital_levy");
   const taxAmount = isSanctioned ? Math.floor(cost * 0.20) : 0;
   const firmReceives = cost - taxAmount;
 

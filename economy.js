@@ -183,13 +183,19 @@ function playSlots(bet, charmActive = false) {
   }
   const display = reels.map(r => r.emoji).join(" | ");
   let multiplier = 0;
+  let isJackpot = false;
   if (reels[0].emoji === reels[1].emoji && reels[1].emoji === reels[2].emoji) {
     multiplier = reels[0].multiplier * 3; // jackpot
-  } else if (reels[0].emoji === reels[1].emoji || reels[1].emoji === reels[2].emoji || reels[0].emoji === reels[2].emoji) {
+    isJackpot = multiplier > 1;
+  } else if (reels[0].emoji === reels[1].emoji) {
+    multiplier = reels[0].multiplier * 0.5; // pair uses the matched symbol's payout
+  } else if (reels[1].emoji === reels[2].emoji) {
+    multiplier = reels[1].multiplier * 0.5;
+  } else if (reels[0].emoji === reels[2].emoji) {
     multiplier = reels[0].multiplier * 0.5;
   }
   const winnings = Math.floor(bet * multiplier);
-  return { display, multiplier, winnings, isJackpot: multiplier >= reels[0].multiplier * 3 && multiplier > 1 };
+  return { display, multiplier, winnings, isJackpot };
 }
 
 // ── Wheel ─────────────────────────────────────────────────────────────────────

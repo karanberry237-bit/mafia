@@ -760,14 +760,6 @@ function startAutoShadowCourt(guild) {
     if (activeShadowTargetId) { setTimeout(runCourt, 24 * 60 * 60 * 1000); return; }
     try {
       await guild.members.fetch();
-      const eligible = guild.members.cache.filter(m =>
-        !m.user.bot &&
-        m.id !== MASTER_ID &&
-        !familyRoster.has(m.id) === false ? false : true &&
-        (m.roles.cache.has(HELPER_ROLE_ID) || m.roles.cache.has(MOD_ROLE_ID_INACTIVITY)) &&
-        !exileStore.has(m.id)
-      );
-      // Actually: pick from Helper+ roles
       const helperPlus = guild.members.cache.filter(m =>
         !m.user.bot && m.id !== MASTER_ID && !exileStore.has(m.id) &&
         (m.roles.cache.has(HELPER_ROLE_ID) || m.roles.cache.has(MOD_ROLE_ID_INACTIVITY) || [...MOD_ROLE_IDS].some(r => m.roles.cache.has(r)))
@@ -3136,10 +3128,16 @@ async function handleGodModeMessage(message, guild, adminCh) {
   // this, commands like "cosa exile 123456789012345678" silently fail to
   // find a target whenever the mod pastes an ID instead of pinging — common
   // for members who left, aren't cached, or are deliberately not being pinged.
+  // "myself"/"me" -> Don's own mention. Applied unconditionally (not just in
+  // the Jarvis pure-AI fast-path) because parseGodCommand and aiParseGodCommands
+  // both require a literal ID in the message — without this substitution,
+  // "give me the X role" has no ID for either parser to find and silently
+  // falls through to plain chat. handleGodModeMessage only ever runs for Don
+  // (isMaster), so "myself"/"me" unambiguously means his own ID here.
   const text  = message.content.trim().replace(
     /(?<!<@!?)\b(\d{17,19})\b(?!>)/g,
     (full, id) => `<@${id}>`
-  );
+  ).replace(/\b(myself|me)\b/gi, `<@${message.author.id}>`);
   const lower = text.toLowerCase();
 
   // ── Deactivate ─────────────────────────────────────────────────────────────
@@ -3258,9 +3256,7 @@ async function handleGodModeMessage(message, guild, adminCh) {
   // get ambiguous about, and going straight through the AI round-trip was
   // the reported cause of "give myself a role" silently failing in Jarvis mode.
   if (pureAiMode) {
-    // handleGodModeMessage only ever runs for Don (isMaster), so "myself"/"me"
-    // unambiguously means his own ID — safe to substitute before matching.
-    const giveRoleText = text.replace(/^cosa\s+/i, "").replace(/\b(myself|me)\b/gi, `<@${message.author.id}>`);
+    const giveRoleText = text.replace(/^cosa\s+/i, "");
     const giveRoleMatch = giveRoleText.match(/(?:give|add|grant)\s+<@!?(\d+)>\s+(?:the\s+)?(.+?)\s+role\b/i);
     if (giveRoleMatch) cmd = { action: "give_role", userId: giveRoleMatch[1], roleName: giveRoleMatch[2].trim() };
   }
