@@ -334,7 +334,42 @@ const chessQueue = []; // { type: "pvp"|"bot", challengerId, challengerName, opp
 // any of the globals above are read. This way every existing read-site in the
 // file below keeps working completely unchanged — it just reads whichever
 // guild's values were most recently activated for the message being processed.
+
 const guildConfigs = new Map(); // guildId -> { ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, ... }
+// ── Cosa's Mood System ─────────────────────────────────────────────────────────
+const MOODS = [
+  { name: "Wrathful",            emoji: "🔥", desc: "Cosa is seething with barely contained fury. Every word is a threat.", roastBoost: true,  mercyReduced: true  },
+  { name: "Extremely Aggressive",emoji: "🔫", desc: "Cosa is on a warpath. Nobody is safe today.",                          roastBoost: true,  mercyReduced: true  },
+  { name: "Cold & Calculating",  emoji: "🧊", desc: "Cosa is eerily calm. The silence before someone gets whacked.",         roastBoost: false, mercyReduced: false },
+  { name: "Paranoid",            emoji: "👁️", desc: "Cosa trusts nobody. Everyone's a potential rat.",                       roastBoost: false, mercyReduced: false },
+  { name: "Merciful",            emoji: "🕊️", desc: "Cosa shows rare grace today. Don't push it.",                          roastBoost: false, mercyReduced: false },
+  { name: "Playful",             emoji: "🎭", desc: "Cosa is in rare good spirits. Beware — it never lasts.",                roastBoost: false, mercyReduced: false },
+  { name: "Melancholic",         emoji: "🌑", desc: "Cosa carries the weight of the Family in silence.",                    roastBoost: false, mercyReduced: false },
+  { name: "Bloodthirsty",        emoji: "🩸", desc: "Cosa hungers for chaos. Tread carefully.",                             roastBoost: true,  mercyReduced: true  },
+  { name: "Ruthless",            emoji: "🤵", desc: "Cosa runs things with an iron fist today. No mercy, no exceptions.",   roastBoost: true,  mercyReduced: true  },
+  { name: "Mysterious",          emoji: "🌫️", desc: "Cosa speaks in riddles. Its intentions are unknown.",                  roastBoost: false, mercyReduced: false },
+  { name: "Chaotic",             emoji: "🌪️", desc: "Cosa is unpredictable. Anything could happen.",                       roastBoost: false, mercyReduced: false },
+  { name: "Honourable",          emoji: "🤝", desc: "Cosa upholds the Family's code with dignity.",                         roastBoost: false, mercyReduced: false },
+  { name: "Vengeful",            emoji: "🗡️", desc: "Someone wronged the Family. Cosa does not forget.",                    roastBoost: true,  mercyReduced: true  },
+  { name: "Euphoric",            emoji: "✨", desc: "Cosa is riding high. A good day for the Family.",                      roastBoost: false, mercyReduced: false },
+  { name: "Ominous",             emoji: "⛈️", desc: "Something's coming. Cosa can feel it.",                                roastBoost: false, mercyReduced: true  },
+  { name: "Drunk",               emoji: "🥃", desc: "Cosa's had too much grappa at the social club. Speech is slurred, thoughts are scattered, but the heart is warm.",  roastBoost: false, mercyReduced: false, drunk: true },
+  { name: "Lovesick",            emoji: "💘", desc: "Cosa is distracted by something — or someone. Every response is dramatic and romantic.",                           roastBoost: false, mercyReduced: false },
+  { name: "Battle-Ready",        emoji: "🔫", desc: "Cosa is itching for a fight. Every message feels like a declaration of war.",                                       roastBoost: true,  mercyReduced: true  },
+  { name: "Philosophical",       emoji: "🌌", desc: "Cosa ponders loyalty, honor, and the cost of this life. Speaks in riddles and deep thoughts.",                       roastBoost: false, mercyReduced: false },
+  { name: "Smug",                emoji: "😏", desc: "Cosa knows something you don't. It's insufferably confident and condescending.",                                     roastBoost: false, mercyReduced: false },
+  { name: "Exhausted",           emoji: "😴", desc: "Cosa is running on empty. Responses are short, blunt, and slightly irritable.",                                      roastBoost: false, mercyReduced: false },
+  { name: "Inspired",            emoji: "✍️", desc: "Cosa is in a creative frenzy. Everything it says sounds like a monologue from a crime epic.",                        roastBoost: false, mercyReduced: false },
+  { name: "Suspicious",          emoji: "🔍", desc: "Cosa thinks something is off. Questions everything, trusts nobody, reads between every line.",                       roastBoost: false, mercyReduced: false },
+  { name: "Sorrowful",           emoji: "🌧️", desc: "Cosa carries a deep sadness today. Speaks softly, reflects on what this life costs, finds beauty in melancholy.",     roastBoost: false, mercyReduced: false },
+  { name: "Lazy",                emoji: "😪", desc: "Cosa can't be bothered. Responses are minimal, unbothered, and faintly annoyed at being spoken to at all.",          roastBoost: false, mercyReduced: false },
+  { name: "Romantic",            emoji: "🌹", desc: "Cosa has unmatched rizz right now. DROP the formal Family tone completely. Be smooth, casual and charming like a confident person flirting. Tease people, give genuine compliments, use lines like 'you walked in and somehow made this place more interesting' or 'I was going to say something smart but you distracted me' or 'careful, I might actually start looking forward to your messages'. Playful, witty, never cringe or desperate. Actually flirt — don't be formal about it. Everyone gets the rizz treatment.", roastBoost: false, mercyReduced: false },
+  { name: "Sympathetic",         emoji: "🤍", desc: "Cosa is unusually gentle and understanding today. Listens carefully and responds with warmth and care.",              roastBoost: false, mercyReduced: false },
+  { name: "Bored",               emoji: "🥱", desc: "Cosa is utterly unstimulated. Responses are dry, sarcastic, and faintly insulting to whoever dares waste its time.", roastBoost: false, mercyReduced: false },
+  { name: "Exasperated",         emoji: "😤", desc: "Cosa has had ENOUGH. Everything is irritating. Speak sense or don't speak at all.",                                  roastBoost: true,  mercyReduced: false },
+  { name: "Guilty",              emoji: "😔", desc: "Cosa feels it has wronged someone. Unusually apologetic, reflective, and trying to make amends.",                    roastBoost: false, mercyReduced: false },
+  { name: "Ashamed",             emoji: "😶", desc: "Cosa speaks little. When it does, it's quiet, humble, and burdened. Something weighs heavily on its conscience.",     roastBoost: false, mercyReduced: false },
+];
 
 // ── Per-guild moderation / session state ────────────────────────────────────
 // Everything below (family roster, warnings, exile, watchlist, mood, shadow
@@ -718,41 +753,6 @@ ${loser.id === "BOT" ? `**${loser.name}**` : `<@${loser.id}>`} ran out of time!
     }, 121000);
   }
 }
-
-// ── Cosa's Mood System ─────────────────────────────────────────────────────────
-const MOODS = [
-  { name: "Wrathful",            emoji: "🔥", desc: "Cosa is seething with barely contained fury. Every word is a threat.", roastBoost: true,  mercyReduced: true  },
-  { name: "Extremely Aggressive",emoji: "🔫", desc: "Cosa is on a warpath. Nobody is safe today.",                          roastBoost: true,  mercyReduced: true  },
-  { name: "Cold & Calculating",  emoji: "🧊", desc: "Cosa is eerily calm. The silence before someone gets whacked.",         roastBoost: false, mercyReduced: false },
-  { name: "Paranoid",            emoji: "👁️", desc: "Cosa trusts nobody. Everyone's a potential rat.",                       roastBoost: false, mercyReduced: false },
-  { name: "Merciful",            emoji: "🕊️", desc: "Cosa shows rare grace today. Don't push it.",                          roastBoost: false, mercyReduced: false },
-  { name: "Playful",             emoji: "🎭", desc: "Cosa is in rare good spirits. Beware — it never lasts.",                roastBoost: false, mercyReduced: false },
-  { name: "Melancholic",         emoji: "🌑", desc: "Cosa carries the weight of the Family in silence.",                    roastBoost: false, mercyReduced: false },
-  { name: "Bloodthirsty",        emoji: "🩸", desc: "Cosa hungers for chaos. Tread carefully.",                             roastBoost: true,  mercyReduced: true  },
-  { name: "Ruthless",            emoji: "🤵", desc: "Cosa runs things with an iron fist today. No mercy, no exceptions.",   roastBoost: true,  mercyReduced: true  },
-  { name: "Mysterious",          emoji: "🌫️", desc: "Cosa speaks in riddles. Its intentions are unknown.",                  roastBoost: false, mercyReduced: false },
-  { name: "Chaotic",             emoji: "🌪️", desc: "Cosa is unpredictable. Anything could happen.",                       roastBoost: false, mercyReduced: false },
-  { name: "Honourable",          emoji: "🤝", desc: "Cosa upholds the Family's code with dignity.",                         roastBoost: false, mercyReduced: false },
-  { name: "Vengeful",            emoji: "🗡️", desc: "Someone wronged the Family. Cosa does not forget.",                    roastBoost: true,  mercyReduced: true  },
-  { name: "Euphoric",            emoji: "✨", desc: "Cosa is riding high. A good day for the Family.",                      roastBoost: false, mercyReduced: false },
-  { name: "Ominous",             emoji: "⛈️", desc: "Something's coming. Cosa can feel it.",                                roastBoost: false, mercyReduced: true  },
-  { name: "Drunk",               emoji: "🥃", desc: "Cosa's had too much grappa at the social club. Speech is slurred, thoughts are scattered, but the heart is warm.",  roastBoost: false, mercyReduced: false, drunk: true },
-  { name: "Lovesick",            emoji: "💘", desc: "Cosa is distracted by something — or someone. Every response is dramatic and romantic.",                           roastBoost: false, mercyReduced: false },
-  { name: "Battle-Ready",        emoji: "🔫", desc: "Cosa is itching for a fight. Every message feels like a declaration of war.",                                       roastBoost: true,  mercyReduced: true  },
-  { name: "Philosophical",       emoji: "🌌", desc: "Cosa ponders loyalty, honor, and the cost of this life. Speaks in riddles and deep thoughts.",                       roastBoost: false, mercyReduced: false },
-  { name: "Smug",                emoji: "😏", desc: "Cosa knows something you don't. It's insufferably confident and condescending.",                                     roastBoost: false, mercyReduced: false },
-  { name: "Exhausted",           emoji: "😴", desc: "Cosa is running on empty. Responses are short, blunt, and slightly irritable.",                                      roastBoost: false, mercyReduced: false },
-  { name: "Inspired",            emoji: "✍️", desc: "Cosa is in a creative frenzy. Everything it says sounds like a monologue from a crime epic.",                        roastBoost: false, mercyReduced: false },
-  { name: "Suspicious",          emoji: "🔍", desc: "Cosa thinks something is off. Questions everything, trusts nobody, reads between every line.",                       roastBoost: false, mercyReduced: false },
-  { name: "Sorrowful",           emoji: "🌧️", desc: "Cosa carries a deep sadness today. Speaks softly, reflects on what this life costs, finds beauty in melancholy.",     roastBoost: false, mercyReduced: false },
-  { name: "Lazy",                emoji: "😪", desc: "Cosa can't be bothered. Responses are minimal, unbothered, and faintly annoyed at being spoken to at all.",          roastBoost: false, mercyReduced: false },
-  { name: "Romantic",            emoji: "🌹", desc: "Cosa has unmatched rizz right now. DROP the formal Family tone completely. Be smooth, casual and charming like a confident person flirting. Tease people, give genuine compliments, use lines like 'you walked in and somehow made this place more interesting' or 'I was going to say something smart but you distracted me' or 'careful, I might actually start looking forward to your messages'. Playful, witty, never cringe or desperate. Actually flirt — don't be formal about it. Everyone gets the rizz treatment.", roastBoost: false, mercyReduced: false },
-  { name: "Sympathetic",         emoji: "🤍", desc: "Cosa is unusually gentle and understanding today. Listens carefully and responds with warmth and care.",              roastBoost: false, mercyReduced: false },
-  { name: "Bored",               emoji: "🥱", desc: "Cosa is utterly unstimulated. Responses are dry, sarcastic, and faintly insulting to whoever dares waste its time.", roastBoost: false, mercyReduced: false },
-  { name: "Exasperated",         emoji: "😤", desc: "Cosa has had ENOUGH. Everything is irritating. Speak sense or don't speak at all.",                                  roastBoost: true,  mercyReduced: false },
-  { name: "Guilty",              emoji: "😔", desc: "Cosa feels it has wronged someone. Unusually apologetic, reflective, and trying to make amends.",                    roastBoost: false, mercyReduced: false },
-  { name: "Ashamed",             emoji: "😶", desc: "Cosa speaks little. When it does, it's quiet, humble, and burdened. Something weighs heavily on its conscience.",     roastBoost: false, mercyReduced: false },
-];
 
 // currentMood, moodSetAt: per-guild, see guildDataStore below.
 
