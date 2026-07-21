@@ -291,6 +291,9 @@ let BOT_COMMANDS_CHANNEL_ID = null;  // the FIRST bot-commands channel set — u
 // "primary" channel used for redirects and announcements). Members can
 // interact with Cosa from ANY channel in the list, not just the first.
 let CHANNEL_ID_ARRAYS = { general: [], lockdown: [], exile: [], shadowcourt: [], modlogs: [], talk: [], botcommands: [] };
+// Role IDs set via "cosa set main role <role>" — these are exempt from the
+// role-stripping blackout/lockdown does to everyone else. Supports multiple.
+let PROTECTED_ROLE_IDS = [];
 const chessQueue = []; // { type: "pvp"|"bot", challengerId, challengerName, opponentId, opponentName, timeLimit, difficulty }
 
 // ── Per-guild config ──────────────────────────────────────────────────────────
@@ -322,6 +325,7 @@ function activateGuildConfig(guildId) {
   MOD_LOG_CHANNEL_ID = cfg.MOD_LOG_CHANNEL_ID || null;
   TALK_CHANNEL_ID = cfg.TALK_CHANNEL_ID || null;
   BOT_COMMANDS_CHANNEL_ID = cfg.BOT_COMMANDS_CHANNEL_ID || null;
+  PROTECTED_ROLE_IDS = cfg.PROTECTED_ROLE_IDS || [];
   CHANNEL_ID_ARRAYS = {
     general: cfg.CHANNEL_ID_ARRAYS?.general || (GENERAL_CHANNEL_ID ? [GENERAL_CHANNEL_ID] : []),
     lockdown: cfg.CHANNEL_ID_ARRAYS?.lockdown || (LOCKDOWN_CHANNEL_ID ? [LOCKDOWN_CHANNEL_ID] : []),
@@ -342,7 +346,7 @@ function captureGuildConfig(guildId) {
     ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID,
     EXILE_CHANNEL_ID, VERIFIED_ROLE_ID, HELPER_ROLE_ID, MOD_ROLE_ID_INACTIVITY,
     SHADOW_COURT_ID, MOD_LOG_CHANNEL_ID, TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
-    CHANNEL_ID_ARRAYS,
+    PROTECTED_ROLE_IDS, CHANNEL_ID_ARRAYS,
   });
 }
 
@@ -377,6 +381,7 @@ async function loadSetupConfig() {
         MOD_LOG_CHANNEL_ID: v.MOD_LOG_CHANNEL_ID || null,
         TALK_CHANNEL_ID: v.TALK_CHANNEL_ID || null,
         BOT_COMMANDS_CHANNEL_ID: v.BOT_COMMANDS_CHANNEL_ID || null,
+        PROTECTED_ROLE_IDS: v.PROTECTED_ROLE_IDS || [],
         CHANNEL_ID_ARRAYS: v.CHANNEL_ID_ARRAYS || null,
       });
     }
@@ -395,7 +400,7 @@ async function saveSetupConfig(guildId) {
         ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID,
         EXILE_CHANNEL_ID, VERIFIED_ROLE_ID, HELPER_ROLE_ID, MOD_ROLE_ID_INACTIVITY,
         SHADOW_COURT_ID, MOD_LOG_CHANNEL_ID, TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
-        CHANNEL_ID_ARRAYS,
+        PROTECTED_ROLE_IDS, CHANNEL_ID_ARRAYS,
       },
     }, { onConflict: "key" });
     // Also update in-memory guildConfigs so activateGuildConfig works immediately
@@ -783,14 +788,14 @@ let MOD_ROLE_IDS = new Set(); // populated by setup if you add more staff roles 
 // same pattern the original used for "streetrat"). Don Clint (MASTER_ID) bypasses all of
 // this entirely via canDo()/isModUser() — he's never looked up in this table.
 const RANKS = {
-  associate:   { level: 1, title: "Associate",   emoji: "🥃", canWarn: false, canMute: false, canKick: false, canBan: false, canPurge: false, canSlowmode: false, canLockdown: false, canRoast: false, canSlimeout: false, canStrip: false, canExile: false, canUnban: false, respect: "formal" },
-  soldier:     { level: 2, title: "Soldier",     emoji: "🔫", canWarn: false, canMute: false, canKick: false, canBan: false, canPurge: false, canSlowmode: false, canLockdown: false, canRoast: false, canSlimeout: false, canStrip: false, canExile: false, canUnban: false, respect: "moderate" },
-  mademan:     { level: 3, title: "Made Man",    emoji: "🎩", canWarn: false, canMute: false, canKick: false, canBan: false, canPurge: false, canSlowmode: false, canLockdown: false, canRoast: false, canSlimeout: false, canStrip: false, canExile: false, canUnban: false, respect: "decent" },
-  enforcer:    { level: 4, title: "Enforcer",    emoji: "🥊", canWarn: true,  canMute: true,  canKick: false, canBan: false, canPurge: false, canSlowmode: false, canLockdown: false, canRoast: true,  canSlimeout: true,  canStrip: false, canExile: false, canUnban: false, respect: "decent" },
-  capo:        { level: 5, title: "Capo",        emoji: "🎖️", canWarn: true,  canMute: true,  canKick: true,  canBan: false, canPurge: false, canSlowmode: true,  canLockdown: false, canRoast: true,  canSlimeout: true,  canStrip: false, canExile: false, canUnban: false, respect: "decent" },
-  underboss:   { level: 6, title: "Underboss",   emoji: "🏛️", canWarn: true,  canMute: true,  canKick: true,  canBan: false, canPurge: true,  canSlowmode: true,  canLockdown: true,  canRoast: true,  canSlimeout: true,  canStrip: false, canExile: false, canUnban: false, respect: "high" },
-  consigliere: { level: 7, title: "Consigliere", emoji: "🕴️", canWarn: true,  canMute: true,  canKick: true,  canBan: true,  canPurge: true,  canSlowmode: true,  canLockdown: true,  canRoast: true,  canSlimeout: true,  canStrip: true,  canExile: true,  canUnban: true,  respect: "high" },
-  boss:        { level: 8, title: "Boss",        emoji: "🤵", canWarn: true,  canMute: true,  canKick: true,  canBan: true,  canPurge: true,  canSlowmode: true,  canLockdown: true,  canRoast: true,  canSlimeout: true,  canStrip: true,  canExile: true,  canUnban: true,  respect: "high" },
+  associate:   { level: 1, title: "Associate",   emoji: "🥃", canWarn: false, canMute: false, canKick: false, canBan: false, canPurge: false, canSlowmode: false, canLockdown: false, canRoast: false, canSlimeout: false, canStrip: false, canExile: false, canUnban: false, canGiveRole: false, respect: "formal" },
+  soldier:     { level: 2, title: "Soldier",     emoji: "🔫", canWarn: false, canMute: false, canKick: false, canBan: false, canPurge: false, canSlowmode: false, canLockdown: false, canRoast: false, canSlimeout: false, canStrip: false, canExile: false, canUnban: false, canGiveRole: false, respect: "moderate" },
+  mademan:     { level: 3, title: "Made Man",    emoji: "🎩", canWarn: false, canMute: false, canKick: false, canBan: false, canPurge: false, canSlowmode: false, canLockdown: false, canRoast: false, canSlimeout: false, canStrip: false, canExile: false, canUnban: false, canGiveRole: false, respect: "decent" },
+  enforcer:    { level: 4, title: "Enforcer",    emoji: "🥊", canWarn: true,  canMute: true,  canKick: false, canBan: false, canPurge: false, canSlowmode: false, canLockdown: false, canRoast: true,  canSlimeout: true,  canStrip: false, canExile: false, canUnban: false, canGiveRole: false, respect: "decent" },
+  capo:        { level: 5, title: "Capo",        emoji: "🎖️", canWarn: true,  canMute: true,  canKick: true,  canBan: false, canPurge: false, canSlowmode: true,  canLockdown: false, canRoast: true,  canSlimeout: true,  canStrip: false, canExile: false, canUnban: false, canGiveRole: false, respect: "decent" },
+  underboss:   { level: 6, title: "Underboss",   emoji: "🏛️", canWarn: true,  canMute: true,  canKick: true,  canBan: false, canPurge: true,  canSlowmode: true,  canLockdown: true,  canRoast: true,  canSlimeout: true,  canStrip: false, canExile: false, canUnban: false, canGiveRole: false, respect: "high" },
+  consigliere: { level: 7, title: "Consigliere", emoji: "🕴️", canWarn: true,  canMute: true,  canKick: true,  canBan: true,  canPurge: true,  canSlowmode: true,  canLockdown: true,  canRoast: true,  canSlimeout: true,  canStrip: true,  canExile: true,  canUnban: true,  canGiveRole: true,  respect: "high" },
+  boss:        { level: 8, title: "Boss",        emoji: "🤵", canWarn: true,  canMute: true,  canKick: true,  canBan: true,  canPurge: true,  canSlowmode: true,  canLockdown: true,  canRoast: true,  canSlimeout: true,  canStrip: true,  canExile: true,  canUnban: true,  canGiveRole: true,  respect: "high" },
 };
 // Full ladder for display purposes (includes the implicit bottom rank and Don Clint's exclusive top rank):
 // streetrat → associate → soldier → mademan → enforcer → capo → underboss → consigliere → boss → donclint
@@ -2499,6 +2504,8 @@ RULES:
 - NEVER include "permissions" on create_role/edit_role unless the owner explicitly named a specific permission (e.g. "give it administrator", "with mention everyone perm", "manage nicknames"). If no permission was mentioned, omit the field entirely — do NOT guess, default, or add anything "reasonable". A new role must come out with NO permissions unless told otherwise.
 - Valid permission names: Administrator, MentionEveryone, ManageNicknames, ManageRoles, ManageChannels, ManageMessages, ManageGuild, ManageWebhooks, ManageEmojisAndStickers, ManageEvents, ManageThreads, KickMembers, BanMembers, MuteMembers, DeafenMembers, MoveMembers, ModerateMembers, ViewAuditLog, PrioritySpeaker.
 - NEVER include "private":true on create_channel unless the owner explicitly said "private" (or clearly equivalent, e.g. "hidden channel", "only staff can see it"). Default is a normal public channel.
+- A short/vague message with no concrete target, value, or object (a single word, a fragment like "perms", "ok", "nice", "slow down", a topic name with no verb) is NEVER enough on its own to justify an action — output {"actions":[]}. Never invent a numeric value (like slowmode seconds or a mute duration) that wasn't stated or clearly impliable from the message itself.
+  Examples that must produce {"actions":[]}: "perms", "slowmode", "roles", "channels", "hmm", "that's rough", "permissions for the mod role" (names a topic but gives no instruction).
 - Output raw JSON only. No markdown, no explanations.`;
 
 async function aiParseGodCommands(text, guild, message) {
@@ -2527,12 +2534,12 @@ async function aiParseGodCommands(text, guild, message) {
 
 async function executeGodAction(cmd, guild, adminCh) {
   // SAFETY: never act against Don Clint himself
-  if (cmd.userId === MASTER_ID) return "🔫 I will never act against Don Clint himself. Command rejected.";
+  if (cmd.userId === MASTER_ID) return "I will never act against Don Clint himself. Command rejected.";
   try {
     switch (cmd.action) {
       case "create_role": {
         const existing = guild.roles.cache.find(r => r.name.toLowerCase() === cmd.roleName.toLowerCase());
-        if (existing) return `🔫 Role **${cmd.roleName}** already exists.`;
+        if (existing) return `Role **${cmd.roleName}** already exists.`;
         const COLOR_NAMES = {
           red: "#ED4245", green: "#57F287", blue: "#5865F2", yellow: "#FEE75C",
           purple: "#9B59B6", orange: "#E67E22", gold: "#F1C40F", white: "#FFFFFF",
@@ -2575,11 +2582,11 @@ async function executeGodAction(cmd, guild, adminCh) {
         if (cmd.position) extras.push(`positioned at the ${cmd.position}`);
         if (rolePerms.length) extras.push(`granted: ${rolePerms.join(", ")}`);
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Role **${role.name}** created by Don Clint${rolePerms.length ? ` (perms: ${rolePerms.join(", ")})` : " (no permissions)"}.`).catch(() => {});
-        return `✅ Role **${role.name}** has been forged${extras.length ? " — " + extras.join(", ") : ""}. 🔫`;
+        return `✅ Role **${role.name}** has been forged${extras.length ? " — " + extras.join(", ") : ""}.`;
       }
       case "edit_role": {
         const role = guild.roles.cache.find(r => r.name.toLowerCase() === cmd.roleName.toLowerCase());
-        if (!role) return `🔫 Role **${cmd.roleName}** not found.`;
+        if (!role) return `Role **${cmd.roleName}** not found.`;
         const COLOR_NAMES = {
           red: "#ED4245", green: "#57F287", blue: "#5865F2", yellow: "#FEE75C",
           purple: "#9B59B6", orange: "#E67E22", gold: "#F1C40F", white: "#FFFFFF",
@@ -2615,48 +2622,48 @@ async function executeGodAction(cmd, guild, adminCh) {
           extras.push(`granted: ${cmd.permissions.join(", ")}`);
         }
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Role **${role.name}** edited by Don Clint (${extras.join(", ") || "no changes"}).`).catch(() => {});
-        return `✅ Role **${role.name}** updated${extras.length ? " — " + extras.join(", ") : ""}. 🔫`;
+        return `✅ Role **${role.name}** updated${extras.length ? " — " + extras.join(", ") : ""}.`;
       }
       case "give_role": {
         const role = guild.roles.cache.find(r => r.name.toLowerCase() === cmd.roleName.toLowerCase());
-        if (!role) return `🔫 Role **${cmd.roleName}** not found.`;
+        if (!role) return `Role **${cmd.roleName}** not found.`;
         const member = await guild.members.fetch(cmd.userId).catch(() => null);
-        if (!member) return `🔫 Member not found.`;
+        if (!member) return `Member not found.`;
         const botMember = await guild.members.fetchMe().catch(() => null);
-        if (botMember && role.position >= botMember.roles.highest.position) return `🔫 Role **${role.name}** is above my rank — I cannot assign it.`;
+        if (botMember && role.position >= botMember.roles.highest.position) return `Role **${role.name}** is above my rank — I cannot assign it.`;
         await member.roles.add(role, "God Mode — Don Clint");
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Role **${role.name}** given to <@${cmd.userId}> by Don Clint.`).catch(() => {});
-        return `✅ Role **${role.name}** granted to <@${cmd.userId}>. 🔫`;
+        return `✅ Role **${role.name}** granted to <@${cmd.userId}>.`;
       }
       case "remove_role": {
         const role = guild.roles.cache.find(r => r.name.toLowerCase() === cmd.roleName.toLowerCase());
-        if (!role) return `🔫 Role **${cmd.roleName}** not found.`;
+        if (!role) return `Role **${cmd.roleName}** not found.`;
         const member = await guild.members.fetch(cmd.userId).catch(() => null);
-        if (!member) return `🔫 Member not found.`;
+        if (!member) return `Member not found.`;
         await member.roles.remove(role, "God Mode — Don Clint");
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Role **${role.name}** removed from <@${cmd.userId}> by Don Clint.`).catch(() => {});
-        return `✅ Role **${role.name}** stripped from <@${cmd.userId}>. 🔫`;
+        return `✅ Role **${role.name}** stripped from <@${cmd.userId}>.`;
       }
       case "kick": {
         const member = await guild.members.fetch(cmd.userId).catch(() => null);
-        if (!member) return `🔫 Member not found.`;
+        if (!member) return `Member not found.`;
         await member.kick(cmd.reason);
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] <@${cmd.userId}> **KICKED** — ${cmd.reason}`).catch(() => {});
-        return `🔫 <@${cmd.userId}> removed from the Family. Reason: *${cmd.reason}*`;
+        return `<@${cmd.userId}> removed from the Family. Reason: *${cmd.reason}*`;
       }
       case "ban": {
         await guild.members.ban(cmd.userId, { reason: cmd.reason, deleteMessageSeconds: 0 });
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] <@${cmd.userId}> **BANNED** — ${cmd.reason}`).catch(() => {});
-        return `🔴 <@${cmd.userId}> banished from the Family forever. 🔫`;
+        return `🔴 <@${cmd.userId}> banished from the Family forever.`;
       }
       case "unban": {
         await guild.bans.remove(cmd.userId, "God Mode — Don Clint").catch(() => {});
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] <@${cmd.userId}> **UNBANNED** by Don Clint.`).catch(() => {});
-        return `✅ <@${cmd.userId}> pardoned by Don Clint. 🔫`;
+        return `✅ <@${cmd.userId}> pardoned by Don Clint.`;
       }
       case "mute": {
         const member = await guild.members.fetch(cmd.userId).catch(() => null);
-        if (!member) return `🔫 Member not found.`;
+        if (!member) return `Member not found.`;
         // Strip admin roles temporarily so Discord allows the timeout
         const adminRoles = member.roles.cache.filter(r =>
           r.permissions.has(PermissionFlagsBits.Administrator) && r.id !== guild.id
@@ -2669,26 +2676,26 @@ async function executeGodAction(cmd, guild, adminCh) {
           await member.roles.add(adminRoles, "Restoring roles after Don's mute applied").catch(() => {});
         }
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] <@${cmd.userId}> muted for ${Math.round(cmd.durationMs / 60000)}min by Don Clint.`).catch(() => {});
-        return `🔇 <@${cmd.userId}> silenced by Don Clint. 🔫`;
+        return `🔇 <@${cmd.userId}> silenced by Don Clint.`;
       }
       case "unmute": {
         const member = await guild.members.fetch(cmd.userId).catch(() => null);
-        if (!member) return `🔫 Member not found.`;
+        if (!member) return `Member not found.`;
         await member.timeout(null);
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] <@${cmd.userId}> unmuted by Don Clint.`).catch(() => {});
-        return `✅ <@${cmd.userId}> unsilenced. 🔫`;
+        return `✅ <@${cmd.userId}> unsilenced.`;
       }
       case "create_category": {
         const cat = await guild.channels.create({ name: cmd.name, type: 4 });
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Category **${cmd.name}** created by Don Clint.`).catch(() => {});
-        return `✅ Category **${cmd.name}** created. 🔫`;
+        return `✅ Category **${cmd.name}** created.`;
       }
       case "delete_category": {
         const cat = guild.channels.cache.find(c => c.type === 4 && c.name.toLowerCase() === cmd.name.toLowerCase());
-        if (!cat) return `🔫 Category **${cmd.name}** not found.`;
+        if (!cat) return `Category **${cmd.name}** not found.`;
         const catName = cat.name; await cat.delete("God Mode — Don Clint");
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Category **${catName}** DELETED by Don Clint.`).catch(() => {});
-        return `🗑️ Category **${catName}** deleted. 🔫`;
+        return `🗑️ Category **${catName}** deleted.`;
       }
       case "create_channel": {
         const ch = await guild.channels.create({ name: cmd.name, type: 0 });
@@ -2698,86 +2705,86 @@ async function executeGodAction(cmd, guild, adminCh) {
           await ch.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: false }).catch(() => {});
         }
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Channel **#${cmd.name}** created by Don Clint${cmd.private ? " (private)" : ""}.`).catch(() => {});
-        return `✅ Channel <#${ch.id}> created${cmd.private ? " — **private**, hidden from everyone else" : ""}. 🔫`;
+        return `✅ Channel <#${ch.id}> created${cmd.private ? " — **private**, hidden from everyone else" : ""}.`;
       }
       case "delete_channel": {
         const ch = guild.channels.cache.find(c => c.name.toLowerCase() === cmd.channelName.toLowerCase());
-        if (!ch) return `🔫 Channel **#${cmd.channelName}** not found.`;
-        if (ch.id === LOCKDOWN_CHANNEL_ID) return `🔫 I cannot delete the admin channel. Rejected.`;
+        if (!ch) return `Channel **#${cmd.channelName}** not found.`;
+        if (ch.id === LOCKDOWN_CHANNEL_ID) return `I cannot delete the admin channel. Rejected.`;
         const name = ch.name; await ch.delete("God Mode — Don Clint");
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Channel **#${name}** DELETED by Don Clint.`).catch(() => {});
-        return `🗑️ Channel **#${name}** erased. 🔫`;
+        return `🗑️ Channel **#${name}** erased.`;
       }
       case "delete_channel_id": {
         const ch = guild.channels.cache.get(cmd.channelId);
-        if (!ch) return `🔫 Channel not found.`;
-        if (ch.id === LOCKDOWN_CHANNEL_ID) return `🔫 I cannot delete the admin channel. Rejected.`;
+        if (!ch) return `Channel not found.`;
+        if (ch.id === LOCKDOWN_CHANNEL_ID) return `I cannot delete the admin channel. Rejected.`;
         const name = ch.name; await ch.delete("God Mode — Don Clint");
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Channel **#${name}** DELETED by Don Clint.`).catch(() => {});
-        return `🗑️ Channel **#${name}** erased. 🔫`;
+        return `🗑️ Channel **#${name}** erased.`;
       }
       case "rename_channel": {
         const ch = guild.channels.cache.get(cmd.channelId);
-        if (!ch) return `🔫 Channel not found.`;
+        if (!ch) return `Channel not found.`;
         const old = ch.name; await ch.setName(cmd.newName, "God Mode — Don Clint");
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] #${old} renamed to #${cmd.newName} by Don Clint.`).catch(() => {});
-        return `✅ Channel renamed to **#${cmd.newName}**. 🔫`;
+        return `✅ Channel renamed to **#${cmd.newName}**.`;
       }
       case "send_message": {
         const ch = guild.channels.cache.get(cmd.channelId);
-        if (!ch) return `🔫 Channel not found.`;
+        if (!ch) return `Channel not found.`;
         await ch.send(cmd.content);
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Message sent to <#${cmd.channelId}> by Don Clint.`).catch(() => {});
-        return `✅ Message delivered to <#${cmd.channelId}>. 🔫`;
+        return `✅ Message delivered to <#${cmd.channelId}>.`;
       }
       case "slowmode": {
         const ch = guild.channels.cache.get(cmd.channelId);
-        if (!ch) return `🔫 Channel not found.`;
+        if (!ch) return `Channel not found.`;
         await ch.setRateLimitPerUser(Math.min(cmd.seconds, 21600));
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Slowmode ${cmd.seconds}s in <#${cmd.channelId}> by Don Clint.`).catch(() => {});
-        return `✅ Slowmode set to **${cmd.seconds}s** in <#${cmd.channelId}>. 🔫`;
+        return `✅ Slowmode set to **${cmd.seconds}s** in <#${cmd.channelId}>.`;
       }
       case "slowmode_current": {
         const ch = guild.channels.cache.get(cmd._channelId);
-        if (!ch) return `🔫 Channel not found.`;
+        if (!ch) return `Channel not found.`;
         await ch.setRateLimitPerUser(Math.min(cmd.seconds, 21600));
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Slowmode ${cmd.seconds}s in <#${cmd._channelId}> by Don Clint.`).catch(() => {});
-        return `✅ Slowmode set to **${cmd.seconds}s** in <#${cmd._channelId}>. 🔫`;
+        return `✅ Slowmode set to **${cmd.seconds}s** in <#${cmd._channelId}>.`;
       }
       case "lock_channel": {
         const ch = guild.channels.cache.get(cmd.channelId);
-        if (!ch) return `🔫 Channel not found.`;
+        if (!ch) return `Channel not found.`;
         await ch.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false });
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] <#${cmd.channelId}> locked by Don Clint.`).catch(() => {});
-        return `🔒 <#${cmd.channelId}> locked. 🔫`;
+        return `🔒 <#${cmd.channelId}> locked.`;
       }
       case "unlock_channel": {
         const ch = guild.channels.cache.get(cmd.channelId);
-        if (!ch) return `🔫 Channel not found.`;
+        if (!ch) return `Channel not found.`;
         await ch.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null });
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] <#${cmd.channelId}> unlocked by Don Clint.`).catch(() => {});
-        return `🔓 <#${cmd.channelId}> unlocked. 🔫`;
+        return `🔓 <#${cmd.channelId}> unlocked.`;
       }
       case "remember": {
         await addMemory(guild?.id, cmd.text);
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Memory added: "${cmd.text}"`).catch(() => {});
-        return `✅ Got it, Don Clint. I will remember: *"${cmd.text}"* — forever. 🔫`;
+        return `✅ Got it, Don Clint. I will remember: *"${cmd.text}"* — forever.`;
       }
       case "forget": {
         const removed = await removeMemory(guild?.id, cmd.query);
-        if (!removed) return `🔫 Could not find that memory. Say **cosa memories** to see the list.`;
+        if (!removed) return `Could not find that memory. Say **cosa memories** to see the list.`;
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] Memory removed: "${removed}"`).catch(() => {});
-        return `✅ Memory erased: *"${removed}"* 🔫`;
+        return `✅ Memory erased: *"${removed}"*`;
       }
       case "list_memory": {
         return formatMemoryPage(guild?.id, cmd.page || 1);
       }
-      default: return `🔫 Unknown command.`;
+      default: return `Unknown command.`;
     }
   } catch (err) {
     console.error("[GOD MODE EXEC ERROR]", err.message);
     if (adminCh) await adminCh.send(`🤵 [GOD MODE ERROR] ${cmd.action} failed: ${err.message}`).catch(() => {});
-    return `🔫 Something went wrong: ${err.message}`;
+    return `Something went wrong: ${err.message}`;
   }
 }
 
@@ -3244,7 +3251,20 @@ async function handleGodModeMessage(message, guild, adminCh) {
 
   let cmd = null;
 
-  if (!pureAiMode) {
+  // ── Give role: kept as a regex fast-path even in pure-AI Jarvis mode ───────
+  // Same rationale as mass-ban above — it needs a literal @mention (real ID,
+  // never invented) plus the word "role", so there's nothing for the AI to
+  // get ambiguous about, and going straight through the AI round-trip was
+  // the reported cause of "give myself a role" silently failing in Jarvis mode.
+  if (pureAiMode) {
+    // handleGodModeMessage only ever runs for Don (isMaster), so "myself"/"me"
+    // unambiguously means his own ID — safe to substitute before matching.
+    const giveRoleText = text.replace(/^cosa\s+/i, "").replace(/\b(myself|me)\b/gi, `<@${message.author.id}>`);
+    const giveRoleMatch = giveRoleText.match(/(?:give|add|grant)\s+<@!?(\d+)>\s+(?:the\s+)?(.+?)\s+role\b/i);
+    if (giveRoleMatch) cmd = { action: "give_role", userId: giveRoleMatch[1], roleName: giveRoleMatch[2].trim() };
+  }
+
+  if (!cmd && !pureAiMode) {
     // ── Compound single-line sentence: "create a role X, color Y, give it to @z" ──
     const handledSentence = await handleGodModeSentence(text, message, guild, adminCh);
     if (handledSentence) return true;
@@ -3405,7 +3425,8 @@ async function executeLockdown(guild, triggeredBy) {
         .catch(() => {})
     ));
   }
-  // Strip roles below Cosa\'s position, except @everyone, VERIFIED_ROLE_ID, and roles with 20+ members
+  // Strip roles below Cosa\'s position, except @everyone, VERIFIED_ROLE_ID,
+  // any PROTECTED_ROLE_IDS ("cosa set main role"), and roles with 20+ members
   await guild.members.fetch();
   const botMember = await guild.members.fetchMe().catch(() => null);
   const botHighest = botMember ? botMember.roles.highest.position : 999;
@@ -3417,7 +3438,7 @@ async function executeLockdown(guild, triggeredBy) {
   for (const [, member] of guild.members.cache) {
     if (member.user.bot || member.id === MASTER_ID) continue;
     const rolesToStrip = member.roles.cache.filter(r =>
-      r.id !== guild.id && r.id !== VERIFIED_ROLE_ID &&
+      r.id !== guild.id && r.id !== VERIFIED_ROLE_ID && !PROTECTED_ROLE_IDS.includes(r.id) &&
       r.position < botHighest && (roleMemberCount.get(r.id) || 0) < 20 &&
       !r.managed // excludes Server Booster and other Discord-managed roles
     );
@@ -3611,6 +3632,41 @@ async function aiClassifyAmbientCommand(text) {
   }
 }
 
+// ── "Did you mean" command correction ──────────────────────────────────────────
+// When a mod clearly meant a moderation command (the right verb is there) but
+// phrased it in a way none of the regexes above matched — wrong word order, a
+// typo in the mention, a missing duration — detectMasterCommand silently
+// returns null and the message falls through to normal chat. That's confusing:
+// the command looks like it should have worked. This gives a concrete
+// suggestion instead of silence, but only ever fires when Cosa was explicitly
+// addressed, to avoid hijacking ordinary conversation that happens to mention
+// a mod word ("I muted my mic", "he got banned from that other server").
+const MOD_COMMAND_HINTS = [
+  { keywords: /\b(mute|timeout)\b/i, usage: "cosa mute <@user> [duration]" },
+  { keywords: /\b(unmute|untimeout)\b/i, usage: "cosa unmute <@user>" },
+  { keywords: /\bkick\b/i, usage: "cosa kick <@user> [reason]" },
+  { keywords: /\bban\b/i, usage: "cosa ban <@user> [reason]" },
+  { keywords: /\bunban\b/i, usage: "cosa unban <@user>" },
+  { keywords: /\bwarn\b/i, usage: "cosa warn <@user> [reason]" },
+  { keywords: /\b(slowmode|slow mode)\b/i, usage: "cosa slowmode <time> (or \"cosa remove slowmode\")" },
+  { keywords: /\block\s*down\b/i, usage: "cosa lockdown / cosa unlock" },
+  { keywords: /\broast\b/i, usage: "cosa roast <@user>" },
+  { keywords: /\bslime\s*out\b/i, usage: "cosa slimeout <@user> [duration]" },
+  { keywords: /\bstrip\b/i, usage: "cosa strip <@user>" },
+  { keywords: /\bexile\b/i, usage: "cosa exile <@user> (or \"cosa temp exile <@user> [duration]\")" },
+  { keywords: /\b(purge|nuke)\b/i, usage: "cosa purge <amount>" },
+  { keywords: /\b(give|grant|add)\b.*\brole\b/i, usage: "cosa give <@user> the <role name> role" },
+];
+function suggestCommandCorrection(text, explicitTrigger) {
+  if (!explicitTrigger) return null;
+  for (const hint of MOD_COMMAND_HINTS) {
+    if (hint.keywords.test(text)) {
+      return `It looks like you were trying to use a mod command but I couldn't parse it. Try: \`${hint.usage}\``;
+    }
+  }
+  return null;
+}
+
 // ── Command Detection ─────────────────────────────────────────────────────────
 function detectMasterCommand(text, message, explicitTrigger) {
   const lower = text.toLowerCase();
@@ -3662,7 +3718,7 @@ function detectMasterCommand(text, message, explicitTrigger) {
     return { action: "eco_set", targetId, amount: m?.[1], tier: normalizeTierAlias(m?.[2]) };
   }
   if (/\bcosa\s+reset\s+balance\b/.test(lower) && targetId) return { action: "eco_reset", targetId };
-  if (/\bcosa\s+give\b/.test(lower) && targetId) {
+  if (/\bcosa\s+give\b/.test(lower) && targetId && !/\brole\b/i.test(lower)) {
     const cleanT = text.replace(/<@!?\d+>/g,"").trim();
     const m = cleanT.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "eco_give", targetId, amount: m?.[1], tier: normalizeTierAlias(m?.[2]) };
@@ -3798,7 +3854,14 @@ function detectMasterCommand(text, message, explicitTrigger) {
     return { action: "warn", targetId, reason: reasonMatch?.[1]?.trim() || "No reason given" };
   }
   if (explicitTrigger && /\bwarnings\b/.test(lower) && targetId) return { action: "warnings", targetId };
-  if (explicitTrigger && /\b(slowmode|slow mode)\b/.test(lower)) return { action: "slowmode", durationMs: parseDuration(text) };
+  if (explicitTrigger && /\b(give|grant|add)\b.*\brole\b/.test(lower) && targetId) {
+    const roleMatch = text.match(/(?:give|grant|add)\s+<@!?\d+>\s+(?:the\s+)?(.+?)\s+role\b/i);
+    if (roleMatch) return { action: "give_role", targetId, roleName: roleMatch[1].trim() };
+  }
+  if (explicitTrigger && /\b(slowmode|slow mode)\b/.test(lower)) {
+    const isRemoval = /\b(remove|disable|off|stop|cancel|end|clear)\b/.test(lower);
+    return { action: "slowmode", durationMs: isRemoval ? 0 : parseDuration(text) };
+  }
   if (explicitTrigger && /\blockdown\b/.test(lower)) return { action: "lockdown" };
   if (explicitTrigger && /\bunlock(down)?\b/.test(lower)) return { action: "unlock" };
 
@@ -4038,7 +4101,7 @@ function detectPublicCommand(text, message) {
 // ── Execute Master Command ────────────────────────────────────────────────────
 async function executeMasterCommand(message, cmd, displayName, channelId) {
   const guild = message.guild;
-  const { action, targetId, reason, durationMs, amount, rankKey, trigger } = cmd;
+  const { action, targetId, reason, durationMs, amount, rankKey, trigger, roleName } = cmd;
   const userId = message.author.id;
   const modName = displayName;
   const isDon = userId === MASTER_ID;
@@ -4047,15 +4110,15 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   // Godfather & Self-Protection
   const targetedActions = ["ban_confirm","kick_confirm","mute","unmute","warn","strip_confirm","exile_confirm","temp_exile_confirm","unexile","slimeout","roast","warnings","shadow_user_add"];
   if (targetedActions.includes(action) && targetId) {
-    if (targetId === MASTER_ID) return "🔫 You dare raise a hand against Don Clint? Absolutely not. 💀";
-    if (targetId === userId) return "🔫 You can't use that command on yourself. Don't waste my time.";
+    if (targetId === MASTER_ID) return "You dare raise a hand against Don Clint? Absolutely not. 💀";
+    if (targetId === userId) return "You can't use that command on yourself. Don't waste my time.";
   }
 
   // ── Admin Economy Commands (Don only) ───────────────────────────────────────
   if (action === "eco_set") {
-    if (userId !== MASTER_ID) return "🔫 Don only.";
+    if (userId !== MASTER_ID) return "Don only.";
     const copper = eco.parseBet(cmd.amount, cmd.tier);
-    if (!copper) return "🔫 Invalid amount.";
+    if (!copper) return "Invalid amount.";
     const w = await eco.getWallet(cmd.targetId);
     const newW = { ...w, ...eco.fromCopper(copper) };
     await eco.saveWallet(newW);
@@ -4063,64 +4126,64 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     return "✅ Set **" + (tu?.username||cmd.targetId) + "'s** balance to **" + eco.formatWallet(newW) + "**.";
   }
   if (action === "eco_reset") {
-    if (userId !== MASTER_ID) return "🔫 Don only.";
+    if (userId !== MASTER_ID) return "Don only.";
     const w = { user_id: cmd.targetId, copper: 0, silver: 0, gold: 0, stellar: 0, last_daily: null, total_earned: 0 };
     await eco.saveWallet(w);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
     return "✅ **" + (tu?.username||cmd.targetId) + "'s** balance has been wiped to zero. 💀";
   }
   if (action === "eco_give") {
-    if (userId !== MASTER_ID) return "🔫 Don only.";
+    if (userId !== MASTER_ID) return "Don only.";
     const copper = eco.parseBet(cmd.amount);
-    if (!copper) return "🔫 Invalid amount.";
+    if (!copper) return "Invalid amount.";
     const newW = await eco.addCopper(cmd.targetId, copper);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
     return "✅ Gave **" + copper.toLocaleString() + " Cash** to **" + (tu?.username||cmd.targetId) + "**. New balance: " + eco.formatWallet(newW) + ".";
   }
   if (action === "eco_take") {
-    if (userId !== MASTER_ID) return "🔫 Don only.";
+    if (userId !== MASTER_ID) return "Don only.";
     const copper = eco.parseBet(cmd.amount);
-    if (!copper) return "🔫 Invalid amount.";
+    if (!copper) return "Invalid amount.";
     const result = await eco.deductCopper(cmd.targetId, copper);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
-    if (!result) return "🔫 They don't have enough.";
+    if (!result) return "They don't have enough.";
     return "✅ Took **" + copper.toLocaleString() + " Cash** from **" + (tu?.username||cmd.targetId) + "**. New balance: " + eco.formatWallet(result) + ".";
   }
   if (action === "eco_tax") {
-    if (userId !== MASTER_ID) return "🔫 Don only.";
+    if (userId !== MASTER_ID) return "Don only.";
     const w = await eco.getWallet(cmd.targetId);
     const total = eco.walletToCopper(w);
     const taxAmt = Math.floor(total * (cmd.percent / 100));
-    if (taxAmt === 0) return "🔫 They have nothing worth taxing.";
+    if (taxAmt === 0) return "They have nothing worth taxing.";
     await eco.deductCopper(cmd.targetId, taxAmt);
     await eco.addCopper(MASTER_ID, taxAmt);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
     return "🤵 Taxed **" + (tu?.username||cmd.targetId) + "** at **" + cmd.percent + "%** — seized **💵 " + taxAmt.toLocaleString() + " Cash**. The Family grows richer.";
   }
   if (action === "eco_heist") {
-    if (userId !== MASTER_ID) return "🔫 Don only.";
+    if (userId !== MASTER_ID) return "Don only.";
     const w = await eco.getWallet(cmd.targetId);
     const total = eco.walletToCopper(w);
-    if (total === 0) return "🔫 They have nothing.";
+    if (total === 0) return "They have nothing.";
     await eco.deductCopper(cmd.targetId, total);
     await eco.addCopper(MASTER_ID, total);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
     return "🤵 **FAMILY HEIST!** Seized ALL of **" + (tu?.username||cmd.targetId) + "'s** wealth — **💵 " + total.toLocaleString() + " Cash**. It now belongs to the Don. 😈";
   }
   if (action === "eco_gamble_ban") {
-    if (userId !== MASTER_ID) return "🔫 Don only.";
+    if (userId !== MASTER_ID) return "Don only.";
     gamblingBlacklist.add(cmd.targetId);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
     return "⛔ **" + (tu?.username||cmd.targetId) + "** is now blacklisted from all gambling.";
   }
   if (action === "eco_gamble_unban") {
-    if (userId !== MASTER_ID) return "🔫 Don only.";
+    if (userId !== MASTER_ID) return "Don only.";
     gamblingBlacklist.delete(cmd.targetId);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
     return "✅ **" + (tu?.username||cmd.targetId) + "** can gamble again.";
   }
   if (action === "eco_stats") {
-    if (userId !== MASTER_ID) return "🔫 Don only.";
+    if (userId !== MASTER_ID) return "Don only.";
     const lb = await eco.getLeaderboard(100);
     const totalCash = lb.reduce((a, w) => a + eco.walletToCopper(w), 0);
     const richest = lb[0];
@@ -4133,7 +4196,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
   }
   if (action === "eco_nuke") {
-    if (userId !== MASTER_ID) return "🔫 Don only.";
+    if (userId !== MASTER_ID) return "Don only.";
     setPendingConfirm(channelId, "eco_nuke", {});
     return "⚠️ **THIS WILL WIPE ALL BALANCES.** Type **yes** to confirm or ignore to cancel.";
   }
@@ -4156,24 +4219,24 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   switch (action) {
 
     case "set_timer": {
-      if (userId !== MASTER_ID) return "🔫 Only Don Clint can change timers.";
+      if (userId !== MASTER_ID) return "Only Don Clint can change timers.";
       const ms = parseFullDuration(cmd.rawTime);
-      if (!ms) return "🔫 Couldn't parse that time. Use formats like `30m`, `1h20m`, `45s`.";
+      if (!ms) return "Couldn't parse that time. Use formats like `30m`, `1h20m`, `45s`.";
       timerConfig[cmd.timerKey] = ms;
       if (cmd.timerKey === "deadman") startDeadMansSwitch(guild);
       if (cmd.timerKey === "psychwar" || cmd.timerKey === "psychfirst") startPsychologicalWarfare(guild);
       if (cmd.timerKey === "inactivity") startInactivityCheck(guild);
-      return `🔫 **${cmd.timerKey}** timer set to **${formatTimerConfig(ms)}**. Restarted immediately. 🤵`;
+      return `**${cmd.timerKey}** timer set to **${formatTimerConfig(ms)}**. Restarted immediately. 🤵`;
     }
 
     case "set_psychchance": {
-      if (userId !== MASTER_ID) return "🔫 Only Don Clint can change psych chances.";
+      if (userId !== MASTER_ID) return "Only Don Clint can change psych chances.";
       const { event, value } = cmd;
-      if (value < 0 || value > 100) return "🔫 Value must be between 0 and 100.";
+      if (value < 0 || value > 100) return "Value must be between 0 and 100.";
       psychChances[event] = value;
       const total = psychChances.summon + psychChances.lockdown + psychChances.dm + psychChances.wanted;
       return (
-        `🔫 **${event}** chance set to **${value}%**.\n` +
+        `**${event}** chance set to **${value}%**.\n` +
         `Current spread:\n` +
         `> 👁️ Summon: **${psychChances.summon}%**\n` +
         `> 🔒 Lockdown: **${psychChances.lockdown}%**\n` +
@@ -4185,7 +4248,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
 
     case "view_timers": {
       return (
-        `⏱️ **FAMILY TIMER CONFIG** 🔫\n` +
+        `⏱️ **FAMILY TIMER CONFIG** \n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `☠️ Dead Man Switch: **${formatTimerConfig(timerConfig.deadman)}**\n` +
         `🧠 Psych Warfare interval: **${formatTimerConfig(timerConfig.psychwar)}**\n` +
@@ -4199,7 +4262,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     case "view_psychchances": {
       const total = psychChances.summon + psychChances.lockdown + psychChances.dm + psychChances.wanted;
       return (
-        `🎲 **PSYCH WARFARE CHANCES** 🔫\n` +
+        `🎲 **PSYCH WARFARE CHANCES** \n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `👁️ Summon: **${psychChances.summon}%**\n` +
         `🔒 Lockdown: **${psychChances.lockdown}%**\n` +
@@ -4212,17 +4275,17 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     }
 
     case "bestow": {
-      if (userId !== MASTER_ID) return "🔫 Only Don Clint can bestow titles.";
+      if (userId !== MASTER_ID) return "Only Don Clint can bestow titles.";
       const resolved = resolveRankKey(rankKey);
-      if (!resolved) return `🔫 Unknown rank **"${rankKey}"**.\nValid titles: **${VALID_RANK_NAMES.join(", ")}**`;
-      if (!targetId) return "🔫 Mention a user to bestow the title upon.";
+      if (!resolved) return `Unknown rank **"${rankKey}"**.\nValid titles: **${VALID_RANK_NAMES.join(", ")}**`;
+      if (!targetId) return "Mention a user to bestow the title upon.";
       const targetMember = await guild?.members.fetch(targetId).catch(() => null);
-      if (!targetMember) return "🔫 Can't find that member.";
+      if (!targetMember) return "Can't find that member.";
       familyRoster.set(targetId, resolved);
       saveData();
       const rank = RANKS[resolved];
       await message.channel.send(
-        `🤵 **BY ORDER OF DON CLINT** 🔫\n` +
+        `🤵 **BY ORDER OF DON CLINT** \n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `${rank.emoji} Stand up, **${targetMember.user.username}**.\n\n` +
         `By the authority of this Family, I name you **${rank.title}**.\n` +
@@ -4234,17 +4297,17 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       return null;
     }
     case "shadow_vote": {
-      if (userId !== MASTER_ID) return "🔫 Only Don Clint can manually call a shadow trial.";
-      if (!targetId) return "🔫 Mention someone to put on trial.";
-      if (targetId === MASTER_ID) return "🔫 You dare put Don Clint on trial? Absolutely not.";
+      if (userId !== MASTER_ID) return "Only Don Clint can manually call a shadow trial.";
+      if (!targetId) return "Mention someone to put on trial.";
+      if (targetId === MASTER_ID) return "You dare put Don Clint on trial? Absolutely not.";
       const target = await guild.members.fetch(targetId).catch(() => null);
-      if (!target) return "🔫 Can't find that member.";
+      if (!target) return "Can't find that member.";
       const result = await startShadowVote(guild, targetId, target.user.username, userId);
       return result || null;
     }
     case "bail": {
-      if (userId !== MASTER_ID) return "🔫 Only Don Clint can grant bail.";
-      if (!targetId) return "🔫 Mention the accused.";
+      if (userId !== MASTER_ID) return "Only Don Clint can grant bail.";
+      if (!targetId) return "Mention the accused.";
       const target = await guild.members.fetch(targetId).catch(() => null);
       const targetName = target?.user?.username || `<@${targetId}>`;
       const condition = cmd.condition || "an oath of loyalty to the Family";
@@ -4269,19 +4332,19 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
 ` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ` +
-        `*Fail to deliver, and there shall be no mercy next time. 🔫*`;
+        `*Fail to deliver, and there shall be no mercy next time. *`;
       if (courtChannel) await courtChannel.send(bailMsg).catch(() => {});
       const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
       if (genChannel) await genChannel.send(`⚖️ **FAMILY DECREE** — <@${targetId}> walks free today. Don Clint has shown mercy in exchange for: *${condition}*. Do not waste this chance.`).catch(() => {});
       return null;
     }
     case "set_mood": {
-      if (userId !== MASTER_ID) return "🔫 Only Don Clint can command Cosa's mood.";
+      if (userId !== MASTER_ID) return "Only Don Clint can command Cosa's mood.";
       const moodName = cmd.moodName?.toLowerCase();
       const found = MOODS.find(m => m.name.toLowerCase().includes(moodName));
       if (!found) {
         const moodList = MOODS.map(m => m.emoji + " " + m.name).join("\n");
-        return "🔫 Mood not found. Available moods:\n" + moodList;
+        return "Mood not found. Available moods:\n" + moodList;
       }
       currentMood = found;
       moodSetAt = Date.now();
@@ -4322,21 +4385,21 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     }
     case "bank_deposit": {
       const copper = eco.parseBet(cmd.amount, cmd.tier);
-      if (!copper) return "🔫 Invalid amount.";
+      if (!copper) return "Invalid amount.";
       const deducted = await eco.deductCopper(message.author.id, copper);
-      if (!deducted) return "🔫 Insufficient wallet funds.";
+      if (!deducted) return "Insufficient wallet funds.";
       const result = await bank.deposit(message.author.id, copper);
       if (!result.success) {
         await eco.addCopper(message.author.id, copper); // refund
-        return "🔫 " + result.reason;
+        return "" + result.reason;
       }
-      return "🏦 **Deposited " + bank.formatCopper(copper) + "** into your vault.\nNew bank balance: **" + bank.formatCopper(result.account.balance) + "**\n*Bank funds are robbery-proof. 🔫*";
+      return "🏦 **Deposited " + bank.formatCopper(copper) + "** into your vault.\nNew bank balance: **" + bank.formatCopper(result.account.balance) + "**\n*Bank funds are robbery-proof. *";
     }
     case "bank_withdraw": {
       const copper = eco.parseBet(cmd.amount, cmd.tier);
-      if (!copper) return "🔫 Invalid amount.";
+      if (!copper) return "Invalid amount.";
       const result = await bank.withdraw(message.author.id, copper);
-      if (!result.success) return "🔫 " + result.reason;
+      if (!result.success) return "" + result.reason;
       await eco.addCopper(message.author.id, copper);
       return "🏦 **Withdrew " + bank.formatCopper(copper) + "** from your vault.\nBank balance: **" + bank.formatCopper(result.account.balance) + "**";
     }
@@ -4349,7 +4412,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
         return "🤵 **Don's Vault** granted to Don Clint. The treasury is limitless.";
       }
       const result = await bank.upgradeTier(message.author.id, MASTER_ID, eco.addCopper, eco.deductCopper);
-      if (!result.success) return "🔫 " + result.reason;
+      if (!result.success) return "" + result.reason;
       return (
         result.tier.emoji + " **VAULT UPGRADED!**\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
@@ -4385,18 +4448,18 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     }
     case "bank_deposit": {
       const bCash = eco.parseBet(cmd.amount, cmd.tier);
-      if (!bCash) return "🔫 Invalid amount.";
+      if (!bCash) return "Invalid amount.";
       const bDed = await eco.deductCopper(message.author.id, bCash);
-      if (!bDed) return "🔫 Insufficient wallet funds.";
+      if (!bDed) return "Insufficient wallet funds.";
       const bRes = await bank.deposit(message.author.id, bCash);
-      if (!bRes.success) { await eco.addCopper(message.author.id, bCash); return "🔫 " + bRes.reason; }
-      return "🏦 **Deposited " + bank.formatCopper(bCash) + "** into your vault.\nBalance: **" + bank.formatCopper(bRes.account.balance) + "**\n*Bank funds are robbery-proof. 🔫*";
+      if (!bRes.success) { await eco.addCopper(message.author.id, bCash); return "" + bRes.reason; }
+      return "🏦 **Deposited " + bank.formatCopper(bCash) + "** into your vault.\nBalance: **" + bank.formatCopper(bRes.account.balance) + "**\n*Bank funds are robbery-proof. *";
     }
     case "bank_withdraw": {
       const bCash2 = eco.parseBet(cmd.amount, cmd.tier);
-      if (!bCash2) return "🔫 Invalid amount.";
+      if (!bCash2) return "Invalid amount.";
       const bRes2 = await bank.withdraw(message.author.id, bCash2);
-      if (!bRes2.success) return "🔫 " + bRes2.reason;
+      if (!bRes2.success) return "" + bRes2.reason;
       await eco.addCopper(message.author.id, bCash2);
       return "🏦 **Withdrew " + bank.formatCopper(bCash2) + "** from your vault.\nBalance: **" + bank.formatCopper(bRes2.account.balance) + "**";
     }
@@ -4408,7 +4471,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
         return "🤵 **Don's Vault** granted to Don Clint. The treasury is limitless.";
       }
       const bUpRes = await bank.upgradeTier(message.author.id, MASTER_ID, eco.addCopper, eco.deductCopper);
-      if (!bUpRes.success) return "🔫 " + bUpRes.reason;
+      if (!bUpRes.success) return "" + bUpRes.reason;
       return bUpRes.tier.emoji + " **VAULT UPGRADED!**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nNew tier: **" + bUpRes.tier.label + "**\nStorage: **" + bank.formatCopper(bUpRes.tier.maxStorage) + "**\nInterest: **+" + (bUpRes.tier.interestRate*100).toFixed(1) + "%**/day | Fee: **-" + (bUpRes.tier.feeRate*100).toFixed(1) + "%**/day\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Upgrade cost sent to the Vig. 🤵*";
     }
     case "show_mood": {
@@ -4426,27 +4489,27 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       );
     }
     case "revoke_title": {
-      if (userId !== MASTER_ID) return "🔫 Only Don Clint can revoke titles.";
-      if (!familyRoster.has(targetId)) return "🔫 That person holds no title.";
+      if (userId !== MASTER_ID) return "Only Don Clint can revoke titles.";
+      if (!familyRoster.has(targetId)) return "That person holds no title.";
       const oldRank = RANKS[familyRoster.get(targetId)];
       familyRoster.delete(targetId);
       saveData();
       await sendModLog(guild, { action: `Revoke Title: ${oldRank.title}`, moderator: modName, target: `<@${targetId}>`, reason: "Order of the Family" });
-      return `🔫 The title of **${oldRank.title}** has been revoked. They're nobody in the Family now.`;
+      return `The title of **${oldRank.title}** has been revoked. They're nobody in the Family now.`;
     }
     case "family_ledger": {
-      if (familyRoster.size === 0) return "🔫 The Family Ledger is empty.";
+      if (familyRoster.size === 0) return "The Family Ledger is empty.";
       const lines = [];
       for (const [uid, rank] of familyRoster) lines.push(`${RANKS[rank].emoji} **${RANKS[rank].title}** — <@${uid}>`);
       return `🤵 **FAMILY LEDGER**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${lines.join("\n")}`;
     }
     case "shadow_user_add": { if (!watchlist.has(targetId)) { watchlist.set(targetId, []); saveData(); } return `👁️ <@${targetId}> added to watchlist.`; }
-    case "shadow_user_remove": { const del = watchlist.delete(targetId); saveData(); return del ? `✅ <@${targetId}> removed from watchlist.` : `🔫 Not on watchlist.`; }
-    case "shadow_trigger_add": { if (!SHADOW_TRIGGERS.includes(trigger.toLowerCase())) { SHADOW_TRIGGERS.push(trigger.toLowerCase()); return `✅ Added "${trigger}" to shadow triggers.`; } return `🔫 Already exists.`; }
-    case "shadow_trigger_remove": { const idx = SHADOW_TRIGGERS.indexOf(trigger.toLowerCase()); if (idx > -1) { SHADOW_TRIGGERS.splice(idx, 1); return `✅ Removed "${trigger}".`; } return `🔫 Not found.`; }
+    case "shadow_user_remove": { const del = watchlist.delete(targetId); saveData(); return del ? `✅ <@${targetId}> removed from watchlist.` : `Not on watchlist.`; }
+    case "shadow_trigger_add": { if (!SHADOW_TRIGGERS.includes(trigger.toLowerCase())) { SHADOW_TRIGGERS.push(trigger.toLowerCase()); return `✅ Added "${trigger}" to shadow triggers.`; } return `Already exists.`; }
+    case "shadow_trigger_remove": { const idx = SHADOW_TRIGGERS.indexOf(trigger.toLowerCase()); if (idx > -1) { SHADOW_TRIGGERS.splice(idx, 1); return `✅ Removed "${trigger}".`; } return `Not found.`; }
 
     case "wipe_rich": {
-      if (userId !== MASTER_ID) return "🔫 Don only.";
+      if (userId !== MASTER_ID) return "Don only.";
       const WIPE_THRESHOLD = 10000000; // 10 "Diamonds" equivalent, pre-flatten
       try {
         const { data } = await supabase.from("wallets").select("user_id, copper, silver, gold, stellar");
@@ -4457,13 +4520,13 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
           await supabase.from("wallets").update({ copper: 0, silver: 0, gold: 0, stellar: 0, total_earned: 0 }).eq("user_id", row.user_id);
         }
         return `💥 **${rich.length} player(s) wiped** — anyone with 💵 10,000,000+ Cash has been reset to 0. The Family rebalances. 🤵`;
-      } catch (e) { return `🔫 Failed: ${e.message}`; }
+      } catch (e) { return `Failed: ${e.message}`; }
     }
-    case "ban_confirm": if (!guild) return "🔫 Server only."; setPendingConfirm(channelId, "ban", { targetId, reason }); return `⚠️ **Ban <@${targetId}>?** Reason: *${reason}*\nSay **"yes"** to confirm. *(30s)*`;
-    case "kick_confirm": if (!guild) return "🔫 Server only."; setPendingConfirm(channelId, "kick", { targetId, reason }); return `⚠️ **Kick <@${targetId}>?** Reason: *${reason}*\nSay **"yes"** to confirm. *(30s)*`;
-    case "strip_confirm": if (!guild) return "🔫 Server only."; setPendingConfirm(channelId, "strip_role", { targetId }); return `⚠️ **Strip ALL roles from <@${targetId}>?** Say **"yes"** to confirm. *(30s)*`;
-    case "exile_confirm": if (!guild) return "🔫 Server only."; setPendingConfirm(channelId, "exile", { targetId }); return `⚠️ **Exile <@${targetId}>?** Say **"yes"** to confirm. *(30s)*`;
-    case "temp_exile_confirm": if (!guild) return "🔫 Server only."; setPendingConfirm(channelId, "temp_exile", { targetId, durationMs }); return `⚠️ **Temp exile <@${targetId}> for ${formatTime(durationMs)}?** Say **"yes"** to confirm. *(30s)*`;
+    case "ban_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "ban", { targetId, reason }); return `⚠️ **Ban <@${targetId}>?** Reason: *${reason}*\nSay **"yes"** to confirm. *(30s)*`;
+    case "kick_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "kick", { targetId, reason }); return `⚠️ **Kick <@${targetId}>?** Reason: *${reason}*\nSay **"yes"** to confirm. *(30s)*`;
+    case "strip_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "strip_role", { targetId }); return `⚠️ **Strip ALL roles from <@${targetId}>?** Say **"yes"** to confirm. *(30s)*`;
+    case "exile_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "exile", { targetId }); return `⚠️ **Exile <@${targetId}>?** Say **"yes"** to confirm. *(30s)*`;
+    case "temp_exile_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "temp_exile", { targetId, durationMs }); return `⚠️ **Temp exile <@${targetId}> for ${formatTime(durationMs)}?** Say **"yes"** to confirm. *(30s)*`;
 
     case "exile": { await message.channel.send(`⛓️ Exiling <@${targetId}>...`).catch(() => {}); const r = await exileUser(guild, targetId); await sendModLog(guild, { action: "Exile", moderator: modName, target: `<@${targetId}>` }); return r; }
     case "temp_exile": { await message.channel.send(`⛓️ Temp exiling <@${targetId}> for ${formatTime(durationMs)}...`).catch(() => {}); const r = await exileUser(guild, targetId, durationMs); await sendModLog(guild, { action: `Temp Exile (${formatTime(durationMs)})`, moderator: modName, target: `<@${targetId}>` }); return r; }
@@ -4471,14 +4534,14 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
 
     case "last_words": {
       const targetMember = await guild?.members.fetch(targetId).catch(() => null);
-      if (!targetMember) return "🔫 Can't find that member.";
+      if (!targetMember) return "Can't find that member.";
       pendingLastWords.set(targetId, { channelId, moderatorId: userId });
-      await message.channel.send(`🔫 <@${targetId}> — **speak your last words.** The Family is listening. Your next message will be your final testament. 👁️`).catch(() => {});
+      await message.channel.send(`<@${targetId}> — **speak your last words.** The Family is listening. Your next message will be your final testament. 👁️`).catch(() => {});
       return null;
     }
 
     case "fake_raid": {
-      if (!guild) return "🔫 Server only.";
+      if (!guild) return "Server only.";
       await triggerFakeRaidAlert(guild);
       return null;
     }
@@ -4489,48 +4552,62 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       return `👁️ **Watchlist for <@${targetId}>** (last 5):\n${data.slice(-5).map((e,i) => `${i+1}. "${e.content.slice(0,80)}" — #${e.channelName} @ ${new Date(e.timestamp).toLocaleString()}`).join("\n")}`;
     }
     case "purge": {
-      try { const f = await message.channel.messages.fetch({ limit: amount+1 }); const d = await message.channel.bulkDelete(f, true); await sendModLog(guild, { action: `Purge ${d.size} messages`, moderator: modName, target: message.channel.name }); return `🔫 Purged **${d.size}** messages.`; }
-      catch (err) { return `🔫 Purge failed: ${err.message}`; }
+      try { const f = await message.channel.messages.fetch({ limit: amount+1 }); const d = await message.channel.bulkDelete(f, true); await sendModLog(guild, { action: `Purge ${d.size} messages`, moderator: modName, target: message.channel.name }); return `Purged **${d.size}** messages.`; }
+      catch (err) { return `Purge failed: ${err.message}`; }
     }
     case "ban": {
       await announceExecution(guild, targetId, "ban", reason);
       const banTarget = await guild.members.fetch(targetId).catch(() => null);
       if (banTarget) { storeBanFingerprint(banTarget.user); recentBanTime.time = Date.now(); }
-      try { await guild.members.ban(targetId, { reason }); await sendModLog(guild, { action: "Ban", moderator: modName, target: `<@${targetId}>`, reason }); return `🔫 <@${targetId}> **banished** from the Family.`; }
-      catch (err) { return `🔫 Ban failed: ${err.message}`; }
+      try { await guild.members.ban(targetId, { reason }); await sendModLog(guild, { action: "Ban", moderator: modName, target: `<@${targetId}>`, reason }); return `<@${targetId}> **banished** from the Family.`; }
+      catch (err) { return `Ban failed: ${err.message}`; }
     }
     case "kick": {
       const member = await guild.members.fetch(targetId).catch(() => null);
-      if (!member) return "🔫 Not in server.";
+      if (!member) return "Not in server.";
       await announceExecution(guild, targetId, "kick", reason);
-      try { await member.kick(reason); await sendModLog(guild, { action: "Kick", moderator: modName, target: member.user.username, reason }); return `🔫 <@${targetId}> **cast out**.`; }
-      catch (err) { return `🔫 Kick failed: ${err.message}`; }
+      try { await member.kick(reason); await sendModLog(guild, { action: "Kick", moderator: modName, target: member.user.username, reason }); return `<@${targetId}> **cast out**.`; }
+      catch (err) { return `Kick failed: ${err.message}`; }
     }
     case "strip_role": {
       const member = await guild.members.fetch(targetId).catch(() => null);
-      if (!member) return "🔫 Can't find that member.";
+      if (!member) return "Can't find that member.";
       try {
         const strippable = member.roles.cache.filter(r => r.id !== guild.id && r.position < guild.members.me.roles.highest.position);
-        if (strippable.size === 0) return "🔫 No roles I can strip.";
+        if (strippable.size === 0) return "No roles I can strip.";
         await member.roles.remove(strippable);
         await sendModLog(guild, { action: "Strip Roles", moderator: modName, target: member.user.username });
-        return `🔫 <@${targetId}> stripped of all roles. 👁️`;
-      } catch (err) { return `🔫 Strip failed: ${err.message}`; }
+        return `<@${targetId}> stripped of all roles. 👁️`;
+      } catch (err) { return `Strip failed: ${err.message}`; }
     }
     case "delete_reply": {
-      if (!message.reference?.messageId) return "🔫 Reply to a message to delete it.";
+      if (!message.reference?.messageId) return "Reply to a message to delete it.";
       try { const m = await message.channel.messages.fetch(message.reference.messageId); await m.delete(); await message.delete().catch(() => {}); return null; }
-      catch (err) { return `🔫 Couldn't delete: ${err.message}`; }
+      catch (err) { return `Couldn't delete: ${err.message}`; }
     }
     case "slimeout": {
       const targetMember = await guild.members.fetch(targetId).catch(() => null);
       const targetName = targetMember?.user?.username || "them";
       const roast = await getAIResponse(guild?.id, channelId, `Roast ${targetName} ruthlessly. Under 3 sentences.`, displayName, BOT_PERSONALITY + "\nRoast someone. Be savage and witty BUT NO family, NO mom jokes, NO parents, NO relatives.");
       await message.reply(roast).catch(() => {});
-      if (!targetMember) return "🔫 Can't find that member.";
-      await targetMember.timeout(durationMs, "Slimed out");
+      if (!targetMember) return "Can't find that member.";
+      try {
+        // Discord won't timeout members with Administrator permission — strip those
+        // roles temporarily, apply the timeout, then restore them immediately (same
+        // workaround as the "mute" case below).
+        const adminRoles = targetMember.roles.cache.filter(r =>
+          r.permissions.has(PermissionFlagsBits.Administrator) && r.id !== guild.id
+        );
+        if (adminRoles.size > 0) {
+          await targetMember.roles.remove(adminRoles, "Temporary removal to apply slimeout");
+        }
+        await targetMember.timeout(durationMs, "Slimed out");
+        if (adminRoles.size > 0) {
+          await targetMember.roles.add(adminRoles, "Restoring roles after slimeout applied").catch(() => {});
+        }
+      } catch (err) { return `Slimeout failed: ${err.message}`; }
       await sendModLog(guild, { action: `Slimeout (${formatTime(durationMs)})`, moderator: modName, target: targetName });
-      await message.channel.send(`🔫 <@${targetId}> slimed out for ${formatTime(durationMs)}. 🤐`).catch(() => {});
+      await message.channel.send(`<@${targetId}> slimed out for ${formatTime(durationMs)}. 🤐`).catch(() => {});
       return null;
     }
     case "roast": {
@@ -4540,13 +4617,13 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     }
     case "mute": {
       const member = await guild.members.fetch(targetId).catch(() => null);
-      if (!member) return "🔫 Not in server.";
+      if (!member) return "Not in server.";
       // Rank hierarchy check — can't mute someone equal or higher rank
       if (!isDon) {
         const modLevel = rankData?.level || 0;
         const targetRankKey = getFamilyRank(targetId);
         const targetLevel = targetRankKey ? (RANKS[targetRankKey]?.level || 0) : 0;
-        if (targetLevel >= modLevel) return "🔫 You cannot mute someone of equal or higher rank than you. Know your place.";
+        if (targetLevel >= modLevel) return "You cannot mute someone of equal or higher rank than you. Know your place.";
       }
       try {
         // Discord won't timeout members with Administrator permission — strip those
@@ -4562,18 +4639,18 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
           await member.roles.add(adminRoles, "Restoring roles after mute applied").catch(() => {});
         }
         await sendModLog(guild, { action: `Mute (${formatTime(durationMs)})`, moderator: modName, target: member.user.username, reason });
-        return `🔫 <@${targetId}> muted for ${formatTime(durationMs)}.`;
-      } catch (err) { return `🔫 Mute failed: ${err.message}`; }
+        return `<@${targetId}> muted for ${formatTime(durationMs)}.`;
+      } catch (err) { return `Mute failed: ${err.message}`; }
     }
     case "unmute": {
       const member = await guild.members.fetch(targetId).catch(() => null);
-      if (!member) return "🔫 Not in server.";
+      if (!member) return "Not in server.";
       await member.timeout(null);
       await sendModLog(guild, { action: "Unmute", moderator: modName, target: member.user.username });
-      return `🔫 <@${targetId}> unmuted.`;
+      return `<@${targetId}> unmuted.`;
     }
       case "exile_god": {
-        if (cmd.userId === MASTER_ID) return "🔫 Cannot exile Don Clint.";
+        if (cmd.userId === MASTER_ID) return "Cannot exile Don Clint.";
         const result = await exileUser(guild, cmd.userId);
         if (adminCh) await adminCh.send(`🤵 [GOD MODE LOG] <@${cmd.userId}> exiled by Don Clint.`).catch(() => {});
         return result || `⛓️ <@${cmd.userId}> exiled.`;
@@ -4584,24 +4661,24 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
         return result;
       }
     case "unban": {
-      try { await guild.members.unban(targetId); await sendModLog(guild, { action: "Unban", moderator: modName, target: `<@${targetId}>` }); return `🔫 <@${targetId}> pardoned.`; }
-      catch (err) { return `🔫 Unban failed: ${err.message}`; }
+      try { await guild.members.unban(targetId); await sendModLog(guild, { action: "Unban", moderator: modName, target: `<@${targetId}>` }); return `<@${targetId}> pardoned.`; }
+      catch (err) { return `Unban failed: ${err.message}`; }
     }
-    case "clear_memory": { conversationHistory.delete(channelId); return "🔫 Memory wiped."; }
+    case "clear_memory": { conversationHistory.delete(channelId); return "Memory wiped."; }
     case "warn": {
       const targetMember = await guild.members.fetch(targetId).catch(() => null);
-      if (!targetMember) return "🔫 Can't find that member.";
+      if (!targetMember) return "Can't find that member.";
       if (!isDon) {
         const modLevel2 = rankData?.level || 0;
         const targetRankKey2 = getFamilyRank(targetId);
         const targetLevel2 = targetRankKey2 ? (RANKS[targetRankKey2]?.level || 0) : 0;
-        if (targetLevel2 >= modLevel2) return "🔫 You cannot warn someone of equal or higher rank.";
+        if (targetLevel2 >= modLevel2) return "You cannot warn someone of equal or higher rank.";
       }
       const count = addWarning(targetId, reason);
       await sendModLog(guild, { action: `Warn (${count}/${WARN_THRESHOLD})`, moderator: modName, target: targetMember.user.username, reason });
-      let reply = `🔫 <@${targetId}> warned. *(${reason})* — Warning **${count}/${WARN_THRESHOLD}**.`;
+      let reply = `<@${targetId}> warned. *(${reason})* — Warning **${count}/${WARN_THRESHOLD}**.`;
       if (count >= WARN_THRESHOLD) {
-        reply += `\n\n<@${MASTER_ID}> — <@${targetId}> hit **${WARN_THRESHOLD} warnings**. Execute? 🔫`;
+        reply += `\n\n<@${MASTER_ID}> — <@${targetId}> hit **${WARN_THRESHOLD} warnings**. Execute?`;
         pendingExecutions.set(channelId, { targetId, targetName: targetMember.user.username });
         warningStore.get(targetId).count = 0;
       }
@@ -4609,22 +4686,39 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     }
     case "warnings": {
       const data = getWarnings(targetId);
-      if (!data.warnings.length) return `🔫 <@${targetId}> has no warnings.`;
-      return `🔫 **Warnings for <@${targetId}>:**\n${data.warnings.map((w,i) => `${i+1}. ${w.reason} *(${new Date(w.timestamp).toLocaleDateString()})*`).join("\n")}`;
+      if (!data.warnings.length) return `<@${targetId}> has no warnings.`;
+      return `**Warnings for <@${targetId}>:**\n${data.warnings.map((w,i) => `${i+1}. ${w.reason} *(${new Date(w.timestamp).toLocaleDateString()})*`).join("\n")}`;
+    }
+    case "give_role": {
+      if (!guild) return "Server only.";
+      const role = guild.roles.cache.find(r => r.name.toLowerCase() === roleName.toLowerCase());
+      if (!role) return `Can't find a role named **${roleName}**.`;
+      const member = await guild.members.fetch(targetId).catch(() => null);
+      if (!member) return "Can't find that member.";
+      const botMember = await guild.members.fetchMe().catch(() => null);
+      if (botMember && role.position >= botMember.roles.highest.position) return `Role **${role.name}** is above my rank — I cannot assign it.`;
+      if (!isDon) {
+        const invoker = await guild.members.fetch(userId).catch(() => null);
+        if (invoker && role.position >= invoker.roles.highest.position) return `You cannot grant a role equal to or higher than your own highest role.`;
+      }
+      try { await member.roles.add(role, `Granted by ${modName}`); }
+      catch (err) { return `Failed: ${err.message}`; }
+      await sendModLog(guild, { action: `Give role ${role.name}`, moderator: modName, target: member.user.username });
+      return `<@${targetId}> granted the **${role.name}** role.`;
     }
     case "slowmode": {
-      const seconds = Math.round((durationMs||5000)/1000);
+      const seconds = Math.round((durationMs != null ? durationMs : 5000)/1000);
       await message.channel.setRateLimitPerUser(seconds);
       await sendModLog(guild, { action: `Slowmode ${seconds}s`, moderator: modName, target: message.channel.name });
-      return seconds === 0 ? "🔫 Slowmode disabled." : `🔫 Slowmode set to **${seconds}s**.`;
+      return seconds === 0 ? "Slowmode disabled." : `Slowmode set to **${seconds}s**.`;
     }
     case "lockdown": {
-      try { await message.channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false }); await sendModLog(guild, { action: "Lockdown", moderator: modName, target: message.channel.name }); return "🔫 Channel locked. 🔒"; }
-      catch (err) { return `🔫 Failed: ${err.message}`; }
+      try { await message.channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false }); await sendModLog(guild, { action: "Lockdown", moderator: modName, target: message.channel.name }); return "Channel locked. 🔒"; }
+      catch (err) { return `Failed: ${err.message}`; }
     }
     case "unlock": {
-      try { await message.channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null }); await sendModLog(guild, { action: "Unlock", moderator: modName, target: message.channel.name }); return "🔫 Channel unlocked. 🔓"; }
-      catch (err) { return `🔫 Failed: ${err.message}`; }
+      try { await message.channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null }); await sendModLog(guild, { action: "Unlock", moderator: modName, target: message.channel.name }); return "Channel unlocked. 🔓"; }
+      catch (err) { return `Failed: ${err.message}`; }
     }
     case "help":
     case "rank_help":
@@ -4633,23 +4727,23 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       return await executePublicCommand(message, cmd, channelId);
 
     case "firm_pump": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       const fpTicker = cmd.ticker.toUpperCase();
       const fpRounds = Math.min(cmd.rounds || 3, 10);
       await message.channel.send(`📈 **DON PUMPING ${fpTicker}** — ${fpRounds}x +5% candles incoming! 🤵`).catch(() => {});
       const fpOk = await firms.forceFirmPumpCrash(fpTicker, fpRounds, 1);
-      if (!fpOk) return `🔫 No active firm with ticker **${fpTicker}**.`;
+      if (!fpOk) return `No active firm with ticker **${fpTicker}**.`;
       const fpBuf = await firms.getFirmChart().catch(() => null);
       if (fpBuf) await message.channel.send({ content: `📈 **${fpTicker} PUMPED** — ${fpRounds}x +5% candles forced!`, files: [new AttachmentBuilder(fpBuf, { name: "firm-pump.png" })] }).catch(() => {});
       return null;
     }
     case "firm_bomb": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       const fbTicker = cmd.ticker.toUpperCase();
       const fbRounds = Math.min(cmd.rounds || 3, 10);
       await message.channel.send(`📉 **DON BOMBING ${fbTicker}** — ${fbRounds}x -5% candles incoming! 😈`).catch(() => {});
       const fbOk = await firms.forceFirmPumpCrash(fbTicker, fbRounds, -1);
-      if (!fbOk) return `🔫 No active firm with ticker **${fbTicker}**.`;
+      if (!fbOk) return `No active firm with ticker **${fbTicker}**.`;
       const fbBuf = await firms.getFirmChart().catch(() => null);
       if (fbBuf) await message.channel.send({ content: `📉 **${fbTicker} BOMBED** — ${fbRounds}x -5% candles forced!`, files: [new AttachmentBuilder(fbBuf, { name: "firm-bomb.png" })] }).catch(() => {});
       return null;
@@ -4666,7 +4760,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
         return null;
       } catch (e) {
         console.error("[FIRM CHART]", e.message);
-        return "🔫 Firm chart failed: " + e.message;
+        return "Firm chart failed: " + e.message;
       }
     }
 
@@ -4695,9 +4789,9 @@ async function executePublicCommand(message, cmd, channelId) {
     case "8ball": { const r = EIGHT_BALL_RESPONSES[Math.floor(Math.random()*EIGHT_BALL_RESPONSES.length)]; return cmd.question ? `🎱 *${cmd.question}*\n\n${r}` : `🎱 ${r}`; }
     case "rps": {
       const choices = ["rock","paper","scissors"], bc = choices[Math.floor(Math.random()*3)], uc = cmd.choice;
-      if (!uc) return "🔫 Tell me your choice — rock, paper, or scissors.";
+      if (!uc) return "Tell me your choice — rock, paper, or scissors.";
       const wins = { rock:"scissors", paper:"rock", scissors:"paper" };
-      const result = uc===bc ? "It's a **tie**." : wins[uc]===bc ? "You **win**. Don't let it get to your head." : "You **lose**. The Family reigns supreme. 🔫";
+      const result = uc===bc ? "It's a **tie**." : wins[uc]===bc ? "You **win**. Don't let it get to your head." : "You **lose**. The Family reigns supreme.";
       return `🪨📄✂️ I threw **${bc}**. ${result}`;
     }
     case "roll": { const s = Math.max(2, Math.min(cmd.sides, 1000)); return `🎲 Rolled a **d${s}** — landed on **${Math.floor(Math.random()*s)+1}**.`; }
@@ -4705,33 +4799,33 @@ async function executePublicCommand(message, cmd, channelId) {
     case "dare": return `🔥 **DARE:** ${DARES[Math.floor(Math.random()*DARES.length)]}`;
     case "truth_or_dare": return Math.random()<0.5 ? `🔮 **TRUTH:** ${TRUTHS[Math.floor(Math.random()*TRUTHS.length)]}` : `🔥 **DARE:** ${DARES[Math.floor(Math.random()*DARES.length)]}`;
     case "ship": {
-      const { user1, user2 } = cmd; if (!user1||!user2) return "🔫 Mention two people.";
+      const { user1, user2 } = cmd; if (!user1||!user2) return "Mention two people.";
       const score = Math.floor(Math.random()*101);
       const verdict = score>=90?"Soulmates. The Family blesses this union. 💍":score>=70?"Pretty solid. Don't mess it up. 💘":score>=50?"Could work with some effort. 🤷":score>=30?"Yikes. Rough waters ahead. 😬":"Absolutely not. The Family forbids it. 💀";
       return `💞 **${user1.username}** x **${user2.username}**\n${"█".repeat(Math.floor(score/10))}${"░".repeat(10-Math.floor(score/10))} **${score}%**\n${verdict}`;
     }
-    case "debate": { if (!cmd.topic) return "🔫 Give me a topic."; return await getAIResponse(message.guild?.id, channelId, `Pick a strong side on: "${cmd.topic}". Argue in 2-3 sentences.`, message.author.username, BOT_PERSONALITY+"\nDebating. Pick one side, argue hard."); }
+    case "debate": { if (!cmd.topic) return "Give me a topic."; return await getAIResponse(message.guild?.id, channelId, `Pick a strong side on: "${cmd.topic}". Argue in 2-3 sentences.`, message.author.username, BOT_PERSONALITY+"\nDebating. Pick one side, argue hard."); }
     case "quiz": return await getAIResponse(message.guild?.id, channelId, "Ask a fun trivia question with 4 options A B C D.", message.author.username, BOT_PERSONALITY+"\nTrivia host. ONE question, 4 choices.");
     case "serverinfo": {
-      if (!guild) return "🔫 Server only.";
+      if (!guild) return "Server only.";
       await guild.fetch();
       const owner = await guild.fetchOwner().catch(()=>null);
-      return [`🔫 **${guild.name}**`,`🤵 Owner: ${owner?.user?.username||"Unknown"}`,`👥 Members: ${guild.memberCount}`,`📅 Created: ${guild.createdAt.toLocaleDateString()}`,`💎 Boost Level: ${guild.premiumTier} (${guild.premiumSubscriptionCount} boosts)`,`#️⃣ Channels: ${guild.channels.cache.size}`,`🎭 Roles: ${guild.roles.cache.size}`].join("\n");
+      return [`**${guild.name}**`,`🤵 Owner: ${owner?.user?.username||"Unknown"}`,`👥 Members: ${guild.memberCount}`,`📅 Created: ${guild.createdAt.toLocaleDateString()}`,`💎 Boost Level: ${guild.premiumTier} (${guild.premiumSubscriptionCount} boosts)`,`#️⃣ Channels: ${guild.channels.cache.size}`,`🎭 Roles: ${guild.roles.cache.size}`].join("\n");
     }
     case "userinfo": {
       const tid = cmd.targetId;
       const member = guild ? await guild.members.fetch(tid).catch(()=>null) : null;
       const user = member?.user || await client.users.fetch(tid).catch(()=>null);
-      if (!user) return "🔫 Can't find that user.";
+      if (!user) return "Can't find that user.";
       const roles = member?.roles.cache.filter(r=>r.id!==guild?.id).map(r=>r.name).join(", ")||"None";
       const rankData = RANKS[getFamilyRank(user.id)];
       const titleLine = rankData ? `\n${rankData.emoji} **${rankData.title}** of the Family` : "";
       const exiled = exileStore.has(user.id) ? "\n⛓️ **Currently EXILED**" : "";
       const watched = watchlist.has(user.id) && watchlist.get(user.id).length>0 ? "\n👁️ *On watchlist*" : "";
-      return [`🔫 **${user.username}**${titleLine}${exiled}${watched}`,`🆔 ID: ${user.id}`,`📅 Created: ${user.createdAt.toLocaleDateString()}`,member?`📥 Joined: ${member.joinedAt?.toLocaleDateString()||"Unknown"}`:"",`🎭 Roles: ${roles}`].filter(Boolean).join("\n");
+      return [`**${user.username}**${titleLine}${exiled}${watched}`,`🆔 ID: ${user.id}`,`📅 Created: ${user.createdAt.toLocaleDateString()}`,member?`📥 Joined: ${member.joinedAt?.toLocaleDateString()||"Unknown"}`:"",`🎭 Roles: ${roles}`].filter(Boolean).join("\n");
     }
     case "poll": {
-      if (!cmd.question) return "🔫 Give me a question.";
+      if (!cmd.question) return "Give me a question.";
       const pm = await message.channel.send(`📊 **POLL:** ${cmd.question}`);
       await pm.react("✅").catch(()=>{}); await pm.react("❌").catch(()=>{});
       return null;
@@ -4758,7 +4852,7 @@ async function executePublicCommand(message, cmd, channelId) {
       const safeProphecy = sanitizeOutput(prophecy);
       const targetMention = targetUser ? `<@${targetUser.id}>` : targetName;
       await message.channel.send(
-        `🔮 **THE FAMILY'S INSIDE MAN TALKS** 🔫\n` +
+        `🔮 **THE FAMILY'S INSIDE MAN TALKS** \n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `*A tip-off on ${targetMention}...*\n\n` +
         `${safeProphecy}\n` +
@@ -4771,18 +4865,18 @@ async function executePublicCommand(message, cmd, channelId) {
       // Don't flood the channel — point them at the private slash command instead.
       const uid = message.author.id;
       const canSeeIt = uid === MASTER_ID || canDo(uid, "canWarn") || canDo(uid, "canMute") || canDo(uid, "canKick") || canDo(uid, "canBan") || canDo(uid, "canPurge") || canDo(uid, "canSlowmode") || canDo(uid, "canLockdown") || canDo(uid, "canRoast") || canDo(uid, "canSlimeout") || canDo(uid, "canStrip") || canDo(uid, "canExile") || canDo(uid, "canUnban");
-      if (!canSeeIt) return "🔫 You hold no rank in the Family. **/help** is all you get, street rat.";
-      return "🔫 Use **/rank-help** instead — it's private, only you'll see it.";
+      if (!canSeeIt) return "You hold no rank in the Family. **/help** is all you get, street rat.";
+      return "Use **/rank-help** instead — it's private, only you'll see it.";
     }
     case "help": {
-      return "🔫 Use **/help** instead — it's private, only you'll see it.";
+      return "Use **/help** instead — it's private, only you'll see it.";
     }
     case "eco_help": {
       // Don't flood the channel — point them at the private slash command instead.
-      return "🔫 Use **/eco** instead — it's private, only you'll see it.";
+      return "Use **/eco** instead — it's private, only you'll see it.";
     }
     case "chess_bot": {
-      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const { difficulty, timeLimit } = cmd;
       const diff = DIFFICULTIES[difficulty] || DIFFICULTIES.intermediate;
       const existing = chessModule.getGame(message.channelId);
@@ -4790,15 +4884,15 @@ async function executePublicCommand(message, cmd, channelId) {
         const wp = existing.white.id === "BOT" ? existing.white.name : `<@${existing.white.id}>`;
         const bp = existing.black.id === "BOT" ? existing.black.name : `<@${existing.black.id}>`;
         const alreadyQueued = chessQueue.some(q => q.challengerId === message.author.id);
-        if (alreadyQueued) return `🔫 You're already in the queue. Patience.`;
+        if (alreadyQueued) return `You're already in the queue. Patience.`;
         chessQueue.push({ type: "bot", challengerId: message.author.id, challengerName: message.author.username, opponentId: "BOT", difficulty: difficulty || "intermediate", timeLimit: timeLimit || null });
         const pos = chessQueue.length;
-        return `🔫 A match is in progress — ${wp} vs ${bp}.
+        return `A match is in progress — ${wp} vs ${bp}.
 📋 You've been added to the queue at position **#${pos}**. You'll be pinged when it's your turn.`;
       }
       const lastBotChallenge = chessCooldowns.get(message.author.id) || 0;
       const botCooldownLeft = CHESS_COOLDOWN_MS - (Date.now() - lastBotChallenge);
-      if (botCooldownLeft > 0 && message.author.id !== MASTER_ID) return `🔫 Slow down. You can start a new game in **${Math.ceil(botCooldownLeft/1000)}s**.`;
+      if (botCooldownLeft > 0 && message.author.id !== MASTER_ID) return `Slow down. You can start a new game in **${Math.ceil(botCooldownLeft/1000)}s**.`;
       chessCooldowns.set(message.author.id, Date.now());
       const game = chessModule.createGame(message.author.id, message.author.username, "BOT", `Cosa (${diff.label})`, timeLimit);
       // Timeout handler
@@ -4862,29 +4956,29 @@ ${chessModule.getStatusLine(game)}`, files: [att2] }).catch(() => {});
       return null;
     }
     case "chess_challenge": {
-      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const { targetId: oppId } = cmd;
-      if (oppId === message.author.id) return "🔫 You can't challenge yourself. Find a real opponent.";
-      if (oppId === client.user.id) return "🔫 I don't play chess. I *oversee* it.";
+      if (oppId === message.author.id) return "You can't challenge yourself. Find a real opponent.";
+      if (oppId === client.user.id) return "I don't play chess. I *oversee* it.";
       const existing = chessModule.getGame(message.channelId);
       if (existing) {
         const wp = existing.white.id === "BOT" ? existing.white.name : `<@${existing.white.id}>`;
         const bp = existing.black.id === "BOT" ? existing.black.name : `<@${existing.black.id}>`;
         // Add to queue
         const alreadyQueued = chessQueue.some(q => q.challengerId === message.author.id || q.opponentId === message.author.id);
-        if (alreadyQueued) return `🔫 You're already in the queue. Patience.`;
+        if (alreadyQueued) return `You're already in the queue. Patience.`;
         chessQueue.push({ type: "pvp", challengerId: message.author.id, challengerName: message.author.username, opponentId: cmd.targetId, opponentName: (await client.users.fetch(cmd.targetId).catch(()=>null))?.username || "Unknown", timeLimit: cmd.timeLimit || null });
         const pos = chessQueue.length;
-        return `🔫 A match is in progress — ${wp} vs ${bp}.
+        return `A match is in progress — ${wp} vs ${bp}.
 📋 You've been added to the queue at position **#${pos}**. You'll be pinged when it's your turn.`;
       }
       // Cooldown check
       const lastChallenge = chessCooldowns.get(message.author.id) || 0;
       const cooldownLeft = CHESS_COOLDOWN_MS - (Date.now() - lastChallenge);
-      if (cooldownLeft > 0 && message.author.id !== MASTER_ID) return `🔫 Slow down. You can challenge again in **${Math.ceil(cooldownLeft/1000)}s**.`;
+      if (cooldownLeft > 0 && message.author.id !== MASTER_ID) return `Slow down. You can challenge again in **${Math.ceil(cooldownLeft/1000)}s**.`;
       chessCooldowns.set(message.author.id, Date.now());
       const opponent = await client.users.fetch(oppId).catch(() => null);
-      if (!opponent) return "🔫 Can't find that user.";
+      if (!opponent) return "Can't find that user.";
       chessModule.createChallenge(message.channelId, message.author.id, message.author.username, oppId, opponent.username);
       chessModule.getChallenge(message.channelId).timeLimit = cmd.timeLimit || null;
       return `♟️ **CHESS CHALLENGE!**
@@ -4894,10 +4988,10 @@ ${chessModule.getStatusLine(game)}`, files: [att2] }).catch(() => {});
 *Challenge expires in 60 seconds.*`;
     }
     case "chess_accept": {
-      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const challenge = chessModule.getChallenge(message.channelId);
-      if (!challenge) return "🔫 No pending chess challenge in this channel.";
-      if (message.author.id !== challenge.opponentId) return "🔫 That challenge wasn't for you.";
+      if (!challenge) return "No pending chess challenge in this channel.";
+      if (message.author.id !== challenge.opponentId) return "That challenge wasn't for you.";
       chessModule.deleteChallenge(message.channelId);
       const game = chessModule.createGame(challenge.challengerId, challenge.challengerName, challenge.opponentId, challenge.opponentName, challenge.timeLimit);
       const handleTimeoutPvP = async (channelId, g) => {
@@ -4914,7 +5008,7 @@ ${chessModule.getStatusLine(game)}`, files: [att2] }).catch(() => {});
       const board = await chessModule.renderBoard(game.chess);
       const attachment = new AttachmentBuilder(board, { name: "board.png" });
       await message.channel.send({
-        content: `🔫 **THE MATCH BEGINS!**
+        content: `**THE MATCH BEGINS!**
 ⬜ White: <@${game.white.id}>
 ⬛ Black: <@${game.black.id}>
 
@@ -4926,29 +5020,29 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return null;
     }
     case "chess_decline": {
-      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const challenge = chessModule.getChallenge(message.channelId);
-      if (!challenge) return "🔫 No pending challenge to decline.";
-      if (message.author.id !== challenge.opponentId) return "🔫 That challenge wasn't for you.";
+      if (!challenge) return "No pending challenge to decline.";
+      if (message.author.id !== challenge.opponentId) return "That challenge wasn't for you.";
       chessModule.deleteChallenge(message.channelId);
-      return `🔫 <@${message.author.id}> declined the challenge. Coward. 💀`;
+      return `<@${message.author.id}> declined the challenge. Coward. 💀`;
     }
     case "chess_end": {
-      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
-      if (message.author.id !== MASTER_ID) return "🔫 Only Don Clint can force-end a chess match.";
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
+      if (message.author.id !== MASTER_ID) return "Only Don Clint can force-end a chess match.";
       const game = chessModule.getGame(message.channelId);
-      if (!game) return "🔫 No chess match in progress here.";
+      if (!game) return "No chess match in progress here.";
       clearTurnTimer(game);
       if (game.inactivityTimeout) clearTimeout(game.inactivityTimeout);
       chessModule.deleteGame(message.channelId);
-      return "🔫 **Chess match ended by Don Clint.** The board has been cleared.";
+      return "**Chess match ended by Don Clint.** The board has been cleared.";
     }
     case "chess_resign": {
-      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const game = chessModule.getGame(message.channelId);
-      if (!game) return "🔫 No chess match in progress here.";
+      if (!game) return "No chess match in progress here.";
       const isPlayer = message.author.id === game.white.id || message.author.id === game.black.id;
-      if (!isPlayer) return "🔫 You're not in this match.";
+      if (!isPlayer) return "You're not in this match.";
       const winner = message.author.id === game.white.id ? game.black : game.white;
       clearTurnTimer(game);
       if (game.inactivityTimeout) clearTimeout(game.inactivityTimeout);
@@ -4967,10 +5061,10 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       return `📋 **CHESS QUEUE**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${qlist}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*${chessQueue.length} game(s) waiting.*`;
     }
     case "chess_timer": {
-      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const game = chessModule.getGame(message.channelId);
-      if (!game) return "🔫 No chess match in progress here.";
-      if (!game.timeLimit) return "🔫 This match has no timer — it's untimed.";
+      if (!game) return "No chess match in progress here.";
+      if (!game.timeLimit) return "This match has no timer — it's untimed.";
       const wTime = chessModule.formatTime(game.whiteTimeMs);
       const bTime = chessModule.formatTime(game.blackTimeMs);
       const current = chessModule.getCurrentPlayer(game);
@@ -4990,20 +5084,20 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       );
     }
     case "chess_board": {
-      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const game = chessModule.getGame(message.channelId);
-      if (!game) return "🔫 No chess match in progress here.";
+      if (!game) return "No chess match in progress here.";
       const board = await chessModule.renderBoard(game.chess, game.lastMove);
       const attachment = new AttachmentBuilder(board, { name: "board.png" });
       await message.channel.send({ content: chessModule.getStatusLine(game), files: [attachment] }).catch(() => {});
       return null;
     }
     case "chess_move": {
-      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `🔫 Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "🔫 No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
+      if (!isChannelOfType("botcommands", message.channelId)) return BOT_COMMANDS_CHANNEL_ID ? `Chess is only available in <#${BOT_COMMANDS_CHANNEL_ID}>.` : "No bot-commands channel is set yet — ask a Boss+ to run **cosa set channel botcommands**.";
       const game = chessModule.getGame(message.channelId);
-      if (!game) return "🔫 No chess match in progress here.";
+      if (!game) return "No chess match in progress here.";
       const currentPlayer = chessModule.getCurrentPlayer(game);
-      if (message.author.id !== currentPlayer.id) return `🔫 It's not your turn. Wait for <@${currentPlayer.id}>.`;
+      if (message.author.id !== currentPlayer.id) return `It's not your turn. Wait for <@${currentPlayer.id}>.`;
       const { from, to, promotion } = cmd;
       let result;
       try {
@@ -5011,7 +5105,7 @@ Use **cosa move [from][to]** — e.g. \`cosa move e2 e4\``,
       } catch {
         result = null;
       }
-      if (!result) return `🔫 Invalid move **${from} → ${to}**. Try again.`;
+      if (!result) return `Invalid move **${from} → ${to}**. Try again.`;
       updateClock(game);
       // Reset inactivity timers on move
       if (game.inactivityWarnTimeout) { clearTimeout(game.inactivityWarnTimeout); game.inactivityWarnTimeout = null; }
@@ -5078,7 +5172,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
             }
           } catch (e) {
             console.error("[CHESS BOT MOVE]", e.message);
-            await message.channel.send("🔫 Cosa ponders its move... try again in a moment.").catch(() => {});
+            await message.channel.send("Cosa ponders its move... try again in a moment.").catch(() => {});
           }
         }
       }
@@ -5116,18 +5210,18 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
     }
     case "bank_deposit": {
       const pbC = eco.parseBet(cmd.amount, cmd.tier);
-      if (!pbC) return "🔫 Invalid amount.";
+      if (!pbC) return "Invalid amount.";
       const pbDed = await eco.deductCopper(message.author.id, pbC);
-      if (!pbDed) return "🔫 Insufficient wallet funds.";
+      if (!pbDed) return "Insufficient wallet funds.";
       const pbRes = await bank.deposit(message.author.id, pbC);
-      if (!pbRes.success) { await eco.addCopper(message.author.id, pbC); return "🔫 " + pbRes.reason; }
+      if (!pbRes.success) { await eco.addCopper(message.author.id, pbC); return "" + pbRes.reason; }
       return "🏦 **Deposited " + bank.formatCopper(pbC) + "** into vault.\nBank balance: **" + bank.formatCopper(pbRes.account.balance) + "** *(robbery-proof)*";
     }
     case "bank_withdraw": {
       const pbC2 = eco.parseBet(cmd.amount, cmd.tier);
-      if (!pbC2) return "🔫 Invalid amount.";
+      if (!pbC2) return "Invalid amount.";
       const pbRes2 = await bank.withdraw(message.author.id, pbC2);
-      if (!pbRes2.success) return "🔫 " + pbRes2.reason;
+      if (!pbRes2.success) return "" + pbRes2.reason;
       await eco.addCopper(message.author.id, pbC2);
       return "🏦 **Withdrew " + bank.formatCopper(pbC2) + "** from vault.\nBank balance: **" + bank.formatCopper(pbRes2.account.balance) + "**";
     }
@@ -5139,7 +5233,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         return "♾️ **Infinite Vault** granted to Don Clint. No limits. No fees. No interest. Just power.";
       }
       const pbUp = await bank.upgradeTier(message.author.id, MASTER_ID, eco.addCopper, eco.deductCopper);
-      if (!pbUp.success) return "🔫 " + pbUp.reason;
+      if (!pbUp.success) return "" + pbUp.reason;
       return pbUp.tier.emoji + " **VAULT UPGRADED to " + pbUp.tier.label + "!**\n📦 " + bank.formatCopper(pbUp.tier.maxStorage) + " storage | 📈 +" + (pbUp.tier.interestRate*100).toFixed(1) + "%/day | 💸 -" + (pbUp.tier.feeRate*100).toFixed(1) + "%/day\n*Cost sent to the Vig. 🤵*";
     }
     case "show_mood": {
@@ -5187,9 +5281,9 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const debt = await eco.getDebt(message.author.id);
       if (!debt || debt === 0) return "✅ You have no debt to pay.";
       const copper = eco.parseBet(cmd.amount, cmd.tier);
-      if (!copper) return "🔫 Invalid amount.";
+      if (!copper) return "Invalid amount.";
       const result = await eco.payDebt(message.author.id, copper);
-      if (!result) return "🔫 Insufficient funds to pay that amount.";
+      if (!result) return "Insufficient funds to pay that amount.";
       const remaining = result.debt || 0;
       if (remaining === 0) {
         gamblingBlacklist.delete(message.author.id);
@@ -5204,10 +5298,10 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const existingLoan = activeLoanData.get(message.author.id);
       if (existingLoan) {
         const daysLeft = Math.ceil((existingLoan.dueDate - Date.now()) / (24*60*60*1000));
-        return "🔫 You already have an active **" + existingLoan.type + "** due in **" + Math.max(0,daysLeft) + " day(s)**. Use **Cosa pay debt [amount]** to repay.";
+        return "You already have an active **" + existingLoan.type + "** due in **" + Math.max(0,daysLeft) + " day(s)**. Use **Cosa pay debt [amount]** to repay.";
       }
       const currentDebt = await eco.getDebt(message.author.id);
-      if (currentDebt === 0) return "🔫 You have no debt. Loans are only available when in debt. Check **Cosa loans** for options.";
+      if (currentDebt === 0) return "You have no debt. Loans are only available when in debt. Check **Cosa loans** for options.";
       const rawRankKey2 = getFamilyRank(message.author.id);
       const rankKey2 = rawRankKey2 || "streetrat";
       const dailyAmt = eco.getDailyAmount(rankKey2);
@@ -5250,7 +5344,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
             const g2 = client.guilds.cache.first();
             const ac2 = g2?.channels.cache.get(LOCKDOWN_CHANNEL_ID);
             const u2 = await client.users.fetch(message.author.id).catch(()=>null);
-            if (ac2) await ac2.send("⚠️ **LOAN DEFAULT** ⚠️\n<@" + MASTER_ID + "> — **" + (u2?.username||message.author.id) + "** defaulted on **" + loanType2.label + "**.\nRemaining: 💵 " + rem2.toLocaleString() + " Cash\nAuto gambling ban applied. 🔫").catch(()=>{});
+            if (ac2) await ac2.send("⚠️ **LOAN DEFAULT** ⚠️\n<@" + MASTER_ID + "> — **" + (u2?.username||message.author.id) + "** defaulted on **" + loanType2.label + "**.\nRemaining: 💵 " + rem2.toLocaleString() + " Cash\nAuto gambling ban applied.").catch(()=>{});
           }
         } else {
           activeLoanData.delete(message.author.id);
@@ -5274,7 +5368,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       console.log("[BALANCE] triggered by", message.author.id);
       const isSelf = cmd.targetId === message.author.id;
       const targetUser = isSelf ? message.author : await client.users.fetch(cmd.targetId).catch(() => null);
-      if (!targetUser) return "🔫 Can't find that user.";
+      if (!targetUser) return "Can't find that user.";
       const isMasterTarget = cmd.targetId === MASTER_ID;
       if (isMasterTarget && cmd.targetId !== message.author.id) return "🤵 **The Vig is bottomless. Do not question it.**";
       const w = await eco.getWallet(cmd.targetId);
@@ -5345,7 +5439,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
     case "clone_server": {
       if (message.author.id !== MASTER_ID) return "🚫 Only Don Clint can clone a server's structure.";
       if (!cmd.sourceGuildId) return "Usage: `cosa clone server <sourceGuildId>` (run this in the destination server, and give me the source server's ID).";
-      if (!message.guild) return "🔫 This has to be run inside the destination server.";
+      if (!message.guild) return "This has to be run inside the destination server.";
       const result = await cloneServerStructure(client, cmd.sourceGuildId, message.guild.id);
       if (!result.success) return `❌ ${result.reason}`;
       const { log } = result;
@@ -5356,7 +5450,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
     }
     case "leaderboard": {
       const lb = await eco.getLeaderboard(10);
-      if (!lb.length) return "🔫 No one has any coins yet.";
+      if (!lb.length) return "No one has any coins yet.";
       const lines = await Promise.all(lb.map(async (w, i) => {
         const user = await client.users.fetch(w.user_id).catch(() => null);
         const name = user?.username || `Unknown`;
@@ -5367,19 +5461,19 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       return "💰 **FAMILY WEALTH LEADERBOARD**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + lines.join("\n") + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
     }
     case "pay": {
-      if (message.author.id === cmd.targetId) return "🔫 You can't pay yourself.";
+      if (message.author.id === cmd.targetId) return "You can't pay yourself.";
       if (cmd.targetId === MASTER_ID) return "🤵 You wish to gift Don Clint? Bold. But unnecessary.";
       const copperAmt = eco.parseBet(cmd.amount, cmd.tier);
-      if (!copperAmt) return "🔫 Invalid amount.";
+      if (!copperAmt) return "Invalid amount.";
       const deducted = await eco.deductCopper(message.author.id, copperAmt);
-      if (!deducted) return "🔫 Insufficient funds.";
+      if (!deducted) return "Insufficient funds.";
       await eco.addCopper(cmd.targetId, copperAmt);
       const targetUser = await client.users.fetch(cmd.targetId).catch(() => null);
       return `💸 You sent **${copperAmt.toLocaleString()} Cash** to **${targetUser?.username || `<@${cmd.targetId}>`}**.`;
     }
     case "rob": {
       if (cmd.targetId === MASTER_ID) return "🤵 You dare rob Don Clint? The audacity. Watch yourself!";
-      if (cmd.targetId === message.author.id) return "🔫 You can't rob yourself.";
+      if (cmd.targetId === message.author.id) return "You can't rob yourself.";
       // Check if target has rob shield
       if (features.hasEffect(cmd.targetId, "rob_shield")) return `🛡️ <@${cmd.targetId}> has a **Rob Shield** active — your attempt was blocked. 😤`;
       if (message.author.id !== MASTER_ID) {
@@ -5392,7 +5486,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const robberW = await eco.getWallet(message.author.id);
       const robberDebt = await eco.getDebt(message.author.id);
       const targetBal = eco.walletToCopper(targetW);
-      if (targetBal < 100) return "🔫 That mark has nothing worth stealing.";
+      if (targetBal < 100) return "That mark has nothing worth stealing.";
       const outcome = eco.attemptRob(targetBal, eco.walletToCopper(robberW), robberDebt);
       const targetUser = await client.users.fetch(cmd.targetId).catch(() => null);
       const targetName = targetUser?.username || `<@${cmd.targetId}>`;
@@ -5427,14 +5521,14 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
     }
     case "slots": {
       const bet = eco.parseBet(cmd.amount, cmd.tier);
-      if (!bet) return "🔫 Invalid bet.";
+      if (!bet) return "Invalid bet.";
       const cooldownMsgSL = await checkGambleCooldown(message.author.id);
       if (cooldownMsgSL) return cooldownMsgSL;
       const MAX_BET = 100000000; // 100 "Diamonds" equivalent, pre-flatten
-      if (bet > MAX_BET && message.author.id !== MASTER_ID) return "🔫 Max bet is **💵 100,000,000 Cash** per spin. The house has limits.";
+      if (bet > MAX_BET && message.author.id !== MASTER_ID) return "Max bet is **💵 100,000,000 Cash** per spin. The house has limits.";
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
-        if (!deducted) return "🔫 Insufficient funds. Check your balance with **Cosa balance**.";
+        if (!deducted) return "Insufficient funds. Check your balance with **Cosa balance**.";
       }
       const slotsCharmActive = features.hasEffect(message.author.id, "lucky_charm");
       const result = eco.playSlots(bet, slotsCharmActive);
@@ -5452,16 +5546,16 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       return msg;
     }
     case "coinflip": {
-      if (!cmd.choice) return "🔫 Pick heads or tails. Example: **Cosa coinflip 100 copper heads**";
+      if (!cmd.choice) return "Pick heads or tails. Example: **Cosa coinflip 100 copper heads**";
       const bet = eco.parseBet(cmd.amount, cmd.tier);
-      if (!bet) return "🔫 Invalid bet.";
+      if (!bet) return "Invalid bet.";
       const cooldownMsgCO = await checkGambleCooldown(message.author.id);
       if (cooldownMsgCO) return cooldownMsgCO;
       const MAX_CF = 100000000; // 100 "Diamonds" equivalent, pre-flatten
-      if (bet > MAX_CF && message.author.id !== MASTER_ID) return "🔫 Max bet is **💵 100,000,000 Cash** per flip.";
+      if (bet > MAX_CF && message.author.id !== MASTER_ID) return "Max bet is **💵 100,000,000 Cash** per flip.";
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
-        if (!deducted) return "🔫 Insufficient funds.";
+        if (!deducted) return "Insufficient funds.";
       }
       // Lucky charm: 55% win chance instead of 50%
       const cfCharmActive = features.hasEffect(message.author.id, "lucky_charm");
@@ -5478,14 +5572,14 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
     }
     case "wheel": {
       const bet = eco.parseBet(cmd.amount, cmd.tier);
-      if (!bet) return "🔫 Invalid bet.";
+      if (!bet) return "Invalid bet.";
       const cooldownMsgWH = await checkGambleCooldown(message.author.id);
       if (cooldownMsgWH) return cooldownMsgWH;
       const MAX_WHEEL = 100000000; // 100 "Diamonds" equivalent, pre-flatten
-      if (bet > MAX_WHEEL && message.author.id !== MASTER_ID) return "🔫 Max bet is **💵 100,000,000 Cash** per spin. The Family controls the wheel.";
+      if (bet > MAX_WHEEL && message.author.id !== MASTER_ID) return "Max bet is **💵 100,000,000 Cash** per spin. The Family controls the wheel.";
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
-        if (!deducted) return "🔫 Insufficient funds.";
+        if (!deducted) return "Insufficient funds.";
       }
       const wheelCharmActive = features.hasEffect(message.author.id, "lucky_charm");
       let seg = eco.spinWheel();
@@ -5511,14 +5605,14 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       return "🎡 **FAMILY WHEEL**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nThe wheel spins...\n\n🎯 **" + seg.label + "**\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + wheelResult;
     }
     case "blackjack": {
-      if (eco.bjGames.has(message.author.id)) return "🔫 You already have a blackjack game running. Say **Cosa hit** or **Cosa stand**.";
+      if (eco.bjGames.has(message.author.id)) return "You already have a blackjack game running. Say **Cosa hit** or **Cosa stand**.";
       const bet = eco.parseBet(cmd.amount, cmd.tier);
-      if (!bet) return "🔫 Invalid bet.";
+      if (!bet) return "Invalid bet.";
       const cooldownMsgBL = await checkGambleCooldown(message.author.id);
       if (cooldownMsgBL) return cooldownMsgBL;
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
-        if (!deducted) return "🔫 Insufficient funds.";
+        if (!deducted) return "Insufficient funds.";
       }
       const playerHand = eco.newBjHand();
       const dealerHand = eco.newBjHand();
@@ -5534,7 +5628,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
     }
     case "bj_hit": {
       const game = eco.bjGames.get(message.author.id);
-      if (!game) return "🔫 No active blackjack game. Start one with **Cosa blackjack [amount]**.";
+      if (!game) return "No active blackjack game. Start one with **Cosa blackjack [amount]**.";
       game.playerHand.push(eco.dealCard());
       const pVal = eco.bjHandValue(game.playerHand);
       if (pVal > 21) {
@@ -5552,7 +5646,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
     }
     case "bj_stand": {
       const game = eco.bjGames.get(message.author.id);
-      if (!game) return "🔫 No active blackjack game.";
+      if (!game) return "No active blackjack game.";
       eco.bjGames.delete(message.author.id);
       // Dealer draws
       while (eco.bjHandValue(game.dealerHand) < 17) game.dealerHand.push(eco.dealCard());
@@ -5578,14 +5672,14 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
     }
     case "race": {
       const bet = eco.parseBet(cmd.amount, cmd.tier);
-      if (!bet) return "🔫 Invalid bet.";
+      if (!bet) return "Invalid bet.";
       const cooldownMsgRA = await checkGambleCooldown(message.author.id);
       if (cooldownMsgRA) return cooldownMsgRA;
       const MAX_RACE = 100000000; // 100 "Diamonds" equivalent, pre-flatten
-      if (bet > MAX_RACE && message.author.id !== MASTER_ID) return "🔫 Max race bet is **💵 100,000,000 Cash**.";
+      if (bet > MAX_RACE && message.author.id !== MASTER_ID) return "Max race bet is **💵 100,000,000 Cash**.";
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
-        if (!deducted) return "🔫 Insufficient funds.";
+        if (!deducted) return "Insufficient funds.";
       }
       // Weighted horses — favourite has 40% chance, others share 60%
       const horses = [
@@ -5626,12 +5720,12 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
     case "afk": {
       features.setAfk(message.author.id, cmd.reason);
       if (message.author.id === MASTER_ID) {
-        return `😴 **Don Clint is now resting:** *${cmd.reason}*\n*Anyone who pings will be warned. Ping again = muted. 🔫*`;
+        return `😴 **Don Clint is now resting:** *${cmd.reason}*\n*Anyone who pings will be warned. Ping again = muted. *`;
       }
       return `😴 **${message.author.username}** is now AFK: *${cmd.reason}*`;
     }
     case "afk_back": {
-      if (!features.isAfk(message.author.id)) return "🔫 You're not AFK.";
+      if (!features.isAfk(message.author.id)) return "You're not AFK.";
       features.removeAfk(message.author.id);
       return `✅ Welcome back, **${message.author.username}**! AFK cleared.`;
     }
@@ -5640,24 +5734,24 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
     case "giveaway_help":
       return "🎉 **GIVEAWAY USAGE**\n`Cosa giveaway [amount] [duration]`\nExample: `Cosa giveaway 1000 10m`\nDuration: use `m` for minutes, `h` for hours";
     case "giveaway": {
-      if (message.author.id !== MASTER_ID) return "🔫 Only Don Clint can start giveaways.";
+      if (message.author.id !== MASTER_ID) return "Only Don Clint can start giveaways.";
       const gCash = eco.parseBet(cmd.amount, cmd.tier);
-      if (!gCash) return "🔫 Invalid amount.";
+      if (!gCash) return "Invalid amount.";
       const gDMs = parseDuration(cmd.duration || "10m");
       const gDeducted = await eco.deductCopper(MASTER_ID, gCash).catch(() => null);
-      if (!gDeducted) return "🔫 Insufficient funds for the giveaway prize.";
+      if (!gDeducted) return "Insufficient funds for the giveaway prize.";
       const gmsg = await features.startGiveaway(message.channel, message.author.id, gCash, gDMs);
-      return gmsg ? null : "🔫 Failed to start giveaway.";
+      return gmsg ? null : "Failed to start giveaway.";
     }
     case "greroll": {
-      if (message.author.id !== MASTER_ID) return "🔫 Only Don Clint can reroll.";
+      if (message.author.id !== MASTER_ID) return "Only Don Clint can reroll.";
       return await features.rerollGiveaway(cmd.messageId, message.guild) || null;
     }
 
     // ── Trivia ───────────────────────────────────────────────────────────────────
     case "trivia_start": {
-      if (message.author.id !== MASTER_ID) return "🔫 Only Don Clint can start trivia tournaments.";
-      if (features.activeTournaments.has(message.channelId)) return "🔫 A tournament is already running here.";
+      if (message.author.id !== MASTER_ID) return "Only Don Clint can start trivia tournaments.";
+      if (features.activeTournaments.has(message.channelId)) return "A tournament is already running here.";
       const tournament = {
         channelId: message.channelId,
         totalRounds: Math.min(cmd.rounds || 5, 20),
@@ -5683,9 +5777,9 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       return null;
     }
     case "trivia_stop": {
-      if (message.author.id !== MASTER_ID) return "🔫 Only Don Clint can stop tournaments.";
+      if (message.author.id !== MASTER_ID) return "Only Don Clint can stop tournaments.";
       const tStop = features.activeTournaments.get(message.channelId);
-      if (!tStop) return "🔫 No trivia tournament running here.";
+      if (!tStop) return "No trivia tournament running here.";
       if (tStop.roundTimeout) clearTimeout(tStop.roundTimeout);
       await features.endTriviaTournament(message.channelId, message.guild, tStop);
       return null;
@@ -5694,8 +5788,8 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
     // ── Heist ────────────────────────────────────────────────────────────────────
     case "heist_start": {
       const hCash = eco.parseBet(cmd.amount, cmd.tier);
-      if (!hCash) return "🔫 Invalid amount.";
-      if (hCash < 1000) return "🔫 Minimum heist vault is **1000 Cash**.";
+      if (!hCash) return "Invalid amount.";
+      if (hCash < 1000) return "Minimum heist vault is **1000 Cash**.";
       const hResult = await features.startHeist(message.channel, message.author.id, hCash);
       return hResult || null;
     }
@@ -5712,7 +5806,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
         : ["ARMS", "DARK", "RUNE"];
       const panelTitle = cmd.action === "stocks"
         ? "⚙️  COMMODITIES & RESOURCES"
-        : "🔫  ARMS, CRYPTO & EXCHANGE";
+        : "ARMS, CRYPTO & EXCHANGE";
       const panelSub = cmd.action === "stocks"
         ? "Iron Works  •  Gold Mines  •  Silk Road"
         : "Arms Dealer  •  Dark Market (BTC)  •  Rune Exchange (ETH)";
@@ -5759,23 +5853,23 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
     case "stock_history":
       return await features.getStockHistory(message.author.id);
     case "firm_pump": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       const fpTicker = cmd.ticker.toUpperCase();
       const fpRounds = Math.min(cmd.rounds || 3, 10);
       await message.channel.send(`📈 **DON PUMPING ${fpTicker}** — ${fpRounds}x +5% candles incoming! 🤵`).catch(() => {});
       const fpOk = await firms.forceFirmPumpCrash(fpTicker, fpRounds, 1);
-      if (!fpOk) return `🔫 No active firm with ticker **${fpTicker}**.`;
+      if (!fpOk) return `No active firm with ticker **${fpTicker}**.`;
       const fpBuf = await firms.getFirmChart().catch(() => null);
       if (fpBuf) await message.channel.send({ content: `📈 **${fpTicker} PUMPED** — ${fpRounds}x +5% candles forced!`, files: [new AttachmentBuilder(fpBuf, { name: "firm-pump.png" })] }).catch(() => {});
       return null;
     }
     case "firm_bomb": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       const fbTicker = cmd.ticker.toUpperCase();
       const fbRounds = Math.min(cmd.rounds || 3, 10);
       await message.channel.send(`📉 **DON BOMBING ${fbTicker}** — ${fbRounds}x -5% candles incoming! 😈`).catch(() => {});
       const fbOk = await firms.forceFirmPumpCrash(fbTicker, fbRounds, -1);
-      if (!fbOk) return `🔫 No active firm with ticker **${fbTicker}**.`;
+      if (!fbOk) return `No active firm with ticker **${fbTicker}**.`;
       const fbBuf = await firms.getFirmChart().catch(() => null);
       if (fbBuf) await message.channel.send({ content: `📉 **${fbTicker} BOMBED** — ${fbRounds}x -5% candles forced!`, files: [new AttachmentBuilder(fbBuf, { name: "firm-bomb.png" })] }).catch(() => {});
       return null;
@@ -5792,13 +5886,13 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
         return null;
       } catch (e) {
         console.error("[FIRM CHART]", e.message);
-        return "🔫 Firm chart failed: " + e.message;
+        return "Firm chart failed: " + e.message;
       }
     }
     case "stock_single": {
       try {
         const ticker = cmd.ticker.toUpperCase();
-        if (!features.STOCKS[ticker]) return `🔫 Unknown ticker. Valid: IRON GOLD SILK ARMS DARK RUNE COAL GRAIN WOOD`;
+        if (!features.STOCKS[ticker]) return `Unknown ticker. Valid: IRON GOLD SILK ARMS DARK RUNE COAL GRAIN WOOD`;
         const candles = features.stockCandles[ticker] || [];
         const price   = features.stockPrices[ticker] || (features.STOCKS[ticker].basePrice * 100);
         const visibleCandles = candles.slice(-20);
@@ -5822,7 +5916,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
         return null;
       } catch (e) {
         console.error("[SINGLE CHART]", e.message);
-        return "🔫 Chart render failed: " + e.message;
+        return "Chart render failed: " + e.message;
       }
     }
 
@@ -5871,7 +5965,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
 
     // ── Firms ─────────────────────────────────────────────────────────────────────
     case "firm_create_help":
-      return "🔫 Usage: **Cosa firm create [Name] [TICKER] [price]**\nExample: `Cosa firm create Family Vault DON 5g`\nPrice formats: `500c` `5s` `10g` `2st` (cash/chips/gold/diamonds)";
+      return "Usage: **Cosa firm create [Name] [TICKER] [price]**\nExample: `Cosa firm create Family Vault DON 5g`\nPrice formats: `500c` `5s` `10g` `2st` (cash/chips/gold/diamonds)";
     case "firm_create":
       return await firms.initiateFirmCreation(message.author.id, cmd.name, cmd.ticker, cmd.priceStr);
     case "firm_confirm":
@@ -5886,7 +5980,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       return await firms.depositToFirm(message.author.id, cmd.ticker, cmd.priceStr);
     case "firm_dividends": {
       const divAmount = firms.parsePriceArg(cmd.priceStr);
-      if (!divAmount) return "🔫 Invalid amount. Use: `500c` `5s` `10g` `2st`";
+      if (!divAmount) return "Invalid amount. Use: `500c` `5s` `10g` `2st`";
       return await firms.payDividends(message.author.id, cmd.ticker, divAmount);
     }
     case "firm_buy":
@@ -5901,43 +5995,43 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       return await firms.getMyFirmShares(message.author.id);
     // ── Don-only firm controls ───────────────────────────────────────────────────
     case "firm_delete": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       const genCh = message.guild?.channels.cache.get(GENERAL_CHANNEL_ID);
       return await firms.donDeleteFirm(cmd.ticker, cmd.reason, genCh);
     }
     case "firm_crash": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       const genCh = message.guild?.channels.cache.get(GENERAL_CHANNEL_ID);
       return await firms.donCrashFirmShares(cmd.ticker, cmd.percent, cmd.reason, genCh);
     }
     case "firm_sanction": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       const genCh = message.guild?.channels.cache.get(GENERAL_CHANNEL_ID);
       return await firms.donAddSanction(cmd.ticker, cmd.sanctionType, cmd.reason, genCh);
     }
     case "firm_escalate": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       const genCh = message.guild?.channels.cache.get(GENERAL_CHANNEL_ID);
       return await firms.donEscalateSanction(cmd.ticker, cmd.reason, genCh);
     }
     case "firm_unsanction": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       return await firms.donLiftSanction(cmd.ticker, cmd.sanctionType);
     }
     case "firm_registry": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       return await firms.donViewAllFirms();
     }
     case "bank_wipe_all": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       const wiped = await bank.wipeAllBanks();
       return wiped
         ? `🏦 **ALL BANK BALANCES WIPED** by order of Don Clint. The Family reclaims its vaults. 🤵`
-        : `🔫 Bank wipe failed — check logs.`;
+        : `Bank wipe failed — check logs.`;
     }
     case "rival_diss": {
-      if (!RIVAL_BOT_ID) return "🔫 No rival bot configured. Set RIVAL_BOT_ID in the environment first.";
-      if (cmd.targetId !== RIVAL_BOT_ID) return "🔫 That's not the rival bot I'm set up to argue with.";
+      if (!RIVAL_BOT_ID) return "No rival bot configured. Set RIVAL_BOT_ID in the environment first.";
+      if (cmd.targetId !== RIVAL_BOT_ID) return "That's not the rival bot I'm set up to argue with.";
       const rivalMember = await message.guild?.members.fetch(cmd.targetId).catch(() => null);
       const rivalName = rivalMember?.user?.username || "that bot";
       await message.channel.sendTyping().catch(() => {});
@@ -5945,19 +6039,19 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
         const diss = await getRivalDissResponse(message.guild?.id, rivalName, null);
         return diss;
       } catch (e) {
-        return `🔫 Couldn't think of a diss right now: ${e.message}`;
+        return `Couldn't think of a diss right now: ${e.message}`;
       }
     }
     case "set_diss_chance": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       if (cmd.percent === null || isNaN(cmd.percent) || cmd.percent < 0 || cmd.percent > 100) {
-        return "🔫 Give me a number between 0 and 100. e.g. **cosa set diss chance 15**";
+        return "Give me a number between 0 and 100. e.g. **cosa set diss chance 15**";
       }
       rivalDissChancePercent = cmd.percent;
       return `🎲 Rival diss chance set to **${cmd.percent}%** per rival message.`;
     }
     case "market_tick": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       await message.channel.send("📊 *Forcing market tick...*").catch(() => {});
       await features.tickImmediately();
       const { candleData, stockInfo, marketOpen } = features.getMarketBoardData();
@@ -5973,37 +6067,37 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       return null;
     }
     case "market_toggle": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       features.setStockMarketOpen(cmd.open);
       return cmd.open
         ? "🟢 **Stock market OPENED** by order of Don Clint. Trading resumes."
         : "🔴 **Stock market CLOSED** by order of Don Clint. No trading until further notice.";
     }
     case "market_pump": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       const mpTicker = cmd.ticker.toUpperCase();
-      if (!features.STOCKS[mpTicker]) return `🔫 Unknown ticker. Valid: ${Object.keys(features.STOCKS).join(", ")}`;
+      if (!features.STOCKS[mpTicker]) return `Unknown ticker. Valid: ${Object.keys(features.STOCKS).join(", ")}`;
       await message.channel.send(`📈 **DON'S DECREE** — Don Clint is pumping **${mpTicker}**! 🤵`).catch(() => {});
       await features.forcePumpCrash(mpTicker, cmd.rounds || 3, 1).catch(e => console.error("[PUMP]", e.message));
       const { candleData: mpCD, stockInfo: mpSI, marketOpen: mpMO } = features.getMarketBoardData();
       const mpIsPenny = features.STOCKS[mpTicker].penny;
       const mpTickers = mpIsPenny ? ["COAL","GRAIN","WOOD"] : ["IRON","GOLD","SILK"].includes(mpTicker) ? ["IRON","GOLD","SILK"] : ["ARMS","DARK","RUNE"];
-      const mpTitle   = mpIsPenny ? "⚠️  PENNY STOCKS" : ["IRON","GOLD","SILK"].includes(mpTicker) ? "⚙️  COMMODITIES & RESOURCES" : "🔫  ARMS, CRYPTO & EXCHANGE";
+      const mpTitle   = mpIsPenny ? "⚠️  PENNY STOCKS" : ["IRON","GOLD","SILK"].includes(mpTicker) ? "⚙️  COMMODITIES & RESOURCES" : "ARMS, CRYPTO & EXCHANGE";
       const mpSub     = mpIsPenny ? "Coal Mines  •  Grain Market  •  Timber Trade" : ["IRON","GOLD","SILK"].includes(mpTicker) ? "Iron Works  •  Gold Mines  •  Silk Road" : "Arms Dealer  •  Dark Market  •  Rune Exchange";
       const mpBuf     = stockChart.renderPanel(mpTickers, mpCD, mpSI, mpTitle, mpSub, mpMO);
       await message.channel.send({ content: `📈 **${mpTicker} PUMPED** — ${cmd.rounds || 3}x +5% candles forced! 🤵`, files: [new AttachmentBuilder(mpBuf, { name: "pump.png" })] }).catch(() => {});
       return null;
     }
     case "market_crash": {
-      if (message.author.id !== MASTER_ID) return "🔫 Don only.";
+      if (message.author.id !== MASTER_ID) return "Don only.";
       const mcTicker = cmd.ticker.toUpperCase();
-      if (!features.STOCKS[mcTicker]) return `🔫 Unknown ticker. Valid: ${Object.keys(features.STOCKS).join(", ")}`;
+      if (!features.STOCKS[mcTicker]) return `Unknown ticker. Valid: ${Object.keys(features.STOCKS).join(", ")}`;
       await message.channel.send(`📉 **DON'S DECREE** — Don Clint is crashing **${mcTicker}**! 😈`).catch(() => {});
       await features.forcePumpCrash(mcTicker, cmd.rounds || 3, -1).catch(e => console.error("[CRASH]", e.message));
       const { candleData: mcCD, stockInfo: mcSI, marketOpen: mcMO } = features.getMarketBoardData();
       const mcIsPenny = features.STOCKS[mcTicker].penny;
       const mcTickers = mcIsPenny ? ["COAL","GRAIN","WOOD"] : ["IRON","GOLD","SILK"].includes(mcTicker) ? ["IRON","GOLD","SILK"] : ["ARMS","DARK","RUNE"];
-      const mcTitle   = mcIsPenny ? "⚠️  PENNY STOCKS" : ["IRON","GOLD","SILK"].includes(mcTicker) ? "⚙️  COMMODITIES & RESOURCES" : "🔫  ARMS, CRYPTO & EXCHANGE";
+      const mcTitle   = mcIsPenny ? "⚠️  PENNY STOCKS" : ["IRON","GOLD","SILK"].includes(mcTicker) ? "⚙️  COMMODITIES & RESOURCES" : "ARMS, CRYPTO & EXCHANGE";
       const mcSub     = mcIsPenny ? "Coal Mines  •  Grain Market  •  Timber Trade" : ["IRON","GOLD","SILK"].includes(mcTicker) ? "Iron Works  •  Gold Mines  •  Silk Road" : "Arms Dealer  •  Dark Market  •  Rune Exchange";
       const mcBuf     = stockChart.renderPanel(mcTickers, mcCD, mcSI, mcTitle, mcSub, mcMO);
       await message.channel.send({ content: `📉 **${mcTicker} CRASHED** — ${cmd.rounds || 3}x -5% candles forced! 😈`, files: [new AttachmentBuilder(mcBuf, { name: "crash.png" })] }).catch(() => {});
@@ -6181,11 +6275,17 @@ function buildRankHelpText(userId) {
   if (isDon || rankData?.canSlowmode)  { modLines.push("🐢  SLOWMODE"); modLines.push("  Cosa slowmode [time]"); modLines.push(""); }
   if (isDon || rankData?.canLockdown)  { modLines.push("🔒  LOCKDOWN"); modLines.push("  Cosa lockdown / unlock"); modLines.push(""); }
   if (isDon || rankData?.canStrip)     { modLines.push("✂️  STRIP"); modLines.push("  Cosa strip @user"); modLines.push(""); }
+  if (isDon || rankData?.canGiveRole)  { modLines.push("🎗️  GIVE ROLE"); modLines.push("  Cosa give @user the [role name] role"); modLines.push(""); }
   if (isDon || rankKey === "boss") {
     modLines.push("🏛️  CHANNEL SETUP");
     modLines.push("  Cosa set channel [type]  ← run it IN the channel you want to designate");
     modLines.push("  Run it again in another channel to add a 2nd/3rd/etc — members can use any of them");
     modLines.push(`  Types: ${Object.keys(CHANNEL_SETTERS).join(", ")}`);
+    modLines.push("");
+    modLines.push("🛡️  MAIN ROLES");
+    modLines.push("  Cosa set main role [role]  ← protects it from blackout role-stripping");
+    modLines.push("  Cosa remove main role [role]");
+    modLines.push("  Cosa main roles  ← list them");
     modLines.push("");
   }
   if (isDon) {
@@ -6615,6 +6715,45 @@ async function init() {
       return;
     }
 
+    // ── Main Role — Boss rank (or Don) designates one or more roles that
+    // blackout/lockdown will NEVER strip from members, no matter how many
+    // people hold them or where they sit in the hierarchy. Supports multiple. ──
+    if (message.guild && /^cosa\s+(set|add)\s+main\s+role\b/i.test(lower)) {
+      const isBossPlus = isMaster || getFamilyRank(message.author.id) === "boss";
+      if (!isBossPlus) { await message.reply("🔫 Only the Boss or Don Clint can set main roles.").catch(() => {}); return; }
+      const roleMention = message.content.match(/<@&(\d+)>/);
+      const roleNameRaw = message.content.replace(/^cosa\s+(set|add)\s+main\s+role\s*/i, "").replace(/<@&\d+>/g, "").trim();
+      const role = roleMention
+        ? message.guild.roles.cache.get(roleMention[1])
+        : message.guild.roles.cache.find(r => r.name.toLowerCase() === roleNameRaw.toLowerCase());
+      if (!role) { await message.reply("🔫 Couldn't find that role. Mention it with @role or type its exact name.").catch(() => {}); return; }
+      if (PROTECTED_ROLE_IDS.includes(role.id)) { await message.reply(`🔫 **${role.name}** is already a main role.`).catch(() => {}); return; }
+      PROTECTED_ROLE_IDS.push(role.id);
+      await saveSetupConfig(message.guild.id);
+      await message.reply(`✅ **${role.name}** is now a main role — blackout will never strip it. (${PROTECTED_ROLE_IDS.length} main role${PROTECTED_ROLE_IDS.length === 1 ? "" : "s"} set)`).catch(() => {});
+      return;
+    }
+    if (message.guild && /^cosa\s+(remove|unset)\s+main\s+role\b/i.test(lower)) {
+      const isBossPlus = isMaster || getFamilyRank(message.author.id) === "boss";
+      if (!isBossPlus) { await message.reply("🔫 Only the Boss or Don Clint can remove main roles.").catch(() => {}); return; }
+      const roleMention = message.content.match(/<@&(\d+)>/);
+      const roleNameRaw = message.content.replace(/^cosa\s+(remove|unset)\s+main\s+role\s*/i, "").replace(/<@&\d+>/g, "").trim();
+      const role = roleMention
+        ? message.guild.roles.cache.get(roleMention[1])
+        : message.guild.roles.cache.find(r => r.name.toLowerCase() === roleNameRaw.toLowerCase());
+      if (!role || !PROTECTED_ROLE_IDS.includes(role.id)) { await message.reply("🔫 That role isn't currently set as a main role.").catch(() => {}); return; }
+      PROTECTED_ROLE_IDS = PROTECTED_ROLE_IDS.filter(id => id !== role.id);
+      await saveSetupConfig(message.guild.id);
+      await message.reply(`✅ **${role.name}** removed from main roles.`).catch(() => {});
+      return;
+    }
+    if (message.guild && /^cosa\s+main\s+roles?$/i.test(lower)) {
+      if (PROTECTED_ROLE_IDS.length === 0) { await message.reply("🔫 No main roles set. Use **cosa set main role <role>** to add one.").catch(() => {}); return; }
+      const names = PROTECTED_ROLE_IDS.map(id => { const r = message.guild.roles.cache.get(id); return r ? `**${r.name}**` : id; }).join(", ");
+      await message.reply(`🛡️ **Main roles (protected from blackout):** ${names}`).catch(() => {});
+      return;
+    }
+
     if (message.guild && !message.author.bot) {
       if (message.member?.roles.cache.has(HELPER_ROLE_ID) || message.member?.roles.cache.has(MOD_ROLE_ID_INACTIVITY)) {
         lastMessageTime.set(message.author.id, Date.now());
@@ -6969,6 +7108,7 @@ async function init() {
           unban: "canUnban", slimeout: "canSlimeout", roast: "canRoast", rival_diss: "canRoast",
           mute: "canMute", unmute: "canMute", warn: "canWarn", warnings: "canWarn",
           slowmode: "canSlowmode", lockdown: "canLockdown", unlock: "canLockdown",
+          give_role: "canGiveRole",
         };
         const permKey = actionPermMap[cmd.action];
         if (permKey && !canDo(message.author.id, permKey)) {
@@ -6980,6 +7120,11 @@ async function init() {
           const result = await executeMasterCommand(message, cmd, displayName, channelId);
           if (result) await message.reply(result).catch(()=>{});
         } catch (err) { await message.reply(`🔫 Something went wrong: ${err.message}`).catch(()=>{}); }
+        return;
+      }
+      const suggestion = suggestCommandCorrection(userTextNormalized, explicitTrigger);
+      if (suggestion) {
+        await message.reply(suggestion).catch(()=>{});
         return;
       }
       } catch (err) {
