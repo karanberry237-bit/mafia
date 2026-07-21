@@ -1279,45 +1279,11 @@ async function scoreFingerprint(member) {
   return { score, flags };
 }
 
-// ── Toxic Detection ───────────────────────────────────────────────────────────
-const TOXIC_WORDS = [
-  "nigger","nigga","retard","retarded","kys","kill yourself",
-  "dumb bot","stupid bot","trash bot","useless bot","shit bot","fk u",
-  "fck you","idiot","moron","imbecile","piece of shit","pos bot","garbage bot","worst bot",
-  "dumbass","dickhead","screw you","go to hell","eat shit","brain dead","braindead",
-  "spastic","faggot","fag","cunt","bastard","piss off cosa",
-  "loser bot","bot sucks","you suck","ur trash","ur garbage","ur stupid","ur dumb",
-];
-// toxicTracker: per-guild, see guildDataStore below.
-function getToxicData(userId) {
-  if (!toxicTracker.has(userId)) toxicTracker.set(userId, { toxicCount: 0, offenseLevel: 0, warned: false });
-  return toxicTracker.get(userId);
-}
-function isToxicMessage(text) { const lower = text.toLowerCase(); return TOXIC_WORDS.some(w => lower.includes(w)); }
-async function handleToxic(message) {
-  const userId = message.author.id;
-  const data = getToxicData(userId);
-  data.toxicCount++;
-  const guild = message.guild;
-  if (!guild) return;
-  if (!data.warned && data.toxicCount >= 5) {
-    data.warned = true; data.offenseLevel = 1;
-    await message.reply(`⚠️ <@${userId}> — **Toxicity limit hit. 5 offenses triggered.**\nThe Family has been patient. Next offense = mute. 🔫`).catch(() => {});
-    return;
-  }
-  if (data.warned) {
-    let muteDuration, muteLabel;
-    if (data.offenseLevel === 1) { muteDuration = 60000; muteLabel = "1 minute"; data.offenseLevel = 2; }
-    else if (data.offenseLevel === 2) { muteDuration = 300000; muteLabel = "5 minutes"; data.offenseLevel = 3; }
-    else { muteDuration = 600000; muteLabel = "10 minutes"; data.offenseLevel = 4; }
-    try {
-      const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member) return;
-      await member.timeout(muteDuration, "Toxic behavior — auto mute");
-      await message.channel.send(`🔇 <@${userId}> muted for **${muteLabel}**. Keep testing the Family's patience. 🔫`).catch(() => {});
-    } catch (err) { console.error("Auto mute failed:", err.message); }
-  }
-}
+// ── Toxic Detection: REMOVED ──────────────────────────────────────────────────
+// The TOXIC_WORDS list and the auto-warn/auto-mute escalation ladder that used
+// to live here have been deleted. Cosa does not scan message content for
+// anything. toxicTracker remains in guildDataStore only so old persisted
+// per-guild state deserialises without blowing up; nothing reads it.
 
 // ── Shadow Warning ────────────────────────────────────────────────────────────
 function isShadowTrigger(text) { const lower = text.toLowerCase(); return SHADOW_TRIGGERS.some(t => lower.includes(t)); }
@@ -1475,116 +1441,261 @@ async function triggerFakeRaidAlert(guild) {
 }
 
 // ── Exile System ──────────────────────────────────────────────────────────────
-// Apply permission overwrites across all applicable channels for one member.
-// Runs in small concurrent batches instead of firing every channel at once —
-// on a large guild, firing hundreds of permissionOverwrites.edit calls
-// simultaneously trips Discord's rate limits, and the old code's
-// .catch(() => {}) silently dropped those failures, so some channels never
-// actually got locked even though the exile "succeeded".
+// Exile = strip every role we're allowed to strip, deny the member ViewChannel
+// everywhere, and explicitly allow them in the exile channel(s).
+//
+// Two bugs this rewrite fixes:
+//
+//  1. MULTIPLE EXILE CHANNELS. Once "cosa set channel exile" could be run in
+//     more than one channel, the IDs went into CHANNEL_ID_ARRAYS.exile — but
+//     every function here still read the singular EXILE_CHANNEL_ID (index 0
+//     only). So exile channels #2, #3, ... were treated as ordinary channels
+//     and got DENIED, and the "you've been exiled" notice only ever posted in
+//     the first one. Everything below now works off getExileChannelIds().
+//
+//  2. ROLE STRIP SILENTLY FAILING. member.roles.set([]) is all-or-nothing: if
+//     the member holds even ONE role Cosa can't touch — a managed role (bot
+//     role, Nitro Booster, Twitch/integration role) or any role positioned at
+//     or above Cosa's own top role — Discord rejects the WHOLE call with
+//     "Missing Permissions". Nothing was stripped, and because the failure was
+//     only console.error'd, the exile looked like it worked. Now we compute the
+//     removable subset ourselves, strip that, and report the untouchable ones.
+
+function getExileChannelIds() {
+  const ids = new Set((CHANNEL_ID_ARRAYS?.exile || []).filter(Boolean));
+  if (EXILE_CHANNEL_ID) ids.add(EXILE_CHANNEL_ID);
+  return ids;
+}
+
+// Roles we're actually permitted to remove: skip @everyone, skip managed
+// (integration-owned) roles, skip anything not below Cosa's highest role.
+function splitRemovableRoles(guild, member) {
+  const removable = [], blocked = [];
+  for (const role of member.roles.cache.values()) {
+    if (role.id === guild.id) continue;          // @everyone — never in roles.set anyway
+    if (role.managed || !role.editable) blocked.push(role);
+    else removable.push(role);
+  }
+  return { removable, blocked };
+}
+
+// Apply/remove overwrites for one member.
+//
+// Perf note: we only touch CATEGORIES and channels that are NOT synced to
+// their category. A synced channel inherits the category's overwrites, so
+// editing it individually is a wasted API call — and on a big server, firing
+// one call per channel is what was tripping rate limits and leaving random
+// channels unlocked. Exile channels are always handled explicitly at the end;
+// a channel-level overwrite beats a category-level one, so an exile channel
+// sitting inside a denied category still works correctly.
 async function applyExilePermissions(guild, member, { locking }) {
-  const channels = [...guild.channels.cache.values()].filter(
-    c => c.permissionOverwrites && c.id !== EXILE_CHANNEL_ID
-  );
+  const exileIds = getExileChannelIds();
+  const targets = [...guild.channels.cache.values()].filter(c => {
+    if (!c.permissionOverwrites) return false;   // threads etc.
+    if (exileIds.has(c.id)) return false;        // handled separately below
+    if (!c.parent) return true;                  // categories + top-level channels
+    return c.permissionsLocked !== true;         // skip channels synced to parent
+  });
+
   const BATCH_SIZE = 5;
   let failures = 0;
-  for (let i = 0; i < channels.length; i += BATCH_SIZE) {
-    const batch = channels.slice(i, i + BATCH_SIZE);
-    const results = await Promise.allSettled(
-      batch.map(channel =>
-        locking
-          ? channel.permissionOverwrites.edit(member, { ViewChannel: false, SendMessages: false })
-          : channel.permissionOverwrites.delete(member)
-      )
-    );
-    for (const r of results) if (r.status === "rejected") {
-      failures++;
-      console.error("[EXILE PERMS]", r.reason?.message || r.reason);
-    }
+  for (let i = 0; i < targets.length; i += BATCH_SIZE) {
+    const batch = targets.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(batch.map(channel =>
+      locking
+        ? channel.permissionOverwrites.edit(member, { ViewChannel: false, SendMessages: false })
+        : channel.permissionOverwrites.delete(member)
+    ));
+    results.forEach((r, idx) => {
+      if (r.status === "rejected") {
+        failures++;
+        console.error("[EXILE PERMS] #" + (batch[idx]?.name || batch[idx]?.id), r.reason?.message || r.reason);
+      }
+    });
   }
-  // Exile channel itself: explicit allow when locking, just delete when releasing.
-  const exileChannel = guild.channels.cache.get(EXILE_CHANNEL_ID);
-  if (exileChannel) {
+
+  // Every exile channel: explicit allow when locking, clean removal when releasing.
+  let exileChannelsOk = 0;
+  for (const id of exileIds) {
+    const ch = guild.channels.cache.get(id);
+    if (!ch || !ch.permissionOverwrites) continue;
     try {
-      if (locking) await exileChannel.permissionOverwrites.edit(member, { ViewChannel: true, SendMessages: true });
-      else await exileChannel.permissionOverwrites.delete(member);
+      if (locking) await ch.permissionOverwrites.edit(member, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
+      else await ch.permissionOverwrites.delete(member);
+      exileChannelsOk++;
     } catch (e) {
       failures++;
-      console.error("[EXILE PERMS] exile channel", e.message);
+      console.error("[EXILE PERMS] exile channel #" + (ch.name || id), e.message);
     }
   }
-  return { total: channels.length + 1, failures };
+
+  return { total: targets.length + exileIds.size, failures, exileChannelsOk };
 }
 
 async function exileUser(guild, targetId, durationMs = null) {
   const member = await guild.members.fetch(targetId).catch(() => null);
   if (!member) return "🔫 Can't find that member.";
+  if (targetId === MASTER_ID) return "🔫 I'm not exiling Don Clint.";
+  if (targetId === guild.ownerId) return "🔫 Can't exile the server owner — Discord won't allow it.";
+  if (exileStore.has(targetId)) return "🔫 That user is already in exile.";
+
+  const exileIds = getExileChannelIds();
+  if (!exileIds.size) return "🔫 No exile channel is set. Run **cosa set channel exile** in the channel(s) you want as the confinement zone first.";
+
+  const { removable, blocked } = splitRemovableRoles(guild, member);
+
+  // Save the FULL role list (including blocked ones) so unexile restores
+  // exactly what they had. Persist BEFORE mutating anything, so a crash
+  // mid-exile still leaves a recoverable record.
   const savedRoles = member.roles.cache.filter(r => r.id !== guild.id).map(r => r.id);
-  const exileData = { roles: savedRoles, username: member.user.username, exiledAt: Date.now(), durationMs };
-  exileStore.set(targetId, exileData);
+  exileStore.set(targetId, { roles: savedRoles, username: member.user.username, exiledAt: Date.now(), durationMs });
   if (durationMs) tempExiles.set(targetId, { expiresAt: Date.now() + durationMs });
   saveData();
-  // Strip all roles — retry once if it fails (Discord API hiccups)
-  let roleStripOk = false;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try { await member.roles.set([], "Exiled"); roleStripOk = true; break; }
-    catch (e) { console.error("[EXILE STRIP attempt " + attempt + "]", e.message); await new Promise(r => setTimeout(r, 1000)); }
+
+  // Strip only what we can. Retry once — transient 5xx/rate-limit hiccups.
+  let stripError = null;
+  if (removable.length) {
+    const keep = blocked.map(r => r.id);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { await member.roles.set(keep, "Exiled"); stripError = null; break; }
+      catch (e) {
+        stripError = e.message;
+        console.error("[EXILE STRIP attempt " + (attempt + 1) + "]", e.message);
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
   }
-  if (!roleStripOk) console.error("[EXILE] Role strip failed for", targetId);
-  const { total, failures } = await applyExilePermissions(guild, member, { locking: true });
-  const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
+
+  const { total, failures, exileChannelsOk } = await applyExilePermissions(guild, member, { locking: true });
+
   const durationText = durationMs ? ` for **${formatTime(durationMs)}**` : "";
+  const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
   if (genChannel) await genChannel.send(`⛓️ **BY ORDER OF DON CLINT** 🔫\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n<@${targetId}> has been **EXILED** from the Family${durationText}.\nStripped of all rank and confined to the exile chamber.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*👁️ The Family remembers.*`).catch(() => {});
-  const exileChannel = guild.channels.cache.get(EXILE_CHANNEL_ID);
-  if (exileChannel) await exileChannel.send(`⛓️ <@${targetId}> — you have been **exiled** by order of Don Clint${durationText}.\nThis is the only channel you may speak in. Await the Don Clint's mercy.${durationMs ? ` You will be automatically released.` : ""} 🔫`).catch(() => {});
+
+  // Announce in EVERY exile channel, not just the first.
+  for (const id of exileIds) {
+    const ch = guild.channels.cache.get(id);
+    if (!ch?.isTextBased?.()) continue;
+    await ch.send(`⛓️ <@${targetId}> — you have been **exiled** by order of Don Clint${durationText}.\nThis is the only place you may speak. Await Don Clint's mercy.${durationMs ? " You will be released automatically." : ""} 🔫`).catch(() => {});
+  }
+
   if (durationMs) {
     setTimeout(async () => {
       if (exileStore.has(targetId)) await unexileUser(guild, targetId, true);
     }, durationMs);
   }
-  if (failures > 0) {
+
+  // Loud reporting — a partial exile must never look like a clean one.
+  const problems = [];
+  if (stripError) problems.push(`❌ **Role strip failed** (${stripError}) — they still hold their roles.`);
+  if (blocked.length) problems.push(`⚠️ Could not remove ${blocked.length} role(s): ${blocked.map(r => "**" + r.name + "**").join(", ")}. They're either managed/integration roles or sit above Cosa's own role — move Cosa's role higher in Server Settings → Roles.`);
+  if (!exileChannelsOk) problems.push(`❌ **Could not grant access to any exile channel** — they're confined with nowhere to talk.`);
+  if (failures > 0) problems.push(`⚠️ ${failures}/${total} channel permission updates failed — they may still see some channels.`);
+
+  if (problems.length) {
     const adminCh = guild.channels.cache.get(LOCKDOWN_CHANNEL_ID);
-    if (adminCh) await adminCh.send(`⚠️ [EXILE] <@${targetId}> exiled, but **${failures}/${total}** channel permission updates failed (likely rate-limited or overwrite cap). They may still have access to some channels — check manually.`).catch(() => {});
+    const report = `⚠️ **[EXILE] <@${targetId}> — partial:**\n` + problems.join("\n");
+    if (adminCh) await adminCh.send(report).catch(() => {});
+    return report;
   }
-  return null;
+  return `⛓️ <@${targetId}> exiled${durationText}. ${removable.length} role(s) stripped, confined to ${exileIds.size} exile channel(s).`;
 }
 
 async function unexileUser(guild, targetId, auto = false) {
   const data = exileStore.get(targetId);
   if (!data) return "🔫 That user isn't in exile.";
   const member = await guild.members.fetch(targetId).catch(() => null);
-  if (!member) return "🔫 Can't find that member.";
-  // Restore roles — retry once on failure
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try { await member.roles.set(data.roles, "Unexiled"); break; }
-    catch (e) { console.error("[UNEXILE RESTORE attempt " + attempt + "]", e.message); await new Promise(r => setTimeout(r, 1000)); }
+
+  // Member left while exiled: clear the record so they aren't stuck forever.
+  if (!member) {
+    exileStore.delete(targetId);
+    tempExiles.delete(targetId);
+    saveData();
+    return "🔫 That user isn't in the server anymore — exile record cleared.";
   }
+
+  // Only restore roles that still exist and that Cosa can actually assign.
+  // A deleted or too-high role in the saved list used to make roles.set()
+  // reject wholesale, so the member got NOTHING back.
+  const restorable = [];
+  const skipped = [];
+  for (const roleId of (data.roles || [])) {
+    const role = guild.roles.cache.get(roleId);
+    if (!role) { skipped.push("(deleted role)"); continue; }
+    if (role.managed || !role.editable) { skipped.push(role.name); continue; }
+    restorable.push(roleId);
+  }
+  // Keep any managed roles they currently hold (booster, bot roles).
+  const keepCurrent = member.roles.cache.filter(r => r.id !== guild.id && (r.managed || !r.editable)).map(r => r.id);
+  const finalRoles = [...new Set([...restorable, ...keepCurrent])];
+
+  let restoreError = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { await member.roles.set(finalRoles, "Unexiled"); restoreError = null; break; }
+    catch (e) {
+      restoreError = e.message;
+      console.error("[UNEXILE RESTORE attempt " + (attempt + 1) + "]", e.message);
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
   const { total, failures } = await applyExilePermissions(guild, member, { locking: false });
+
   exileStore.delete(targetId);
   tempExiles.delete(targetId);
   saveData();
+
   const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
   if (genChannel) await genChannel.send(`✅ **${auto ? "EXILE EXPIRED" : "BY ORDER OF DON CLINT"}** 🔫\n<@${targetId}> has been **pardoned** and released from exile. Do not waste this mercy.`).catch(() => {});
-  if (failures > 0) {
+
+  const problems = [];
+  if (restoreError) problems.push(`❌ **Role restore failed** (${restoreError}).`);
+  if (skipped.length) problems.push(`⚠️ Skipped ${skipped.length} role(s) on restore: ${skipped.join(", ")}.`);
+  if (failures > 0) problems.push(`⚠️ ${failures}/${total} overwrite removals failed — leftover denies may still block them.`);
+
+  if (problems.length) {
     const adminCh = guild.channels.cache.get(LOCKDOWN_CHANNEL_ID);
-    if (adminCh) await adminCh.send(`⚠️ [UNEXILE] <@${targetId}> unexiled, but **${failures}/${total}** channel overwrite removals failed. Leftover deny overwrites may still block them in some channels — check manually.`).catch(() => {});
+    const report = `⚠️ **[UNEXILE] <@${targetId}> — partial:**\n` + problems.join("\n");
+    if (adminCh) await adminCh.send(report).catch(() => {});
+    return report;
   }
-  return `🔫 <@${targetId}> unexiled. Roles restored.`;
+  return `🔫 <@${targetId}> unexiled. ${finalRoles.length} role(s) restored.`;
 }
 
+// New channel created while people are in exile — lock them out of it (or let
+// them into it, if the new channel is itself an exile channel).
 async function applyExileToNewChannel(channel) {
   if (!channel.guild || !channel.permissionOverwrites) return;
+  if (!exileStore.size) return;
+  const isExileChannel = getExileChannelIds().has(channel.id);
   for (const [exiledId] of exileStore) {
-    const member = channel.guild.members.cache.get(exiledId);
+    const member = channel.guild.members.cache.get(exiledId)
+      || await channel.guild.members.fetch(exiledId).catch(() => null);
     if (!member) continue;
     try {
-      if (channel.id === EXILE_CHANNEL_ID) {
-        await channel.permissionOverwrites.edit(member, { ViewChannel: true, SendMessages: true });
+      if (isExileChannel) {
+        await channel.permissionOverwrites.edit(member, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
       } else {
         await channel.permissionOverwrites.edit(member, { ViewChannel: false, SendMessages: false });
       }
     } catch (e) {
-      console.error("[EXILE NEW CHANNEL]", e.message);
+      console.error("[EXILE NEW CHANNEL] #" + (channel.name || channel.id), e.message);
     }
+  }
+}
+
+// Called when a channel is newly designated as an exile channel, so anyone
+// already in exile immediately gets access instead of staying locked out of
+// a room they're supposed to be confined to.
+async function grantExileAccessToChannel(channel) {
+  if (!channel?.guild || !channel.permissionOverwrites || !exileStore.size) return;
+  for (const [exiledId] of exileStore) {
+    const member = channel.guild.members.cache.get(exiledId)
+      || await channel.guild.members.fetch(exiledId).catch(() => null);
+    if (!member) continue;
+    await channel.permissionOverwrites
+      .edit(member, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true })
+      .catch(e => console.error("[EXILE GRANT]", e.message));
   }
 }
 
@@ -6794,27 +6905,8 @@ async function init() {
   client.on(Events.MessageCreate, (message) => {
     runGuildEvent(message.guild?.id, async () => {
     if (message.author.bot) {
-      // Delete Carl-bot logs that contain slur variants
-      if (message.author.id === "235148962103951360") {
-        const slurPattern = /n[i1!|][g9q]{1,}[ae3][r|2]?s?\b/i;
-        // Build full text from all possible embed locations in discord.js v14
-        const parts = [message.content || ""];
-        for (const embed of (message.embeds || [])) {
-          if (embed.title) parts.push(embed.title);
-          if (embed.description) parts.push(embed.description);
-          if (embed.footer?.text) parts.push(embed.footer.text);
-          if (embed.author?.name) parts.push(embed.author.name);
-          for (const field of (embed.fields || [])) {
-            parts.push(field.name || "");
-            parts.push(field.value || "");
-          }
-        }
-        const allText = parts.join(" ");
-        if (slurPattern.test(allText)) {
-          await message.delete().catch(e => console.error("[CARL DELETE]", e.message));
-          return;
-        }
-      }
+      // NOTE: automod removed — Cosa no longer inspects or deletes other bots'
+      // log messages. Nothing is filtered here anymore.
       if (message.guild && WICK_TRIGGER_PATTERN.test(message.content)) await handleWickAlert(message);
 
       // ── Rival bot ambient diss — random chance to clown on them ───────────
@@ -6833,14 +6925,11 @@ async function init() {
       return;
     }
 
-    // ── Silent slur filter ────────────────────────────────────────────────────
-    if (message.guild && message.author.id !== MASTER_ID) {
-      const slurPattern = /n[i1!|][g9q]{1,}[ae3][r|2]?s?\b/i;
-      if (slurPattern.test(message.content)) {
-        await message.delete().catch(() => {});
-        return;
-      }
-    }
+    // ── Automod: REMOVED ──────────────────────────────────────────────────────
+    // Cosa performs no content filtering of any kind. No word lists, no
+    // deletions, no auto-warns, no auto-mutes. Moderation is manual only —
+    // it happens when a mod issues an actual command. Do not re-add a passive
+    // filter here; use Discord's native AutoMod if you ever want one back.
 
     const isDM = !message.guild;
     // Guild config for this event was already activated by runGuildEvent()
@@ -6871,6 +6960,12 @@ async function init() {
         return;
       }
       const result = await setChannelType(message.guild.id, type, message.channelId);
+      // If this is a NEW exile channel, immediately let anyone already in
+      // exile into it — otherwise they'd stay locked out of a room they're
+      // supposed to be confined to until the next exile/unexile cycle.
+      if (type === "exile" && !result.alreadySet) {
+        await grantExileAccessToChannel(message.channel).catch(() => {});
+      }
       if (result.alreadySet) {
         await message.reply(`🔫 This channel is already set as **${result.label}** (#${result.position}).`).catch(() => {});
       } else if (result.position === 1) {
@@ -7197,8 +7292,8 @@ async function init() {
 
     // While Jarvis is active, Cosa is Don Clint's assistant and nobody else's.
     // Everyone else is ignored completely from here down — no chat, no public
-    // commands, no mod commands. Passive systems ABOVE this line (slur filter,
-    // AFK notices, trivia scoring, chat coin rewards) still run for everyone.
+    // commands, no mod commands. Passive systems ABOVE this line (AFK notices,
+    // trivia scoring, chat coin rewards) still run for everyone.
     if (jarvisModeActive && !isMaster) return;
 
     if (silencedChannels.has(channelId) && !isDM) return;
@@ -7254,7 +7349,7 @@ async function init() {
       }
     }
 
-    if (!isModUserBool && isToxicMessage(userText)) await handleToxic(message);
+    // Toxic-word auto-warn/auto-mute removed along with the rest of automod.
 
     if (isModUserBool) {
       const explicitTrigger = isDM || isTriggered(message) || repliedToBot;
