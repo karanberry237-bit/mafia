@@ -134,10 +134,8 @@ async function deductFromBank(userId, amount) {
 }
 
 function formatCopper(copper) {
-  if (copper >= 1000000) return (copper / 1000000).toFixed(2) + " Diamonds";
-  if (copper >= 10000) return (copper / 10000).toFixed(2) + " Gold";
-  if (copper >= 100) return (copper / 100).toFixed(2) + " Chips";
-  return copper + " Cash";
+  // Flat currency: everything is Cash now. No denominations.
+  return "💵 " + Math.floor(copper).toLocaleString() + " Cash";
 }
 
 // ── Daily Processing (called every 24h) ──────────────────────────────────────

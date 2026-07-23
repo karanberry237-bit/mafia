@@ -12,7 +12,7 @@ let MASTER_ID;
 let discordClient;
 let GENERAL_CHANNEL_ID;
 
-const FIRM_CREATION_FEE = 50 * 1000000; // 50 Stellar in copper
+const FIRM_CREATION_FEE = 50 * 1000000; // 50,000,000 Cash
 const MAX_FIRMS_PER_USER = 1;
 
 // In-memory firm cache
@@ -163,27 +163,24 @@ function getFirm(ticker) {
   return firmCache.get(ticker.toUpperCase()) || null;
 }
 
-// ── Price parser (e.g. "5s", "10g", "2st", "500c") ──────────────────────────
+// ── Price parser — flat Cash, with optional k/m shorthand (e.g. "500", "5k", "2m") ──
 
 function parsePriceArg(str) {
   if (!str) return null;
-  const clean = str.trim().toLowerCase();
-  const m = clean.match(/^(\d+(?:\.\d+)?)(st|s|g|c)?$/);
+  const clean = str.trim().toLowerCase().replace(/,/g, "");
+  const m = clean.match(/^(\d+(?:\.\d+)?)(k|m)?$/);
   if (!m) return null;
   const val = parseFloat(m[1]);
   if (isNaN(val) || val <= 0) return null;
-  const unit = m[2] || "c";
-  if (unit === "st") return Math.floor(val * 1000000);
-  if (unit === "g")  return Math.floor(val * 10000);
-  if (unit === "s")  return Math.floor(val * 100);
+  const unit = m[2];
+  if (unit === "m") return Math.floor(val * 1000000);
+  if (unit === "k") return Math.floor(val * 1000);
   return Math.floor(val);
 }
 
 function formatCopper(cu) {
-  if (cu >= 1000000) return `💎 ${(cu / 1000000).toFixed(2)} Diamonds`;
-  if (cu >= 10000)   return `🥇 ${(cu / 10000).toFixed(2)} Gold`;
-  if (cu >= 100)     return `🟣 ${(cu / 100).toFixed(2)} Chips`;
-  return `💵 ${cu} Cash`;
+  // Flat currency: everything is Cash now.
+  return `💵 ${Math.floor(cu).toLocaleString()} Cash`;
 }
 
 // ── Spike announcement ───────────────────────────────────────────────────────
@@ -211,7 +208,7 @@ const FIRM_RULES = [
   "Do not use the firm treasury for personal gain outside dividends.",
   "Share price changes must be reasonable — rug-pulling investors will be sanctioned.",
   "Don Clint may sanction, crash, or dissolve your firm at any time for violations.",
-  "The 50 Stellar creation fee is non-refundable under all circumstances.",
+  "The 50,000,000 Cash creation fee is non-refundable under all circumstances.",
   "One firm per user. You may not own multiple firms.",
 ];
 
@@ -224,8 +221,8 @@ async function initiateFirmCreation(userId, name, ticker, sharePriceStr) {
   if (name.trim().length > 32) return "🔫 Firm name too long — max 32 characters.";
 
   const sharePriceCu = parsePriceArg(sharePriceStr);
-  if (!sharePriceCu || sharePriceCu < 100) return "🔫 Invalid share price. Minimum is **1 Chip** (1s). Example: `5s` `10g` `2st`.";
-  if (sharePriceCu > 1000 * 1000000) return "🔫 Share price too high. Maximum starting price is **1000 Diamonds**.";
+  if (!sharePriceCu || sharePriceCu < 100) return "🔫 Invalid share price. Minimum is **💵 100 Cash**. Examples: `500` `5k` `2m`.";
+  if (sharePriceCu > 1000 * 1000000) return "🔫 Share price too high. Maximum starting price is **💵 1,000,000,000 Cash**.";
 
   const owned = [...firmCache.values()].filter(f => f.owner_id === userId && !f.dissolved);
   if (owned.length >= MAX_FIRMS_PER_USER) return `🔫 You already own a firm (**${owned[0].ticker}**). One firm per user.`;
@@ -235,7 +232,7 @@ async function initiateFirmCreation(userId, name, ticker, sharePriceStr) {
 
   const wallet = await eco.getWallet(userId);
   const balance = eco.walletToCopper(wallet);
-  if (balance < FIRM_CREATION_FEE) return `🔫 You need **💎 50 Diamonds** to create a firm. You have ${formatCopper(balance)}.`;
+  if (balance < FIRM_CREATION_FEE) return `🔫 You need **${formatCopper(FIRM_CREATION_FEE)}** to create a firm. You have ${formatCopper(balance)}.`;
 
   pendingCreations.set(userId, {
     name: name.trim(),
@@ -252,7 +249,7 @@ async function initiateFirmCreation(userId, name, ticker, sharePriceStr) {
     `**Firm Name:** ${name.trim()}\n` +
     `**Ticker:** \`${ticker}\`\n` +
     `**Starting Share Price:** ${formatCopper(sharePriceCu)}\n` +
-    `**Creation Fee:** 💎 50 Diamonds *(non-refundable)*\n` +
+    `**Creation Fee:** ${formatCopper(FIRM_CREATION_FEE)} *(non-refundable)*\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `📜 **FAMILY FIRM RULES — YOU MUST ABIDE BY ALL OF THESE:**\n${rules}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -273,7 +270,7 @@ async function confirmFirmCreation(userId) {
   const deducted = await eco.deductCopper(userId, FIRM_CREATION_FEE);
   if (!deducted) {
     pendingCreations.delete(userId);
-    return "🔫 Insufficient funds — you need 💎 50 Diamonds. Creation cancelled.";
+    return `🔫 Insufficient funds — you need ${formatCopper(FIRM_CREATION_FEE)}. Creation cancelled.`;
   }
 
   const existing = await dbLoadFirm(pending.ticker);
@@ -308,7 +305,7 @@ async function confirmFirmCreation(userId) {
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `**${firm.name}** (\`${firm.ticker}\`) is now registered with the Family.\n` +
     `📈 Starting share price: **${formatCopper(firm.share_price)}**\n` +
-    `💰 Entry fee paid: 💎 50 Diamonds\n` +
+    `💰 Entry fee paid: ${formatCopper(FIRM_CREATION_FEE)}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `Issue shares: **Cosa firm issue ${firm.ticker} [amount]**\n` +
     `Investors buy: **Cosa firm buy ${firm.ticker} [shares]**\n` +
@@ -370,7 +367,7 @@ async function setFirmSharePrice(userId, ticker, priceStr) {
 
   const locked = firm.sanctions.some(s => s.type === "price_lock");
   const newPrice = parsePriceArg(priceStr);
-  if (!newPrice || newPrice < 1) return "🔫 Invalid price. Min 1 Cash. Examples: `5s` `10g` `2st` `500c`.";
+  if (!newPrice || newPrice < 1) return "🔫 Invalid price. Min 💵 1 Cash. Examples: `500` `5k` `2m`.";
   if (locked && newPrice > firm.share_price) return "🔫 Your firm is **sanctioned** — you cannot raise the share price while under sanctions.";
 
   const old = firm.share_price;
@@ -497,7 +494,7 @@ async function depositToFirm(userId, ticker, priceStr) {
   if (firm.dissolved) return "🔫 This firm has been dissolved.";
 
   const amount = parsePriceArg(priceStr);
-  if (!amount || amount < 1) return "🔫 Invalid amount. Examples: `5s` `10g` `2st` `500c`.";
+  if (!amount || amount < 1) return "🔫 Invalid amount. Examples: `500` `5k` `2m`.";
 
   const deducted = await eco.deductCopper(userId, amount);
   if (!deducted) return `🔫 You need **${formatCopper(amount)}** to deposit.`;
@@ -885,7 +882,7 @@ async function donViewAllFirms() {
 const FIRM_HELP = [
   "```",
   "🏢  FIRMS",
-  "  Cosa firm create [Name] [TICKER] [price]  ← costs 50 Stellar",
+  "  Cosa firm create [Name] [TICKER] [price]  ← costs 50,000,000 Cash",
   "  Cosa firm confirm / cancel",
   "  Cosa firm issue [TICKER] [shares]         ← owner: issue shares (costs share_price × amount)",
   "  Cosa firm price set [TICKER] [price]      ← owner: set share price",
@@ -897,7 +894,7 @@ const FIRM_HELP = [
   "  Cosa firm list                            ← all active firms",
   "  Cosa firm portfolio                       ← your holdings + P&L",
   "  Cosa stock firm                           ← live candlestick charts for all firms",
-  "  Price format: 500c | 5s | 10g | 2st",
+  "  Price format: plain Cash or k/m shorthand — 500 | 5k | 2m",
   "```",
 ].join("\n");
 

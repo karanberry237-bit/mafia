@@ -9,6 +9,7 @@ const eco = require("./economy.js");
 const bank = require("./bank.js");
 const features = require("./features.js");
 const firms = require("./firms.js");
+const jobs = require("./jobs.js");
 const stockChart = require("./stockchart.js");
 const { tickFirmCandles } = require("./firmchart.js");
 const leaderboard = require("./leaderboard.js");
@@ -4331,6 +4332,13 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+bank\s+tiers\b/.test(lower)) return { action: "bank_tiers" };
   if (/\bcosa\s+bank\b/.test(lower)) return { action: "bank_balance" };
   if (/\bcosa\s+daily\b/.test(lower)) return { action: "daily" };
+  if (/\bcosa\s+work\b/.test(lower)) return { action: "work" };
+  if (/\bcosa\s+crime\b/.test(lower)) return { action: "crime" };
+  if (/\bcosa\s+scavenge\b/.test(lower)) return { action: "scavenge" };
+  if (/\bcosa\s+smuggle\b/.test(lower)) return { action: "smuggle" };
+  if (/\bcosa\s+(quest|bount(?:y|ies))\s+claim\b/.test(lower)) return { action: "quest_claim" };
+  if (/\bcosa\s+(quests?|bount(?:y|ies))\b/.test(lower)) return { action: "quests" };
+  if (/\bcosa\s+(jobs|hustles?)\b/.test(lower)) return { action: "jobs_help" };
   if (/\bcosa\s+clone\s+server\b/.test(lower)) {
     const idMatch = text.match(/(\d{17,20})/);
     return { action: "clone_server", sourceGuildId: idMatch ? idMatch[1] : null };
@@ -4571,6 +4579,13 @@ function detectPublicCommand(text, message) {
   // ── Economy & Gambling (available to ALL users) ───────────────────────────
   if (/\bcosa\s+balance\b/.test(lower)) return { action: "balance", targetId: targetId || message.author.id };
   if (/\bcosa\s+daily\b/.test(lower)) return { action: "daily" };
+  if (/\bcosa\s+work\b/.test(lower)) return { action: "work" };
+  if (/\bcosa\s+crime\b/.test(lower)) return { action: "crime" };
+  if (/\bcosa\s+scavenge\b/.test(lower)) return { action: "scavenge" };
+  if (/\bcosa\s+smuggle\b/.test(lower)) return { action: "smuggle" };
+  if (/\bcosa\s+(quest|bount(?:y|ies))\s+claim\b/.test(lower)) return { action: "quest_claim" };
+  if (/\bcosa\s+(quests?|bount(?:y|ies))\b/.test(lower)) return { action: "quests" };
+  if (/\bcosa\s+(jobs|hustles?)\b/.test(lower)) return { action: "jobs_help" };
   if (/\bcosa\s+(leaderboard|richest|lb)\b/.test(lower)) return { action: "leaderboard" };
   if (/\bcosa\s+pay\b/.test(lower) && targetId) {
     const cleanText = text.replace(/<@!?\d+>/g, "").trim();
@@ -4780,7 +4795,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   }
 
   // Route eco commands to public handler
-  const ecoActions = ["balance","daily","check_debt","pay_debt","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb"];
+  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","check_debt","pay_debt","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb"];
   if (ecoActions.includes(action)) {
     return await executePublicCommand(message, cmd, channelId);
   }
@@ -5773,7 +5788,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const pbNextKey = bank.getNextTier(pbAcc2.vault_tier);
       const pbNextTier = pbNextKey ? bank.VAULT_TIERS[pbNextKey] : null;
       const isDonBank = message.author.id === MASTER_ID;
-      let bankMsg = "🏦 **YOUR BANK** — " + pbTier.label + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💰 Balance: **" + bank.formatCopper(pbAcc2.balance) + "**\n📦 Capacity: **" + (pbTier.maxStorage === Number.MAX_SAFE_INTEGER ? "∞ Unlimited" : bank.formatCopper(pbTier.maxStorage)) + "**\n📈 Interest: **+" + (pbTier.interestRate*100).toFixed(1) + "%**/day | 💸 Fee: **-" + (pbTier.feeRate*100).toFixed(1) + "%**/day\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 **Cosa bank deposit [amount] [tier]** → store coins\n💡 **Cosa bank withdraw [amount] [tier]** → take coins out\n💡 **Cosa bank tiers** → see all vault options\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + (pbNextTier ? "⬆️ Next: **" + pbNextTier.label + "** — costs **" + bank.formatCopper(pbNextTier.cost) + "** → Cosa bank upgrade" : "🤵 Maximum vault reached!");
+      let bankMsg = "🏦 **YOUR BANK** — " + pbTier.label + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💰 Balance: **" + bank.formatCopper(pbAcc2.balance) + "**\n📦 Capacity: **" + (pbTier.maxStorage === Number.MAX_SAFE_INTEGER ? "∞ Unlimited" : bank.formatCopper(pbTier.maxStorage)) + "**\n📈 Interest: **+" + (pbTier.interestRate*100).toFixed(1) + "%**/day | 💸 Fee: **-" + (pbTier.feeRate*100).toFixed(1) + "%**/day\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 **Cosa bank deposit [amount]** → store cash\n💡 **Cosa bank withdraw [amount]** → take cash out\n💡 **Cosa bank tiers** → see all vault options\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + (pbNextTier ? "⬆️ Next: **" + pbNextTier.label + "** — costs **" + bank.formatCopper(pbNextTier.cost) + "** → Cosa bank upgrade" : "🤵 Maximum vault reached!");
       if (isDonBank) {
         bankMsg += "\n\n🤵 **THE VIG INCOME**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
           "💸 Bank fees collected: **" + bank.formatCopper(treasuryStats.bankFees) + "**\n" +
@@ -6012,6 +6027,22 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const boostLine = hasBoost ? `\n💎 **Daily Boost:** 2x applied!` : "";
       return "📅 **Daily Cut Claimed!**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou received: " + eco.formatWallet(eco.fromCopper(finalReward)) + marriageLine + boostLine + "\nNew balance: " + eco.formatWallet(newW) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Higher rank in the Family = better daily cut.*" + debtReminderSuffix;
     }
+    case "work":
+    case "crime":
+    case "scavenge":
+    case "smuggle": {
+      const isDon = message.author.id === MASTER_ID;
+      const rankKey = getFamilyRank(message.author.id);
+      const rankLevel = isDon ? 9 : (rankKey && RANKS[rankKey] ? RANKS[rankKey].level : 0);
+      const fn = { work: jobs.doWork, crime: jobs.doCrime, scavenge: jobs.doScavenge, smuggle: jobs.doSmuggle }[cmd.action];
+      return await fn(message.author.id, rankLevel, isDon);
+    }
+    case "quests":
+      return jobs.getQuestBoard(message.author.id);
+    case "quest_claim":
+      return await jobs.claimQuest(message.author.id);
+    case "jobs_help":
+      return jobs.JOBS_HELP;
     case "clone_server": {
       if (message.author.id !== MASTER_ID) return "🚫 Only Don Clint can clone a server's structure.";
       if (!cmd.sourceGuildId) return "Usage: `cosa clone server <sourceGuildId>` (run this in the destination server, and give me the source server's ID).";
@@ -6541,7 +6572,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
 
     // ── Firms ─────────────────────────────────────────────────────────────────────
     case "firm_create_help":
-      return "Usage: **Cosa firm create [Name] [TICKER] [price]**\nExample: `Cosa firm create Family Vault DON 5g`\nPrice formats: `500c` `5s` `10g` `2st` (cash/chips/gold/diamonds)";
+      return "Usage: **Cosa firm create [Name] [TICKER] [price]**\nExample: `Cosa firm create Family Vault DON 5000`\nPrice formats: `500` `5k` `2m` (plain Cash, or k/m shorthand)";
     case "firm_create":
       return await firms.initiateFirmCreation(message.author.id, cmd.name, cmd.ticker, cmd.priceStr);
     case "firm_confirm":
@@ -6556,7 +6587,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       return await firms.depositToFirm(message.author.id, cmd.ticker, cmd.priceStr);
     case "firm_dividends": {
       const divAmount = firms.parsePriceArg(cmd.priceStr);
-      if (!divAmount) return "Invalid amount. Use: `500c` `5s` `10g` `2st`";
+      if (!divAmount) return "Invalid amount. Use: `500` `5k` `2m`";
       return await firms.payDividends(message.author.id, cmd.ticker, divAmount);
     }
     case "firm_buy":
@@ -6709,6 +6740,8 @@ function buildHelpText() {
     "  Cosa chess accept / decline / resign",
     "  Cosa chess board  ← show current board",
     "  Cosa chess queue  ← see who's waiting",
+    "  Cosa chess timer  ← time left each side",
+    "  Cosa chess end    ← force-end your game",
     "  Cosa move [e2] [e4]",
     "  Diff: beginner / intermediate / advanced / master / grandmaster",
     "  Time: 1 / 3 / 5 / 10 / 15 / 30  (min per side, optional)",
@@ -6721,7 +6754,7 @@ function buildHelpText() {
     "  Cosa marry @user   ← propose",
     "  Cosa marry accept / decline",
     "  Cosa marriage      ← check status",
-    "  Cosa divorce       ← costs coins",
+    "  Cosa divorce       ← costs Cash",
     "",
     "🛒  SHOP",
     "  Cosa shop                        ← view all items + prices",
@@ -6764,33 +6797,42 @@ function buildEcoHelpText() {
     "💰  WALLET",
     "  Cosa balance [@user]",
     "  Cosa daily",
-    "  Cosa pay @user [amt] [tier]",
+    "  Cosa pay @user [amt]",
     "  Cosa rob @user",
     "  Cosa leaderboard",
-    "  Cosa convert [amt] [tier] to [tier]",
     "  Cosa daily rates  ← reward by rank",
+    "",
+    "💼  JOBS & HUSTLES  (pay Cash, scale with rank)",
+    "  Cosa work       ← safe pay, 30m cooldown",
+    "  Cosa crime      ← risky, bigger score, 45m",
+    "  Cosa scavenge   ← pocket change, 10m",
+    "  Cosa smuggle    ← high stakes, 90m",
+    "",
+    "📋  QUESTS",
+    "  Cosa quests           ← daily bounty board",
+    "  Cosa quest claim      ← claim all-done bonus",
     "",
     "🏦  BANK",
     "  Cosa bank / bank tiers / bank upgrade",
-    "  Cosa bank deposit [amt] [tier]",
-    "  Cosa bank withdraw [amt] [tier]",
+    "  Cosa bank deposit [amt]",
+    "  Cosa bank withdraw [amt]",
     "",
     "🎰  GAMBLING",
-    "  Cosa slots [amt] [tier]",
-    "  Cosa coinflip [amt] [tier] heads/tails",
-    "  Cosa wheel [amt] [tier]",
-    "  Cosa race [amt] [tier]",
-    "  Cosa blackjack [amt] [tier]  → hit / stand",
+    "  Cosa slots [amt]",
+    "  Cosa coinflip [amt] heads/tails",
+    "  Cosa wheel [amt]",
+    "  Cosa race [amt]",
+    "  Cosa blackjack [amt]  → hit / stand",
     "",
     "💸  LOANS",
     "  Cosa loans / normal loan / elite loan / ultra loan",
     "  Cosa debt / pay debt [amount]",
     "",
     "💍  MARRIAGE",
-    "  Cosa marry @user   ← propose (costs coins)",
+    "  Cosa marry @user   ← propose (costs Cash)",
     "  Cosa marry accept / decline",
     "  Cosa marriage      ← check status",
-    "  Cosa divorce       ← costs coins",
+    "  Cosa divorce       ← costs Cash",
     "",
     "🛒  SHOP",
     "  Cosa shop                  ← view all items",
@@ -6815,11 +6857,11 @@ function buildEcoHelpText() {
     "  Cosa stock firm                       ← live charts for all Family firms",
     "",
     "🦹  HEIST",
-    "  Cosa heist [amount] [tier]  ← start a heist",
-    "  Cosa heist join              ← join active heist",
+    "  Cosa heist [amount]  ← start a heist",
+    "  Cosa heist join      ← join active heist",
     "",
     "🎉  EVENTS",
-    "  Cosa giveaway [amt] [tier] [duration]  ← Don only",
+    "  Cosa giveaway [amt] [duration]  ← Don only",
     "  Cosa trivia start [rounds] [prize]      ← Don only",
     "```",
     firms.FIRM_HELP,
@@ -6835,7 +6877,6 @@ function buildRankHelpText(userId) {
   if (!isDon && !rankData) return null;
 
   const modLines = [];
-  modLines.push("```");
   modLines.push(`╔══════════════════════════════════════╗`);
   modLines.push(`║  ${(rankData ? RANKS[rankKey].emoji+" "+RANKS[rankKey].title : "🤵 Don Clint").padEnd(36)}║`);
   modLines.push(`║           MODERATOR PANEL            ║`);
@@ -6881,12 +6922,28 @@ function buildRankHelpText(userId) {
     modLines.push("🔍  SHADOW TRIGGERS"); modLines.push("  Cosa add trigger [phrase]"); modLines.push("  Cosa remove trigger [phrase]"); modLines.push("");
     modLines.push("☠️  NUCLEAR"); modLines.push("  Cosa execute blackout"); modLines.push("  Lift Lockdown"); modLines.push("");
     modLines.push("🔇  SILENCE"); modLines.push("  Cosa stop / cosa wake up"); modLines.push("");
-    modLines.push("🛠️  MISC"); modLines.push("  Cosa clear memory"); modLines.push("  Cosa delete this"); modLines.push("  Cosa daily rates  ← all daily rewards by rank"); modLines.push("");
+    modLines.push("🧠  NATURAL-LANGUAGE ADMIN  (just ask Cosa, no fixed syntax)");
+    modLines.push("  \"create a channel called deals\"  /  \"delete #deals\"");
+    modLines.push("  \"create a category named Ops\"    /  \"delete the category Ops\"");
+    modLines.push("  \"make a role called VIP, gold, give it to @user\"");
+    modLines.push("  \"rename this channel to war-room\"");
+    modLines.push("  \"say <message> in #channel\"");
+    modLines.push("  (Works while Jarvis mode is on — phrasing is flexible.)");
+    modLines.push("");
+    modLines.push("🛠️  MISC");
+    modLines.push("  Cosa remember [fact]        ← save something to memory");
+    modLines.push("  Cosa forget [query]         ← drop a saved memory");
+    modLines.push("  Cosa memories [page]        ← list what Cosa remembers");
+    modLines.push("  Cosa clear memory           ← wipe this server's chat memory");
+    modLines.push("  Cosa delete this            ← delete Cosa's last message");
+    modLines.push("  Cosa clone server [guildID] ← copy another server's structure here");
+    modLines.push("  Cosa daily rates            ← all daily rewards by rank");
+    modLines.push("");
     modLines.push("💰  ADMIN ECONOMY");
-    modLines.push("  Cosa set balance @user [amount] [tier]");
+    modLines.push("  Cosa set balance @user [amount]");
     modLines.push("  Cosa reset balance @user  ← wipe to zero");
-    modLines.push("  Cosa give @user [amount] [tier]  ← add coins");
-    modLines.push("  Cosa take @user [amount] [tier]  ← remove coins");
+    modLines.push("  Cosa give @user [amount]  ← add cash");
+    modLines.push("  Cosa take @user [amount]  ← remove cash");
     modLines.push("  Cosa tax @user [%]  ← seize % of their balance");
     modLines.push("  Cosa heist @user  ← steal EVERYTHING");
     modLines.push("  Cosa blacklist gamble @user  ← ban from gambling");
@@ -6910,7 +6967,7 @@ function buildRankHelpText(userId) {
     modLines.push("  Max 10 rounds. Each round = instant candle. Chart updates live.");
     modLines.push("");
     modLines.push("🎉  EVENTS  (Don only)");
-    modLines.push("  Cosa giveaway [amt] [tier] [duration]  ← start giveaway");
+    modLines.push("  Cosa giveaway [amt] [duration]  ← start giveaway");
     modLines.push("  Cosa greroll [messageId]               ← reroll winner");
     modLines.push("  Cosa trivia start [rounds] [prize]     ← start trivia");
     modLines.push("  Cosa trivia stop                       ← end early");
@@ -6938,13 +6995,13 @@ function buildRankHelpText(userId) {
     modLines.push("  NOTE: sanctions stack. A firm can have multiple at once.");
     modLines.push("  First sanction always triggers -30% instant price drop + 10min auto-dump.");
   }
-  modLines.push("```");
 
-  // Split into chunks of max 1900 chars to stay under Discord's message-content limit
+  // Split into chunks that fit inside an embed description (Discord limit 4096).
+  // We aim a bit under so the ``` fences and a little slack always fit.
   const chunks = [];
   let current = "";
   for (const line of modLines) {
-    if ((current + "\n" + line).length > 1900) {
+    if ((current + "\n" + line).length > 3900) {
       chunks.push(current);
       current = line;
     } else {
@@ -8064,13 +8121,17 @@ async function init() {
         }
       }
       if (interaction.commandName === "help") {
-        await interaction.reply({ content: buildHelpText(), ephemeral: true }).catch(() => {});
+        // Embed description (limit 4096) — the plain body was ~2.3k and silently
+        // blew past Discord's 2000-char content cap, so /help used to fail.
+        const embed = new EmbedBuilder().setColor(0x8B0000).setDescription(buildHelpText());
+        await interaction.reply({ embeds: [embed], ephemeral: true }).catch(() => {});
         return;
       }
       if (interaction.commandName === "eco") {
         const [p1, p2] = buildEcoHelpText();
-        await interaction.reply({ content: p1, ephemeral: true }).catch(() => {});
-        await interaction.followUp({ content: p2, ephemeral: true }).catch(() => {});
+        const e1 = new EmbedBuilder().setColor(0xF1C40F).setDescription(p1);
+        const e2 = new EmbedBuilder().setColor(0xF1C40F).setDescription(p2);
+        await interaction.reply({ embeds: [e1, e2], ephemeral: true }).catch(() => {});
         return;
       }
       if (interaction.commandName === "rank-help") {
@@ -8089,9 +8150,13 @@ async function init() {
           await interaction.reply({ content: "🔫 You hold no rank in the Family.", ephemeral: true }).catch(() => {});
           return;
         }
-        await interaction.reply({ content: chunks[0], ephemeral: true }).catch(() => {});
+        // Each chunk is raw (unfenced) text — wrap it in a code block inside its
+        // own embed so the monospace columns line up. One embed per message keeps
+        // us clear of the 6000-char aggregate embed limit.
+        const toEmbed = (c) => new EmbedBuilder().setColor(0x2F3136).setDescription("```\n" + c + "\n```");
+        await interaction.reply({ embeds: [toEmbed(chunks[0])], ephemeral: true }).catch(() => {});
         for (let i = 1; i < chunks.length; i++) {
-          await interaction.followUp({ content: chunks[i], ephemeral: true }).catch(() => {});
+          await interaction.followUp({ embeds: [toEmbed(chunks[i])], ephemeral: true }).catch(() => {});
         }
         return;
       }

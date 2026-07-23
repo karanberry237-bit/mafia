@@ -494,7 +494,7 @@ const STOCKS = {
   // ── Penny Stocks ──────────────────────────────────────────
   COAL: {
     name: "⛏️ Coal Racket",
-    basePrice: 50,        // 50 cash per share = 0.50 Chips
+    basePrice: 50,        // 50 Cash per share
     volatility: 0.28,
     realTicker: "BTU",
     cryptoId: null,
@@ -503,7 +503,7 @@ const STOCKS = {
   },
   GRAIN: {
     name: "🌾 Grain Front",
-    basePrice: 80,        // 80 cash per share = 0.80 Chips
+    basePrice: 80,        // 80 Cash per share
     volatility: 0.24,
     realTicker: "WEAT",
     cryptoId: null,
@@ -512,7 +512,7 @@ const STOCKS = {
   },
   WOOD: {
     name: "🪵 Timber Racket",
-    basePrice: 120,       // 120 cash per share = 1.20 Chips
+    basePrice: 120,       // 120 Cash per share
     volatility: 0.26,
     realTicker: "WY",
     cryptoId: null,
@@ -847,13 +847,9 @@ async function getPortfolio(userId) {
   const entries = Object.entries(portfolio).filter(([, s]) => s > 0);
   if (!entries.length) return "📊 You have no stocks. Buy with **Cosa stock buy [TICKER] [shares]**.";
 
-  // Simple copper formatter — shows highest denomination only
+  // Flat currency: everything is Cash now.
   function fmt(copper) {
-    copper = Math.abs(Math.round(copper));
-    if (copper >= 1000000) return `💎 ${(copper / 1000000).toFixed(2)} Diamonds`;
-    if (copper >= 10000)   return `🥇 ${(copper / 10000).toFixed(2)} Gold`;
-    if (copper >= 100)     return `🟣 ${(copper / 100).toFixed(1)} Chips`;
-    return `💵 ${copper} Cash`;
+    return `💵 ${Math.abs(Math.round(copper)).toLocaleString()} Cash`;
   }
 
   let totalValue = 0;
@@ -1232,56 +1228,49 @@ const SHOP_ITEMS = {
     id: "rob_shield",
     name: "🤐 Snitch Insurance",
     desc: "Immune to a shakedown for 24 hours",
-    price: 50000,        // 5 Gold
-    tier: "copper",
+    price: 50000,        // 50,000 Cash
     duration: 24 * 60 * 60 * 1000,
   },
   lucky_charm: {
     id: "lucky_charm",
     name: "🎲 Loaded Dice",
     desc: "Better odds for 5 minutes — rerolls bad spins on slots (no match) & bad wheel spins (<1x), +5% coinflip win chance. No payout boost. Max 3 per day.",
-    price: 5000000,      // 500 Gold — expensive for a reason
-    tier: "copper",
+    price: 5000000,      // 5,000,000 Cash — expensive for a reason
     duration: 5 * 60 * 1000,
   },
   xp_boost: {
     id: "xp_boost",
     name: "⭐ Daily Boost",
     desc: "Double your next daily cut",
-    price: 100000,       // 10 Gold
-    tier: "copper",
+    price: 100000,       // 100,000 Cash
     duration: null,
   },
   noble_pass: {
     id: "noble_pass",
     name: "🪪 Made Pass",
     desc: "Skip a gambling cooldown once",
-    price: 5000,         // 50 Silver
-    tier: "copper",
+    price: 5000,         // 5,000 Cash
     duration: null,
   },
   heist_boost: {
     id: "heist_boost",
     name: "🚗 Getaway Car",
     desc: "+20% heist success chance for your next heist",
-    price: 200000,       // 20 Gold
-    tier: "copper",
+    price: 200000,       // 200,000 Cash
     duration: null,
   },
   stock_tip: {
     id: "stock_tip",
     name: "🤫 Inside Info",
     desc: "Shows pending buy/sell pressure + momentum signals for all stocks — see what's coming before the next candle",
-    price: 100000,       // 10 Gold
-    tier: "copper",
+    price: 100000,       // 100,000 Cash
     duration: null,
   },
   kings_call: {
     id: "kings_call",
     name: "☎️ The Don's Call",
     desc: "Summons Don Clint to intervene in the market. He decides which stock and whether to pump or crash. 24h server cooldown. No refunds.",
-    price: 10000000,     // 10 Diamonds
-    tier: "copper",
+    price: 10000000,     // 10,000,000 Cash
     duration: null,
   },
 };
@@ -1492,10 +1481,7 @@ function consumeItem(userId, itemId) {
 
 function getShopDisplay() {
   function fmtPrice(copper) {
-    if (copper >= 1000000) return `💎 ${(copper / 1000000).toFixed(0)} Diamonds`;
-    if (copper >= 10000)   return `🥇 ${(copper / 10000).toFixed(0)} Gold`;
-    if (copper >= 100)     return `🟣 ${(copper / 100).toFixed(0)} Chips`;
-    return `💵 ${copper} Cash`;
+    return `💵 ${Math.floor(copper).toLocaleString()} Cash`;
   }
   const lines = [`🛒 **FAMILY SHOP**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`];
   for (const [id, item] of Object.entries(SHOP_ITEMS)) {
