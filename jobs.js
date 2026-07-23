@@ -35,8 +35,8 @@ function checkCooldown(kind, userId, ms, isDon) {
 function setCooldown(kind, userId) { cooldowns[kind].set(userId, Date.now()); }
 
 function rankMultiplier(rankLevel) {
-  // rankLevel: 0 (street rat) .. 8 (boss). Each rank adds +20%.
-  return 1 + Math.max(0, rankLevel) * 0.2;
+  // rankLevel: 0 (street rat) .. 8 (boss). Each rank adds +40%.
+  return 1 + Math.max(0, rankLevel) * 0.4;
 }
 
 function rint(min, max) { return Math.floor(min + Math.random() * (max - min + 1)); }
@@ -99,7 +99,7 @@ async function doWork(userId, rankLevel, isDon) {
   if (cd) return `⏰ You've done enough for now. Clock back in in **${cd}**.`;
 
   const mult = rankMultiplier(rankLevel);
-  const pay = Math.floor(rint(200, 650) * mult);
+  const pay = Math.floor(rint(2500, 8000) * mult);
   const job = pick(WORK_JOBS);
   setCooldown("work", userId);
   const newW = await eco.addCopper(userId, pay);
@@ -122,9 +122,9 @@ async function doCrime(userId, rankLevel, isDon) {
   const mult = rankMultiplier(rankLevel);
   const roll = Math.random();
 
-  if (roll < 0.58) {
+  if (roll < 0.55) {
     // Success
-    const pay = Math.floor(rint(600, 1800) * mult);
+    const pay = Math.floor(rint(9000, 28000) * mult);
     const newW = await eco.addCopper(userId, pay);
     recordQuest(userId, "crime");
     return (
@@ -133,11 +133,11 @@ async function doCrime(userId, rankLevel, isDon) {
       `You ${pick(CRIME_SUCCESS)} and walked with **💵 ${pay.toLocaleString()} Cash**.\n` +
       `New balance: ${eco.formatWallet(newW)}`
     );
-  } else if (roll < 0.88) {
+  } else if (roll < 0.85) {
     // Caught — fine (capped at what they have)
     const wallet = await eco.getWallet(userId);
     const have = eco.walletToCopper(wallet);
-    const fine = Math.min(have, Math.floor(rint(300, 900) * mult));
+    const fine = Math.min(have, Math.floor(rint(6000, 16000) * mult));
     if (fine > 0) await eco.deductCopper(userId, fine);
     const newW = await eco.getWallet(userId);
     return (
@@ -162,10 +162,10 @@ async function doScavenge(userId, rankLevel, isDon) {
   if (cd) return `⏰ Nothing left to pick over yet. Try again in **${cd}**.`;
 
   setCooldown("scavenge", userId);
-  let pay = rint(25, 130);
+  let pay = rint(400, 1800);
   let bonusLine = "";
   if (Math.random() < 0.08) {
-    const bonus = rint(400, 900);
+    const bonus = rint(4000, 10000);
     pay += bonus;
     bonusLine = `\n✨ **Rare find!** +💵 ${bonus.toLocaleString()} Cash`;
   }
@@ -185,8 +185,9 @@ async function doSmuggle(userId, rankLevel, isDon) {
 
   setCooldown("smuggle", userId);
   const mult = rankMultiplier(rankLevel);
-  if (Math.random() < 0.6) {
-    const pay = Math.floor(rint(2500, 6000) * mult);
+  // Biggest payout on the board, so the odds are a coin-flip and busts hurt.
+  if (Math.random() < 0.48) {
+    const pay = Math.floor(rint(110000, 270000) * mult);
     const newW = await eco.addCopper(userId, pay);
     recordQuest(userId, "smuggle");
     return (
@@ -198,7 +199,7 @@ async function doSmuggle(userId, rankLevel, isDon) {
   } else {
     const wallet = await eco.getWallet(userId);
     const have = eco.walletToCopper(wallet);
-    const loss = Math.min(have, Math.floor(rint(800, 2000) * mult));
+    const loss = Math.min(have, Math.floor(rint(60000, 150000) * mult));
     if (loss > 0) await eco.deductCopper(userId, loss);
     const newW = await eco.getWallet(userId);
     return (
