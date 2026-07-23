@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits, Events, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle } = require("discord.js");
+const { Client, GatewayIntentBits, Events, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle, StringSelectMenuBuilder } = require("discord.js");
 const Groq = require("groq-sdk");
 const { AttachmentBuilder } = require("discord.js");
 const chessModule = require("./chess.js");
@@ -322,6 +322,11 @@ let CHANNEL_ID_ARRAYS = { general: [], lockdown: [], exile: [], shadowcourt: [],
 // Role IDs set via "cosa set main role <role>" — these are exempt from the
 // role-stripping blackout/lockdown does to everyone else. Supports multiple.
 let PROTECTED_ROLE_IDS = [];
+// Per-guild kill switch for the psych-warfare loop. Persisted alongside the
+// channel config so "cosa psychwar off" survives a restart.
+let PSYCH_WARFARE_ENABLED = true;
+// Auto-defence against abuse aimed at Cosa. Persisted per guild.
+let COSA_DEFENSE_ENABLED = true;
 const chessQueue = []; // { type: "pvp"|"bot", challengerId, challengerName, opponentId, opponentName, timeLimit, difficulty }
 
 // ── Per-guild config ──────────────────────────────────────────────────────────
@@ -423,6 +428,7 @@ const guildDataDefaults = () => ({
   recentJoins: [],
   recentBanTime: { time: 0 },
   toxicTracker: new Map(),
+  cosaAbuseTracker: new Map(),  // userId -> { offenses, lastOffenseAt }
   psychoWarfareInterval: null,
   inactivityInterval: null,
   rivalDissChancePercent: 8,     // % chance per rival message, adjustable via command
@@ -474,6 +480,8 @@ function activateGuildConfig(guildId) {
   TALK_CHANNEL_ID = cfg.TALK_CHANNEL_ID || null;
   BOT_COMMANDS_CHANNEL_ID = cfg.BOT_COMMANDS_CHANNEL_ID || null;
   PROTECTED_ROLE_IDS = cfg.PROTECTED_ROLE_IDS || [];
+  PSYCH_WARFARE_ENABLED = cfg.PSYCH_WARFARE_ENABLED !== false; // default ON
+  COSA_DEFENSE_ENABLED = cfg.COSA_DEFENSE_ENABLED !== false;   // default ON
   CHANNEL_ID_ARRAYS = {
     general: cfg.CHANNEL_ID_ARRAYS?.general || (GENERAL_CHANNEL_ID ? [GENERAL_CHANNEL_ID] : []),
     lockdown: cfg.CHANNEL_ID_ARRAYS?.lockdown || (LOCKDOWN_CHANNEL_ID ? [LOCKDOWN_CHANNEL_ID] : []),
@@ -494,7 +502,7 @@ function captureGuildConfig(guildId) {
     ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID,
     EXILE_CHANNEL_ID, VERIFIED_ROLE_ID, HELPER_ROLE_ID, MOD_ROLE_ID_INACTIVITY,
     SHADOW_COURT_ID, MOD_LOG_CHANNEL_ID, TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
-    PROTECTED_ROLE_IDS, CHANNEL_ID_ARRAYS,
+    PROTECTED_ROLE_IDS, CHANNEL_ID_ARRAYS, PSYCH_WARFARE_ENABLED, COSA_DEFENSE_ENABLED,
   });
 }
 
@@ -556,6 +564,8 @@ async function loadSetupConfig() {
         BOT_COMMANDS_CHANNEL_ID: v.BOT_COMMANDS_CHANNEL_ID || null,
         PROTECTED_ROLE_IDS: v.PROTECTED_ROLE_IDS || [],
         CHANNEL_ID_ARRAYS: v.CHANNEL_ID_ARRAYS || null,
+        PSYCH_WARFARE_ENABLED: v.PSYCH_WARFARE_ENABLED !== false,
+        COSA_DEFENSE_ENABLED: v.COSA_DEFENSE_ENABLED !== false,
       });
     }
     console.log("✅ Setup configs loaded for " + data.length + " guild(s) — Cosa knows where everything is.");
@@ -573,7 +583,7 @@ async function saveSetupConfig(guildId) {
         ELDER_ROLE_ID, LOCKDOWN_CHANNEL_ID, GENERAL_CHANNEL_ID,
         EXILE_CHANNEL_ID, VERIFIED_ROLE_ID, HELPER_ROLE_ID, MOD_ROLE_ID_INACTIVITY,
         SHADOW_COURT_ID, MOD_LOG_CHANNEL_ID, TALK_CHANNEL_ID, BOT_COMMANDS_CHANNEL_ID,
-        PROTECTED_ROLE_IDS, CHANNEL_ID_ARRAYS,
+        PROTECTED_ROLE_IDS, CHANNEL_ID_ARRAYS, PSYCH_WARFARE_ENABLED, COSA_DEFENSE_ENABLED,
       },
     }, { onConflict: "key" });
     // Also update in-memory guildConfigs so activateGuildConfig works immediately
@@ -620,6 +630,23 @@ async function setChannelType(guildId, type, channelId) {
   entry.set(arr[0]);
   await saveSetupConfig(guildId);
   return { label: entry.label, position: arr.indexOf(channelId) + 1, alreadySet, total: arr.length };
+}
+
+// Removes one or more channels from a type's list. Keeps the singular
+// *_CHANNEL_ID global pointed at whatever is now first (or null if the list is
+// emptied), so redirects/announcements never dangle at a de-designated channel.
+async function removeChannelType(guildId, type, channelIds) {
+  const entry = CHANNEL_SETTERS[type];
+  if (!entry) return null;
+  const arr = CHANNEL_ID_ARRAYS[type] || [];
+  const removed = [];
+  CHANNEL_ID_ARRAYS[type] = arr.filter(id => {
+    if (channelIds.includes(id)) { removed.push(id); return false; }
+    return true;
+  });
+  entry.set(CHANNEL_ID_ARRAYS[type][0] || null);
+  await saveSetupConfig(guildId);
+  return { label: entry.label, removed, remaining: CHANNEL_ID_ARRAYS[type].length };
 }
 
 function isChannelOfType(type, channelId) {
@@ -1305,6 +1332,165 @@ async function scoreFingerprint(member) {
 // anything. toxicTracker remains in guildDataStore only so old persisted
 // per-guild state deserialises without blowing up; nothing reads it.
 
+// ── Cosa Self-Defence ─────────────────────────────────────────────────────────
+// NOTE: the general-purpose automod above was deliberately deleted and must stay
+// deleted. This is NOT that. It does not scan the server's conversation — it only
+// looks at messages that were actually ADDRESSED to Cosa (mention, reply, or the
+// word "cosa"), and it only reacts to direct abuse of Cosa or Don Clint.
+// Ladder: warn, warn, then escalating mutes. Counter resets after an hour clean.
+
+const COSA_ABUSE_WARN_LIMIT   = 2;                 // warns before the first mute
+const COSA_ABUSE_BASE_MUTE_MS = 5 * 60 * 1000;     // first mute = 5 min
+const COSA_ABUSE_MAX_MUTE_MS  = 24 * 60 * 60 * 1000;
+const COSA_ABUSE_RESET_MS     = 60 * 60 * 1000;    // clean hour wipes the counter
+
+// ── FIRST-PERSON SELF-HARM GUARD — read before touching anything below ───────
+// "kys" as an insult and "i want to kys" are the same substring but opposite
+// situations. Somebody disclosing suicidal thoughts must NEVER be warned, muted,
+// or added to a watchlist for it — that punishes a person for reaching out and
+// pushes them away from help. This is checked FIRST and short-circuits the whole
+// ladder. If you extend the pattern lists below, do not weaken this.
+const SELF_HARM_FIRST_PERSON = [
+  /\b(i|im|i'?m|ive|i'?ve|id|i'?d)\b[^.!?]{0,40}\b(kms|kys|end (it|myself)|kill (myself|me)|unalive myself|don'?t want to (live|be here)|want to die|hurt myself|harm myself)\b/i,
+  /\b(kms|kill myself|killing myself|unalive myself|end my life)\b/i,
+  /\bi\s+(wanna|want to|wish i could)\s+(die|disappear)\b/i,
+  /\b(suicidal|suicide)\b/i,
+];
+function isFirstPersonSelfHarm(text) {
+  return SELF_HARM_FIRST_PERSON.some(p => p.test(text));
+}
+
+// Severe, unambiguous abuse aimed outward at Cosa/Clint. Regex is enough here —
+// no AI round-trip, so the mute lands immediately.
+const COSA_ABUSE_SEVERE = [
+  /\b(kys|kysing)\b/i,
+  /\bkill\s+(your\s?self|urself|yourselves|ur\s?self)\b/i,
+  /\b(neck|hang|off)\s+(your\s?self|urself)\b/i,
+  /\b(suck|sucking|sucks?)\s+(\w+\s+){0,3}(dick|cock|balls)\b/i,
+  /\b(dick|cock|ball)\s?(sucker|sucking|rider)\b/i,
+  /\b(bootlick|boot\s?licker|glazing|glazer)\b/i,
+  /\bgo\s+(die|rot|fuck\s+your\s?self)\b/i,
+  /\b(retard(ed)?|spastic)\b/i,
+  /\bfuck\s+(you|u|off)\b.{0,20}\b(cosa|clint|don)\b/i,
+  /\b(cosa|clint|don\s+clint)\b.{0,20}\bfuck\s+(you|u|off)\b/i,
+  /\b(shut\s+the\s+fuck\s+up|stfu)\b.{0,20}\b(cosa|clint)\b/i,
+  /\b(cosa|clint)\b.{0,20}\b(shut\s+the\s+fuck\s+up|stfu)\b/i,
+];
+// Anything extra you want treated as severe, without editing code:
+//   COSA_EXTRA_ABUSE_PATTERNS="slur1,slur2,some phrase"
+const COSA_ABUSE_EXTRA = (process.env.COSA_EXTRA_ABUSE_PATTERNS || "")
+  .split(",").map(s => s.trim()).filter(Boolean)
+  .map(s => new RegExp(`\\b${s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"));
+
+function detectCosaAbuse(text) {
+  if (!text) return null;
+  // Guard first, always.
+  if (isFirstPersonSelfHarm(text)) return { severe: false, selfHarm: true };
+  const hit = [...COSA_ABUSE_SEVERE, ...COSA_ABUSE_EXTRA].find(p => p.test(text));
+  return hit ? { severe: true, selfHarm: false } : null;
+}
+
+function cosaAbuseMuteMs(offenses) {
+  // offense 3 -> 5m, 4 -> 10m, 5 -> 20m, 6 -> 40m ... capped.
+  const step = offenses - COSA_ABUSE_WARN_LIMIT;
+  if (step < 1) return 0;
+  return Math.min(COSA_ABUSE_BASE_MUTE_MS * Math.pow(2, step - 1), COSA_ABUSE_MAX_MUTE_MS);
+}
+
+function getCosaAbuseRecord(userId) {
+  const rec = cosaAbuseTracker.get(userId);
+  if (!rec) return { offenses: 0, lastOffenseAt: 0 };
+  // Lazy reset — a clean hour wipes the slate. Avoids leaking a timer per user.
+  if (Date.now() - rec.lastOffenseAt > COSA_ABUSE_RESET_MS) return { offenses: 0, lastOffenseAt: 0 };
+  return rec;
+}
+
+// Returns true if it handled the message (caller should stop processing it).
+async function handleCosaAbuse(message) {
+  if (!COSA_DEFENSE_ENABLED || !message.guild) return false;
+  if (message.author.id === MASTER_ID) return false; // the Don can say what he likes
+
+  const verdict = detectCosaAbuse(message.content);
+  if (!verdict) return false;
+
+  // ── Someone is talking about hurting THEMSELVES. Do not punish, do not warn,
+  // do not add to any list. Point them at real help and stop. ─────────────────
+  if (verdict.selfHarm) {
+    await message.reply(
+      "Hey — I'm going to step out of character for a second.\n\n" +
+      "It sounds like you might be going through something really hard right now, and I don't want to just scroll past that. " +
+      "You deserve to talk to someone who can actually help.\n\n" +
+      "If you're in the US you can call or text **988** (Suicide & Crisis Lifeline). " +
+      "In the UK, **116 123** for Samaritans. Elsewhere: **https://findahelpline.com**\n\n" +
+      "If you'd rather talk to a person you know, that counts too. Please reach out to someone."
+    ).catch(() => {});
+    return true; // handled — no warn, no mute, no watchlist
+  }
+
+  const prev = getCosaAbuseRecord(message.author.id);
+  const offenses = prev.offenses + 1;
+  cosaAbuseTracker.set(message.author.id, { offenses, lastOffenseAt: Date.now() });
+
+  // Log to the shadow list (watchlist) on every offence.
+  if (!watchlist.has(message.author.id)) watchlist.set(message.author.id, []);
+  watchlist.get(message.author.id).push({
+    content: message.content.slice(0, 300),
+    timestamp: new Date().toISOString(),
+    channelName: message.channel.name || "DM",
+  });
+  saveData();
+
+  const adminCh = message.guild.channels.cache.get(LOCKDOWN_CHANNEL_ID);
+
+  if (offenses <= COSA_ABUSE_WARN_LIMIT) {
+    await message.reply(
+      `🔫 **Watch your mouth.** That's warning **${offenses}/${COSA_ABUSE_WARN_LIMIT}** — you've been added to the shadow list.\n` +
+      `*One more after your last warning and you get silenced. Counter clears after an hour.*`
+    ).catch(() => {});
+    if (adminCh) await adminCh.send(
+      `👁️ **[COSA DEFENCE] Warning ${offenses}/${COSA_ABUSE_WARN_LIMIT}** — <@${message.author.id}> in <#${message.channelId}>\n> ${message.content.slice(0, 200)}`
+    ).catch(() => {});
+    return true;
+  }
+
+  // Past the warnings — escalating mute.
+  const muteMs = cosaAbuseMuteMs(offenses);
+  const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+  if (!member) return true;
+
+  let muted = false;
+  try {
+    // Discord refuses to timeout members holding Administrator — same strip/restore
+    // dance the manual mute command uses.
+    const adminRoles = member.roles.cache.filter(r =>
+      r.permissions.has(PermissionFlagsBits.Administrator) && r.id !== message.guild.id
+    );
+    if (adminRoles.size > 0) await member.roles.remove(adminRoles, "Temporary removal to apply Cosa defence mute");
+    await member.timeout(muteMs, "Repeated abuse directed at Cosa");
+    if (adminRoles.size > 0) await member.roles.add(adminRoles, "Restoring roles after Cosa defence mute").catch(() => {});
+    muted = true;
+  } catch (e) {
+    console.error("[COSA DEFENCE MUTE]", e.message);
+  }
+
+  await message.reply(
+    muted
+      ? `🔇 **You were warned.** Silenced for **${formatTime(muteMs)}**.\n*Offence #${offenses}. Next one doubles it. 🔫*`
+      : `🔫 You've earned a mute, but I can't touch you — your roles sit above mine. <@${MASTER_ID}> has been told.`
+  ).catch(() => {});
+
+  if (adminCh) await adminCh.send(
+    `🔇 **[COSA DEFENCE] ${muted ? `Muted ${formatTime(muteMs)}` : "MUTE FAILED"}** — <@${message.author.id}> (offence #${offenses}) in <#${message.channelId}>\n> ${message.content.slice(0, 200)}`
+  ).catch(() => {});
+  await sendModLog(message.guild, {
+    action: muted ? `Cosa Defence Mute (${formatTime(muteMs)})` : "Cosa Defence Mute FAILED",
+    moderator: "Cosa (automatic)",
+    target: member.user.username,
+    reason: `Abuse directed at Cosa — offence #${offenses}`,
+  });
+  return true;
+}
+
 // ── Shadow Warning ────────────────────────────────────────────────────────────
 function isShadowTrigger(text) { const lower = text.toLowerCase(); return SHADOW_TRIGGERS.some(t => lower.includes(t)); }
 async function handleShadowWarning(message) {
@@ -1374,12 +1560,22 @@ const WATCHED_DMS = [
 
 // psychoWarfareInterval: per-guild, see guildDataStore below.
 
+function stopPsychologicalWarfare() {
+  if (psychoWarfareInterval) { clearTimeout(psychoWarfareInterval); psychoWarfareInterval = null; }
+}
+
 function startPsychologicalWarfare(guild) {
   activateGuildConfig(guild.id);
   if (psychoWarfareInterval) { clearTimeout(psychoWarfareInterval); psychoWarfareInterval = null; }
 
   const doWarfare = async () => {
     activateGuildConfig(guild.id); // reactivate — this timer fires long after any per-guild event
+    if (!PSYCH_WARFARE_ENABLED) {
+      // Disabled via "cosa psychwar off" — stay dormant but keep the loop alive
+      // so re-enabling doesn't require a restart.
+      psychoWarfareInterval = setTimeout(doWarfare, timerConfig.psychwar);
+      return;
+    }
     const total = psychChances.summon + psychChances.lockdown + psychChances.dm + psychChances.wanted;
     if (total <= 0) {
       // Everything's been turned off — skip this round entirely instead of
@@ -1395,12 +1591,13 @@ function startPsychologicalWarfare(guild) {
 
     try {
       if (psychChances.summon > 0 && roll < summonThreshold) {
-        return; // Psych warfare summon disabled
-        await genChannel.send(msg).catch(() => {});
+        // Summon event is intentionally disabled. This used to `return`, which
+        // skipped the reschedule at the bottom of doWarfare and permanently
+        // killed the entire psych-warfare loop the first time it rolled.
       }
       else if (psychChances.lockdown > 0 && roll < lockdownThreshold) {
         const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
-        if (!genChannel) return;
+        if (genChannel) {
         await genChannel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false }).catch(() => {});
         await genChannel.send("🔴 *The Family has gone silent. Do not ask why.*").catch(() => {});
         const unlockDelay = (30 + Math.random() * 90) * 1000;
@@ -1408,21 +1605,22 @@ function startPsychologicalWarfare(guild) {
           await genChannel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null }).catch(() => {});
           await genChannel.send("🔫 *The Family has spoken. Carry on.*").catch(() => {});
         }, unlockDelay);
+        }
       }
       else if (psychChances.dm > 0 && roll < dmThreshold) {
         await guild.members.fetch();
         const outsiders = guild.members.cache.filter(m => !m.user.bot && m.id !== MASTER_ID && !familyRoster.has(m.id));
-        if (outsiders.size === 0) return;
+        if (outsiders.size > 0) {
         const target = outsiders.random();
         const msg = WATCHED_DMS[Math.floor(Math.random() * WATCHED_DMS.length)];
         await target.send(msg).catch(() => {});
+        }
       }
       else if (psychChances.wanted > 0 && roll < wantedThreshold) {
         const genChannel = guild.channels.cache.get(GENERAL_CHANNEL_ID);
-        if (!genChannel) return;
         await guild.members.fetch();
-        const outsiders = guild.members.cache.filter(m => !m.user.bot && m.id !== MASTER_ID && !familyRoster.has(m.id));
-        if (outsiders.size === 0) return;
+        const outsiders = genChannel ? guild.members.cache.filter(m => !m.user.bot && m.id !== MASTER_ID && !familyRoster.has(m.id)) : new Map();
+        if (outsiders.size > 0) {
         const target = outsiders.random();
         const crime = FAKE_CRIMES[Math.floor(Math.random() * FAKE_CRIMES.length)];
         await genChannel.send(
@@ -1434,6 +1632,7 @@ function startPsychologicalWarfare(guild) {
           `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
           `*By order of Don Clint. 🔫*`
         ).catch(() => {});
+        }
       }
       // else: rounding landed past the last active threshold — skip silently.
     } catch (err) { console.error("Psycho warfare error:", err.message); }
@@ -1763,6 +1962,23 @@ const groqKeys = [
   process.env.GROQ_API_KEY_3,
 ].filter(Boolean);
 
+// ── Model selection ───────────────────────────────────────────────────────────
+// llama-3.1-8b-instant is still a Groq PRODUCTION model (131k context, 560 t/s,
+// cheapest available) and is NOT a reasoning model — its output is clean prose,
+// which is what the persona needs. Kept as the chat default.
+//
+// Command parsing is a different job: aiParseGodCommands can ban/kick/delete, so
+// instruction-following and resistance to hallucinated IDs matter far more than
+// speed. llama-3.3-70b-versatile is also production, also non-reasoning, and is
+// substantially more reliable at structured JSON.
+//
+// openai/gpt-oss-20b is the fastest model on Groq (~1000 t/s) and smarter than
+// 8b, but it IS a reasoning model — without reasoning_format:"parsed" its chain
+// of thought can leak into message content. Set GROQ_MODEL_CHAT to try it; the
+// reasoning_format passthrough below keeps the output clean if you do.
+const AI_MODEL_CHAT  = process.env.GROQ_MODEL_CHAT  || "llama-3.1-8b-instant";
+const AI_MODEL_PARSE = process.env.GROQ_MODEL_PARSE || "llama-3.3-70b-versatile";
+
 const groqClients = groqKeys.map(key => new Groq({ apiKey: key }));
 let currentGroqIndex = 0;
 
@@ -1873,7 +2089,8 @@ async function rateLimitedGroqCall(messages, opts = {}) {
         setTimeout(() => rej(new Error("Groq timeout after 20s")), 20000)
       );
       const callPromise = client.chat.completions.create({
-        model: opts.model || "llama-3.1-8b-instant",
+        model: opts.model || AI_MODEL_CHAT,
+        ...(opts.reasoningFormat ? { reasoning_format: opts.reasoningFormat } : {}),
         max_tokens: opts.maxTokens || 150,
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
         ...(opts.jsonMode ? { response_format: { type: "json_object" } } : {}),
@@ -2825,7 +3042,7 @@ async function aiParseGodCommands(text, guild, message) {
     const reply = await rateLimitedGroqCall([
       { role: "system", content: GOD_AI_SYSTEM_PROMPT + "\n\nSERVER CONTEXT:\n" + godAiGuildContext(guild, message) },
       { role: "user", content: text },
-    ], { maxTokens: 800, temperature: 0, jsonMode: true, budget: 4500 });
+    ], { maxTokens: 800, temperature: 0, jsonMode: true, budget: 4500, model: AI_MODEL_PARSE, reasoningFormat: "parsed" });
 
     const jsonMatch = reply.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
@@ -3307,6 +3524,16 @@ async function handleGodModeSentence(text, message, guild, adminCh) {
 // Keyed by a short random token embedded in the button's customId.
 const pendingMassBans = new Map(); // token -> { guildId, targets, skipped, requestedBy, createdAt }
 const MASSBAN_STATE_TTL = 5 * 60 * 1000;
+
+// Backing state for the "cosa remove channel <type>" select menu.
+const pendingChannelRemovals = new Map(); // token -> { guildId, type, userId, createdAt }
+const CHANNEL_REMOVAL_TTL = 2 * 60 * 1000;
+function channelRemovalCleanup() {
+  const now = Date.now();
+  for (const [t, v] of pendingChannelRemovals) {
+    if (now - v.createdAt > CHANNEL_REMOVAL_TTL) pendingChannelRemovals.delete(t);
+  }
+}
 
 function massBanCleanup() {
   const now = Date.now();
@@ -3940,7 +4167,7 @@ async function aiClassifyAmbientCommand(text) {
     const reply = await rateLimitedGroqCall([
       { role: "system", content: AMBIENT_COMMAND_CLASSIFY_PROMPT },
       { role: "user", content: text },
-    ], { maxTokens: 20, temperature: 0, jsonMode: true });
+    ], { maxTokens: 20, temperature: 0, jsonMode: true, model: AI_MODEL_PARSE, reasoningFormat: "parsed" });
     const jsonMatch = reply.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return false;
     const parsed = JSON.parse(jsonMatch[0]);
@@ -6608,7 +6835,8 @@ function buildRankHelpText(userId) {
   if (isDon || rankData?.canGiveRole)  { modLines.push("🎗️  GIVE ROLE"); modLines.push("  Cosa give @user the [role name] role"); modLines.push(""); }
   if (isDon || rankKey === "boss") {
     modLines.push("🏛️  CHANNEL SETUP");
-    modLines.push("  Cosa set channel [type]  ← run it IN the channel you want to designate");
+    modLines.push("  Cosa set channel [type]     ← run it IN the channel you want to designate");
+    modLines.push("  Cosa remove channel [type]  ← pops a picker to un-set one");
     modLines.push("  Run it again in another channel to add a 2nd/3rd/etc — members can use any of them");
     modLines.push(`  Types: ${Object.keys(CHANNEL_SETTERS).join(", ")}`);
     modLines.push("");
@@ -6625,7 +6853,11 @@ function buildRankHelpText(userId) {
     modLines.push("🤝  FAMILY"); modLines.push("  Cosa bestow [rank] upon @user"); modLines.push("  Cosa revoke @user"); modLines.push("  Cosa family ledger"); modLines.push(`  Valid ranks: ${VALID_RANK_NAMES.join(", ")}`); modLines.push("");
     modLines.push("⏱️  TIMERS"); modLines.push("  Cosa timers"); modLines.push("  Cosa set timer deadman 1h"); modLines.push("  Cosa set timer psychwar 45m"); modLines.push("  Cosa set timer psychfirst 30m"); modLines.push("  Cosa set timer inactivity 6h"); modLines.push("");
     modLines.push("🎲  PSYCH CHANCES"); modLines.push("  Cosa psychchances"); modLines.push("  Cosa set psychchance summon 40"); modLines.push("  Cosa set psychchance lockdown 20"); modLines.push("  Cosa set psychchance dm 20"); modLines.push("  Cosa set psychchance wanted 20"); modLines.push("  Cosa set diss chance 15  ← % chance to randomly diss the rival bot"); modLines.push("");
-    modLines.push("🎭  PSYCH WARFARE"); modLines.push("  Cosa fake raid"); modLines.push("  Cosa last words @user"); modLines.push("");
+    modLines.push("🛡️  SELF-DEFENCE");
+    modLines.push("  Cosa defense on / off / status   ← auto warn+mute for abuse aimed at Cosa");
+    modLines.push("  Cosa defense reset @user         ← clear someone's offence counter");
+    modLines.push("");
+    modLines.push("🎭  PSYCH WARFARE"); modLines.push("  Cosa psychwar on / off / status  ← master switch (persists)"); modLines.push("  Cosa fake raid"); modLines.push("  Cosa last words @user"); modLines.push("");
     modLines.push("😈  MOOD"); modLines.push("  Cosa set mood [wrathful/aggressive/cold/diplomatic/cryptic/playful]"); modLines.push("");
     modLines.push("🔍  SHADOW TRIGGERS"); modLines.push("  Cosa add trigger [phrase]"); modLines.push("  Cosa remove trigger [phrase]"); modLines.push("");
     modLines.push("☠️  NUCLEAR"); modLines.push("  Cosa execute blackout"); modLines.push("  Lift Lockdown"); modLines.push("");
@@ -6852,7 +7084,7 @@ async function init() {
       await loadLockdownState(guildInLoop.id); // resume lockdown if bot restarted mid-lockdown
       startDeadMansSwitch(guildInLoop);
       startInactivityCheck(guildInLoop);
-      startPsychologicalWarfare(guildInLoop);
+      if (PSYCH_WARFARE_ENABLED) startPsychologicalWarfare(guildInLoop);
       startMoodSystem(guildInLoop);
       startAutoShadowCourt(guildInLoop);
       console.log(`✅ Guild data + background subsystems loaded for ${guildInLoop.name} (${familyRoster.size} made members, ${warningStore.size} warned users)`);
@@ -7035,6 +7267,53 @@ async function init() {
     // given type. Replaces "cosa setup"'s auto-provisioning: no channels are
     // ever created automatically, staff just point Cosa at whichever channel
     // they want each role to live in. ──────────────────────────────────────────
+    // ── Remove Channel — Boss+/Don pops a picker listing every channel
+    // currently designated for a type, and removes whichever they select.
+    // "cosa set channel" had no counterpart until now. ────────────────────────
+    if (message.guild && /^cosa\s+remove\s+channel\b/i.test(lower)) {
+      const isBossPlus = isMaster || getFamilyRank(message.author.id) === "boss";
+      if (!isBossPlus) { await message.reply("🔫 Only the Boss or Don Clint can remove channel types.").catch(() => {}); return; }
+      const typeRaw = lower.replace(/^cosa\s+remove\s+channel\s*/i, "").trim().replace(/[\s_]+/g, "-");
+      const type = CHANNEL_TYPE_ALIASES[typeRaw];
+      if (!type) {
+        await message.reply(
+          "🔫 Which type? Usage: **cosa remove channel <type>**\nAvailable: " +
+          Object.keys(CHANNEL_SETTERS).map(k => `\`${k}\``).join(", ")
+        ).catch(() => {});
+        return;
+      }
+      const ids = CHANNEL_ID_ARRAYS[type] || [];
+      if (ids.length === 0) {
+        await message.reply(`🔫 No channels are currently set as **${CHANNEL_SETTERS[type].label}**.`).catch(() => {});
+        return;
+      }
+      const options = ids.slice(0, 25).map((id, i) => {
+        const ch = message.guild.channels.cache.get(id);
+        return {
+          label: (ch ? `#${ch.name}` : `Deleted channel (${id})`).slice(0, 100),
+          description: (i === 0 ? "Primary — used for redirects & announcements" : `${ordinal(i + 1)} channel for this type`).slice(0, 100),
+          value: id,
+        };
+      });
+      const token = Math.random().toString(36).slice(2, 10);
+      pendingChannelRemovals.set(token, { guildId: message.guild.id, type, userId: message.author.id, createdAt: Date.now() });
+      channelRemovalCleanup();
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId(`removechan:${token}`)
+        .setPlaceholder(`Select channel(s) to un-set as ${CHANNEL_SETTERS[type].label}`)
+        .setMinValues(1)
+        .setMaxValues(options.length)
+        .addOptions(options);
+      await message.reply({
+        content:
+          `🗑️ **Remove ${CHANNEL_SETTERS[type].label} channel**\n` +
+          `Currently set (${ids.length}): ${ids.map(id => `<#${id}>`).join(", ")}\n\n` +
+          `Pick which to un-set below. *(expires in 2 minutes)*`,
+        components: [new ActionRowBuilder().addComponents(menu)],
+      }).catch(() => {});
+      return;
+    }
+
     if (message.guild && /^cosa\s+set\s+channel\s+/i.test(lower)) {
       const isBossPlus = isMaster || getFamilyRank(message.author.id) === "boss";
       if (!isBossPlus) { await message.reply("🔫 Only the Boss or Don Clint can set up channels.").catch(() => {}); return; }
@@ -7097,6 +7376,80 @@ async function init() {
       await message.reply(`✅ **${role.name}** removed from main roles.`).catch(() => {});
       return;
     }
+    // ── Cosa self-defence toggle (Boss+/Don). Persisted per guild. ──────────
+    if (message.guild && /^cosa\s+defen[cs]e\b/i.test(lower)) {
+      const isBossPlus = isMaster || getFamilyRank(message.author.id) === "boss";
+      if (!isBossPlus) { await message.reply("🔫 Only the Boss or Don Clint can change my defences.").catch(() => {}); return; }
+
+      const resetTarget = getTargetId(message);
+      if (/\breset\b/i.test(lower) && resetTarget) {
+        cosaAbuseTracker.delete(resetTarget);
+        await message.reply(`✅ Cleared <@${resetTarget}>'s offence counter. Clean slate.`).catch(() => {});
+        return;
+      }
+
+      const mode = (lower.match(/\b(on|off|status)\b/) || [])[1] || "status";
+      if (mode === "status") {
+        const active = [...cosaAbuseTracker.entries()]
+          .filter(([, r]) => Date.now() - r.lastOffenseAt <= COSA_ABUSE_RESET_MS)
+          .sort((a, b) => b[1].offenses - a[1].offenses).slice(0, 10);
+        await message.reply(
+          `🛡️ **Cosa self-defence:** ${COSA_DEFENSE_ENABLED ? "🟢 **ON**" : "🔴 **OFF**"}\n` +
+          `Ladder: **${COSA_ABUSE_WARN_LIMIT} warnings**, then **${formatTime(COSA_ABUSE_BASE_MUTE_MS)}**, doubling each time (cap **${formatTime(COSA_ABUSE_MAX_MUTE_MS)}**).\n` +
+          `Counters reset after **${formatTime(COSA_ABUSE_RESET_MS)}** clean.\n` +
+          (active.length
+            ? `\n**Active offenders:**\n` + active.map(([uid, r]) => `• <@${uid}> — ${r.offenses} offence(s)`).join("\n")
+            : `\n*Nobody on the board right now.*`) +
+          `\n\n*__cosa defense off__ | __cosa defense reset @user__*`
+        ).catch(() => {});
+        return;
+      }
+
+      const turnOn = mode === "on";
+      if (COSA_DEFENSE_ENABLED === turnOn) {
+        await message.reply(`🔫 Defences are already **${turnOn ? "ON" : "OFF"}**.`).catch(() => {});
+        return;
+      }
+      COSA_DEFENSE_ENABLED = turnOn;
+      await saveSetupConfig(message.guild.id);
+      await message.reply(
+        turnOn
+          ? "🛡️ **Defences ENABLED.** Talk to me like that again and find out. 🔫"
+          : "🕊️ **Defences DISABLED.** Say what you want — I'll take it on the chin. *(persists across restarts)*"
+      ).catch(() => {});
+      return;
+    }
+
+    // ── Psych warfare toggle (Boss+/Don). Persisted per guild. ───────────────
+    if (message.guild && /^cosa\s+psych(?:war|ological\s+warfare)?\s*(on|off|status)?$/i.test(lower)) {
+      const isBossPlus = isMaster || getFamilyRank(message.author.id) === "boss";
+      if (!isBossPlus) { await message.reply("🔫 Only the Boss or Don Clint can touch psych warfare.").catch(() => {}); return; }
+      const mode = (lower.match(/\b(on|off|status)\b/) || [])[1] || "status";
+      if (mode === "status") {
+        await message.reply(
+          `🧠 **Psych warfare:** ${PSYCH_WARFARE_ENABLED ? "🟢 **ON**" : "🔴 **OFF**"}\n` +
+          `Interval: **${formatTimerConfig(timerConfig.psychwar)}** | Spread — 🔒 lockdown **${psychChances.lockdown}%**, 📩 DM **${psychChances.dm}%**, 🚨 wanted **${psychChances.wanted}%**\n` +
+          `*Use **cosa psychwar off** / **cosa psychwar on**.*`
+        ).catch(() => {});
+        return;
+      }
+      const turnOn = mode === "on";
+      if (PSYCH_WARFARE_ENABLED === turnOn) {
+        await message.reply(`🔫 Psych warfare is already **${turnOn ? "ON" : "OFF"}**.`).catch(() => {});
+        return;
+      }
+      PSYCH_WARFARE_ENABLED = turnOn;
+      await saveSetupConfig(message.guild.id);
+      if (turnOn) startPsychologicalWarfare(message.guild);
+      else stopPsychologicalWarfare();
+      await message.reply(
+        turnOn
+          ? "🧠 **Psych warfare ENABLED.** The Family starts watching again. 👁️"
+          : "🔕 **Psych warfare DISABLED.** No more random lockdowns, creepy DMs, or wanted posters. *(persists across restarts)*"
+      ).catch(() => {});
+      return;
+    }
+
     if (message.guild && /^cosa\s+main\s+roles?$/i.test(lower)) {
       if (PROTECTED_ROLE_IDS.length === 0) { await message.reply("🔫 No main roles set. Use **cosa set main role <role>** to add one.").catch(() => {}); return; }
       const names = PROTECTED_ROLE_IDS.map(id => { const r = message.guild.roles.cache.get(id); return r ? `**${r.name}**` : id; }).join(", ");
@@ -7203,6 +7556,11 @@ async function init() {
     }
 
     if (!isModUserBool && isShadowTrigger(message.content)) await handleShadowWarning(message);
+
+    // ── Cosa self-defence — only on messages actually aimed at Cosa ─────────
+    if (isTriggered(message) || repliedToBot) {
+      if (await handleCosaAbuse(message)) return;
+    }
 
     if (isMaster && lower === "execute it" && wickAlertPending) {
       wickAlertPending = false;
@@ -7564,6 +7922,40 @@ async function init() {
   // ── Slash Command Handler ───────────────────────────────────────────────────
   client.on(Events.InteractionCreate, (interaction) => {
     runGuildEvent(interaction.guild?.id, async () => {
+
+    // ── "cosa remove channel" select menu ─────────────────────────────────────
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith("removechan:")) {
+      const token = interaction.customId.split(":")[1];
+      const state = pendingChannelRemovals.get(token);
+      if (!state || state.guildId !== interaction.guildId) {
+        await interaction.reply({ content: "🔫 That picker has expired. Run the command again.", ephemeral: true }).catch(() => {});
+        return;
+      }
+      if (interaction.user.id !== state.userId) {
+        await interaction.reply({ content: "🔫 That picker isn't yours.", ephemeral: true }).catch(() => {});
+        return;
+      }
+      const stillBossPlus = interaction.user.id === MASTER_ID || getFamilyRank(interaction.user.id) === "boss";
+      if (!stillBossPlus) {
+        await interaction.reply({ content: "🔫 You no longer have permission to do that.", ephemeral: true }).catch(() => {});
+        return;
+      }
+      pendingChannelRemovals.delete(token);
+      const result = await removeChannelType(state.guildId, state.type, interaction.values);
+      if (!result) {
+        await interaction.reply({ content: "🔫 Unknown channel type.", ephemeral: true }).catch(() => {});
+        return;
+      }
+      const names = result.removed.map(id => `<#${id}>`).join(", ");
+      const tail = result.remaining > 0
+        ? `\n${result.remaining} channel(s) still set for this type — <#${CHANNEL_ID_ARRAYS[state.type][0]}> is now the primary.`
+        : `\n⚠️ No channels remain for **${result.label}** — features using it will stay dormant until you set one again.`;
+      await interaction.update({
+        content: `✅ Removed ${names} from **${result.label}**.${tail}`,
+        components: [],
+      }).catch(() => {});
+      return;
+    }
 
     // ── Mass-ban "Expand full list" button ────────────────────────────────────
     if (interaction.isButton() && interaction.customId.startsWith("massban_expand:")) {
