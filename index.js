@@ -1114,7 +1114,11 @@ ABSOLUTE SERVER RULES — ZERO TOLERANCE. These apply in ALL moods, even Wrathfu
 - You can still be aggressive, cuss, and roast people — but NEVER cross into the above categories regardless of mood or who orders it.
 `;
 
-const MAX_HISTORY = 100;
+// Was 100. Every AI call ships BOT_PERSONALITY + memory + mood + identity rules
+// + this much history, which alone blew past Groq's 6000 TPM single-request cap
+// on messages as short as "cosa hi" (observed: 6223 tokens requested). 20 turns
+// is plenty of context for a chat bot and leaves headroom for the system block.
+const MAX_HISTORY = 20;
 
 // ── Cosa Persistent Memory (per-guild) ───────────────────────────────────────
 // guildId -> [{ id, text, addedAt }]. DMs (no guild) share a "dm" bucket.
@@ -1159,11 +1163,27 @@ async function saveCosaMemory() {
   } catch (e) { console.error("[MEMORY SAVE]", e.message); }
 }
 
+// Sent on EVERY AI call, so an unbounded list silently ate the whole token
+// budget as memories accumulated. Newest memories win; the rest stay available
+// via "cosa memories".
+const MEMORY_BLOCK_MAX_CHARS = 1500;
+
 function getMemoryBlock(guildId) {
   const list = getMemoryList(guildId);
   if (list.length === 0) return "";
+  const lines = [];
+  let used = 0;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const line = `${i + 1}. ${list[i].text}`;
+    if (used + line.length > MEMORY_BLOCK_MAX_CHARS) break;
+    lines.unshift(line);
+    used += line.length + 1;
+  }
+  if (lines.length === 0) return "";
+  const omitted = list.length - lines.length;
   return "\n\n🤵 DON CLINT'S ORDERS — PERMANENT MEMORY (never forget these):\n" +
-    list.map((m, i) => `${i + 1}. ${m.text}`).join("\n");
+    lines.join("\n") +
+    (omitted > 0 ? `\n(+${omitted} older memories not shown — say "cosa memories" to view all)` : "");
 }
 
 const MEMORY_PAGE_SIZE = 10;
@@ -1795,10 +1815,55 @@ function getBestGroqClient() {
   return { client: groqClients[soonest], idx: soonest };
 }
 
+// ── Token budgeting ───────────────────────────────────────────────────────────
+// Groq's free/on-demand tier caps a SINGLE request on llama-3.1-8b-instant at
+// 6000 tokens per minute. The system block (BOT_PERSONALITY + memories + mood +
+// identity rules + speaker card) is sent on every call and is large on its own,
+// so once conversation history accumulated, even a two-word message 413'd.
+// Key rotation can't fix a 413 — the request itself is oversized — so every
+// payload is now measured and trimmed before it's ever sent.
+const PROMPT_TOKEN_BUDGET = 3800; // leaves room for max_tokens + concurrent calls
+const CHARS_PER_TOKEN = 3.6;      // rough, but consistently conservative
+
+function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.ceil(String(text).length / CHARS_PER_TOKEN);
+}
+function estimateMessagesTokens(messages) {
+  return messages.reduce((sum, m) => sum + estimateTokens(m.content) + 4, 3);
+}
+
+// Drops the OLDEST conversation turns first. Never touches messages[0] (the
+// system prompt) and never touches trailing system messages (speaker card,
+// live web-search context) — those are the highest-signal parts of the prompt.
+function fitMessagesToBudget(messages, budget = PROMPT_TOKEN_BUDGET) {
+  const out = [...messages];
+  while (estimateMessagesTokens(out) > budget) {
+    const idx = out.findIndex((m, i) => i > 0 && m.role !== "system");
+    if (idx === -1) break; // nothing left but system messages
+    out.splice(idx, 1);
+  }
+  // Still over: the system prompt alone is oversized. Truncate it rather than
+  // let the whole request fail.
+  if (out[0]?.role === "system" && estimateMessagesTokens(out) > budget) {
+    const overflowChars = Math.ceil((estimateMessagesTokens(out) - budget) * CHARS_PER_TOKEN) + 200;
+    const keep = Math.max(800, out[0].content.length - overflowChars);
+    out[0] = { ...out[0], content: out[0].content.slice(0, keep) + "\n[...truncated to fit token limit]" };
+  }
+  return out;
+}
+
 async function rateLimitedGroqCall(messages, opts = {}) {
   const wait = 500 - (Date.now() - lastCallTime);
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   lastCallTime = Date.now();
+
+  let budget = opts.budget || PROMPT_TOKEN_BUDGET;
+  let payload = fitMessagesToBudget(messages, budget);
+  if (payload.length !== messages.length) {
+    console.log(`[GROQ] Trimmed ${messages.length - payload.length} old message(s) to fit budget`);
+  }
+  console.log(`[GROQ] Prompt ~${estimateMessagesTokens(payload)} tokens (${payload.length} msgs)`);
 
   for (let attempt = 1; attempt <= groqClients.length * 2; attempt++) {
     const { client, idx } = getBestGroqClient();
@@ -1812,7 +1877,7 @@ async function rateLimitedGroqCall(messages, opts = {}) {
         max_tokens: opts.maxTokens || 150,
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
         ...(opts.jsonMode ? { response_format: { type: "json_object" } } : {}),
-        messages,
+        messages: payload,
       });
       const response = await Promise.race([callPromise, timeoutPromise]);
       const content = response.choices[0]?.message?.content;
@@ -1821,8 +1886,21 @@ async function rateLimitedGroqCall(messages, opts = {}) {
       return content;
     } catch (err) {
       const errMsg = err.message || "";
+      const is413 = err.status === 413 || errMsg.includes("413") || errMsg.includes("Request too large");
       const is429 = errMsg.includes("429") || err.status === 429 || errMsg.includes("rate_limit") || errMsg.includes("Rate limit");
       const isTPD = errMsg.includes("TPD") || errMsg.includes("tokens per day");
+
+      // 413 = the request is too big for the tier. Rotating keys is pointless —
+      // every key would reject the identical payload. Halve the budget, re-trim,
+      // and retry instead of burning through all three keys.
+      if (is413) {
+        budget = Math.floor(budget * 0.5);
+        if (budget < 600) throw new Error("Prompt too large even after trimming — shorten BOT_PERSONALITY or clear some memories.");
+        payload = fitMessagesToBudget(messages, budget);
+        console.log(`[GROQ] 413 — retrying with reduced budget ${budget} (~${estimateMessagesTokens(payload)} tokens)`);
+        continue;
+      }
+
       if (is429 || isTPD) {
         // Parse reset time from error if available, otherwise mark for 60s
         const retryMatch = errMsg.match(/try again in ([\d.]+)s/);
@@ -2691,12 +2769,12 @@ function godAiGuildContext(guild, message) {
   const roles = [...guild.roles.cache.values()]
     .filter(r => r.id !== guild.id)
     .sort((a, b) => b.position - a.position)
-    .slice(0, 60)
+    .slice(0, 30)
     .map(r => r.name)
     .join(", ");
   const channels = [...guild.channels.cache.values()]
     .filter(c => c.type === 0 || c.type === 4)
-    .slice(0, 100)
+    .slice(0, 40)
     .map(c => (c.type === 4 ? `category "${c.name}"` : `#${c.name} (id:${c.id})`))
     .join(", ");
   return `Current channel id: ${message.channelId}\nExisting roles: ${roles || "none"}\nExisting channels: ${channels || "none"}`;
@@ -2747,7 +2825,7 @@ async function aiParseGodCommands(text, guild, message) {
     const reply = await rateLimitedGroqCall([
       { role: "system", content: GOD_AI_SYSTEM_PROMPT + "\n\nSERVER CONTEXT:\n" + godAiGuildContext(guild, message) },
       { role: "user", content: text },
-    ], { maxTokens: 800, temperature: 0, jsonMode: true });
+    ], { maxTokens: 800, temperature: 0, jsonMode: true, budget: 4500 });
 
     const jsonMatch = reply.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
@@ -4905,7 +4983,9 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       try { await guild.members.unban(targetId); await sendModLog(guild, { action: "Unban", moderator: modName, target: `<@${targetId}>` }); return `<@${targetId}> pardoned.`; }
       catch (err) { return `Unban failed: ${err.message}`; }
     }
-    case "clear_memory": { conversationHistory.delete(channelId); return "Memory wiped."; }
+    // `conversationHistory` was a leftover from before history went per-guild —
+    // referencing it threw a ReferenceError every time this ran.
+    case "clear_memory": { guildHistories.set(guild?.id || "dm", []); return "Memory wiped."; }
     case "warn": {
       const targetMember = await guild.members.fetch(targetId).catch(() => null);
       if (!targetMember) return "Can't find that member.";
@@ -5409,7 +5489,16 @@ ${status}`, files: [attachment] }).catch(() => {});
 
 ${botStatus}`, files: [botAtt] }).catch(() => {});
               if (chessModule.isGameOver(game)) { clearTurnTimer(game); chessModule.deleteGame(message.channelId); }
-              else if (game.timeLimit) startTurnTimer(game, message.channelId, client, handleBotTimeout);
+              // `handleBotTimeout` was never declared anywhere — this threw a
+              // ReferenceError and killed the handler mid-move on timed bot games.
+              else if (game.timeLimit) startTurnTimer(game, message.channelId, client, async (cId, g) => {
+                const loser  = g.chess.turn() === "w" ? g.white : g.black;
+                const winner = g.chess.turn() === "w" ? g.black : g.white;
+                clearTurnTimer(g);
+                chessModule.deleteGame(cId);
+                const ch = await client.channels.fetch(cId).catch(() => null);
+                if (ch) await ch.send(`⏱️ **TIME'S UP!**\n${loser.id === "BOT" ? `**${loser.name}**` : `<@${loser.id}>`} ran out of time!\n🏆 ${winner.id === "BOT" ? `**${winner.name}**` : `<@${winner.id}>`} **wins!**`).catch(() => {});
+              });
             }
           } catch (e) {
             console.error("[CHESS BOT MOVE]", e.message);
