@@ -1332,6 +1332,29 @@ async function scoreFingerprint(member) {
 // anything. toxicTracker remains in guildDataStore only so old persisted
 // per-guild state deserialises without blowing up; nothing reads it.
 
+// Any place that mutes an Administrator-holding member has to strip those admin
+// roles first (Discord refuses to timeout a member who holds Administrator).
+// The bug: restoring those roles right away doesn't just look pointless — the
+// instant a timed-out member regains Administrator, Discord itself silently
+// clears the timeout (an Administrator can't have an active timeout, the same
+// rule enforced on write). So "strip → timeout → restore immediately" mutes
+// nobody; the restore step wipes the mute in the same beat it was applied.
+// Fix: don't give the roles back until the mute itself has actually expired.
+function scheduleAdminRoleRestore(member, adminRoles, delayMs, reasonLabel) {
+  if (!adminRoles || adminRoles.size === 0) return;
+  setTimeout(async () => {
+    try {
+      // Re-fetch — the cached `member` object is stale by now (minutes/hours
+      // old); we want their current guild membership, not a snapshot.
+      const fresh = await member.guild.members.fetch(member.id).catch(() => null);
+      if (!fresh) return; // they left — nothing to restore
+      await fresh.roles.add(adminRoles, reasonLabel).catch(() => {});
+    } catch (e) {
+      console.error("[ADMIN ROLE RESTORE]", e.message);
+    }
+  }, delayMs);
+}
+
 // ── Cosa Self-Defence ─────────────────────────────────────────────────────────
 // NOTE: the general-purpose automod above was deliberately deleted and must stay
 // deleted. This is NOT that. It does not scan the server's conversation — it only
@@ -1467,7 +1490,7 @@ async function handleCosaAbuse(message) {
     );
     if (adminRoles.size > 0) await member.roles.remove(adminRoles, "Temporary removal to apply Cosa defence mute");
     await member.timeout(muteMs, "Repeated abuse directed at Cosa");
-    if (adminRoles.size > 0) await member.roles.add(adminRoles, "Restoring roles after Cosa defence mute").catch(() => {});
+    scheduleAdminRoleRestore(member, adminRoles, muteMs, "Restoring roles after Cosa defence mute expired");
     muted = true;
   } catch (e) {
     console.error("[COSA DEFENCE MUTE]", e.message);
@@ -5148,9 +5171,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
           await targetMember.roles.remove(adminRoles, "Temporary removal to apply slimeout");
         }
         await targetMember.timeout(durationMs, "Slimed out");
-        if (adminRoles.size > 0) {
-          await targetMember.roles.add(adminRoles, "Restoring roles after slimeout applied").catch(() => {});
-        }
+        scheduleAdminRoleRestore(targetMember, adminRoles, durationMs, "Restoring roles after slimeout expired");
       } catch (err) { return `Slimeout failed: ${err.message}`; }
       await sendModLog(guild, { action: `Slimeout (${formatTime(durationMs)})`, moderator: modName, target: targetName });
       await message.channel.send(`<@${targetId}> slimed out for ${formatTime(durationMs)}. 🤐`).catch(() => {});
@@ -5181,9 +5202,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
           await member.roles.remove(adminRoles, "Temporary removal to apply mute");
         }
         await member.timeout(durationMs, "Muted");
-        if (adminRoles.size > 0) {
-          await member.roles.add(adminRoles, "Restoring roles after mute applied").catch(() => {});
-        }
+        scheduleAdminRoleRestore(member, adminRoles, durationMs, "Restoring roles after mute expired");
         await sendModLog(guild, { action: `Mute (${formatTime(durationMs)})`, moderator: modName, target: member.user.username, reason });
         return `<@${targetId}> muted for ${formatTime(durationMs)}.`;
       } catch (err) { return `Mute failed: ${err.message}`; }
