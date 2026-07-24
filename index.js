@@ -5356,6 +5356,51 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
 }
 
 // ── Execute Public Command ────────────────────────────────────────────────────
+// Discord hard-caps a single message at 2000 characters. Long responses (e.g.
+// the shop list, help text) used to silently fail — .reply() would throw,
+// the .catch() fallback to .channel.send() would throw for the same reason,
+// and the error just got logged to console while the user only saw "typing…"
+// and then nothing. This splits on line breaks (falling back to hard slices)
+// and sends each chunk as its own message.
+async function sendLongReply(message, text) {
+  const LIMIT = 2000;
+  if (text.length <= LIMIT) {
+    await message.reply(text).catch(async () => {
+      await message.channel.send(text).catch(e => console.error("[SEND FAIL]", e.message));
+    });
+    return;
+  }
+
+  const lines = text.split("\n");
+  const chunks = [];
+  let current = "";
+  for (const line of lines) {
+    // A single line longer than the limit still needs hard-slicing.
+    if (line.length > LIMIT) {
+      if (current) { chunks.push(current); current = ""; }
+      for (let i = 0; i < line.length; i += LIMIT) chunks.push(line.slice(i, i + LIMIT));
+      continue;
+    }
+    const candidate = current ? current + "\n" + line : line;
+    if (candidate.length > LIMIT) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+
+  for (let i = 0; i < chunks.length; i++) {
+    const send = i === 0
+      ? () => message.reply(chunks[i])
+      : () => message.channel.send(chunks[i]);
+    await send().catch(async () => {
+      await message.channel.send(chunks[i]).catch(e => console.error("[SEND FAIL]", e.message));
+    });
+  }
+}
+
 async function executePublicCommand(message, cmd, channelId) {
   const guild = message.guild;
   const { action } = cmd;
@@ -8112,9 +8157,7 @@ async function init() {
       try {
         const result = await executePublicCommand(message, pubCmd, channelId);
         if (result) {
-          await message.reply(result).catch(async () => {
-            await message.channel.send(result).catch(e => console.error("[SEND FAIL]", e.message));
-          });
+          await sendLongReply(message, result);
         }
       } catch (err) {
         console.error("[PUBLIC CMD ERROR]", err.stack || err.message);
