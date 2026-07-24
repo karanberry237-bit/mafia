@@ -1275,7 +1275,7 @@ let SHADOW_TRIGGERS = [
   "cosa is bad","cosa is trash","cosa sucks","cosa is stupid","cosa is dumb",
   "cosa is useless","hate cosa","cosa is terrible","down with clint",
   "clint is corrupt","clint doesn't deserve","clint is unfair","overthrow clint",
-  "clint should be removed","remove clint","clint abuse","don is bad","fuck clint","fuck you clint","fuck you cosa","Clanker"
+  "clint should be removed","remove clint","clint abuse","don is bad","fuck clint","fuck you clint","fuck you cosa","Clanker","Cosa you suck","You suck", "Fucking clanker"
   
 ];
 
