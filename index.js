@@ -217,9 +217,10 @@ async function loadLoans() {
       // Re-register enforcement timer for remaining time
       const remaining = dueDate - now;
       setTimeout(async () => {
-        if (!activeLoanData.has(loan.user_id)) return;
-        const debt = await eco.getDebt(loan.user_id);
-        if (debt > 0) {
+        const stillActive = activeLoanData.get(loan.user_id);
+        if (!stillActive) return;
+        const remainingLoanAmt = stillActive.amount || 0;
+        if (remainingLoanAmt > 0) {
           gamblingBlacklist.add(loan.user_id);
           activeLoanData.delete(loan.user_id);
           await deleteLoan(loan.user_id);
@@ -228,7 +229,7 @@ async function loadLoans() {
           const user = await client.users.fetch(loan.user_id).catch(()=>null);
           if (adminCh) await adminCh.send(
             "⚠️ **LOAN DEFAULT** ⚠️\n<@" + MASTER_ID + "> — **" + (user?.username || loan.user_id) + "** defaulted on their **" + loan.loan_type + "**.\n" +
-            "Remaining debt: **💵 " + debt.toLocaleString() + " Cash**\n" +
+            "Remaining loan balance: **💵 " + remainingLoanAmt.toLocaleString() + " Cash**\n" +
             "Auto gambling ban applied. 🔫"
           ).catch(()=>{});
         } else {
@@ -4354,6 +4355,7 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+normal\s+loan\b/.test(lower)) return { action: "loan", size: "loan" };
   if (/\bcosa\s+elite\s+loan\b/.test(lower)) return { action: "loan", size: "elite" };
   if (/\bcosa\s+ultra\s+loan\b/.test(lower)) return { action: "loan", size: "ultra" };
+  if (/\bcosa\s+pay\s+loan\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_loan", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
   if (/\bcosa\s+pay\s+debt\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_debt", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
   if (/\bcosa\s+debt\b/.test(lower)) return { action: "check_debt" };
   if (/\bcosa\s+slots\b/.test(lower)) {
@@ -4597,6 +4599,7 @@ function detectPublicCommand(text, message) {
   if (/\bcosa\s+normal\s+loan\b/.test(lower)) return { action: "loan", size: "loan" };
   if (/\bcosa\s+elite\s+loan\b/.test(lower)) return { action: "loan", size: "elite" };
   if (/\bcosa\s+ultra\s+loan\b/.test(lower)) return { action: "loan", size: "ultra" };
+  if (/\bcosa\s+pay\s+loan\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_loan", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
   if (/\bcosa\s+pay\s+debt\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_debt", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
   if (/\bcosa\s+debt\b/.test(lower)) return { action: "check_debt" };
   if (/\bcosa\s+bank\s+deposit\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_deposit", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
@@ -4795,7 +4798,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   }
 
   // Route eco commands to public handler
-  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","check_debt","pay_debt","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb"];
+  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb"];
   if (ecoActions.includes(action)) {
     return await executePublicCommand(message, cmd, channelId);
   }
@@ -5355,16 +5358,31 @@ async function executePublicCommand(message, cmd, channelId) {
   const guild = message.guild;
   const { action } = cmd;
 
-  // Debt reminder — shown at bottom of all eco command responses
+  // Debt reminder — shown at bottom of all eco command responses.
+  // NOTE: "debt" (wallet.debt) and an active "loan" (activeLoanData) are separate
+  // systems with separate repayment commands — don't conflate them here.
   let debtReminderAmount = 0;
   try {
     if (message?.author?.id) debtReminderAmount = await eco.getDebt(message.author.id) || 0;
   } catch { debtReminderAmount = 0; }
-  const debtReminderSuffix = debtReminderAmount > 0
-    ? "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+  const activeLoanReminder = message?.author?.id ? activeLoanData.get(message.author.id) : null;
+  const debtReminderLines = [];
+  if (debtReminderAmount > 0) {
+    debtReminderLines.push(
       "🔴 **YOU ARE IN DEBT** — 💵 **" + debtReminderAmount.toLocaleString() + " Cash** owed\n" +
       "⛔ Gambling is locked until cleared.\n" +
       "💡 **Cosa pay debt [amount]** | **Cosa loans** to see loan options"
+    );
+  }
+  if (activeLoanReminder) {
+    const loanDaysLeft = Math.max(0, Math.ceil((activeLoanReminder.dueDate - Date.now()) / (24*60*60*1000)));
+    debtReminderLines.push(
+      "📋 **ACTIVE LOAN** — 💵 **" + activeLoanReminder.amount.toLocaleString() + " Cash** due in **" + loanDaysLeft + " day(s)** (" + activeLoanReminder.type + ")\n" +
+      "💡 **Cosa pay loan [amount]** to repay it. Miss the deadline = auto gambling ban + Don Clint notified."
+    );
+  }
+  const debtReminderSuffix = debtReminderLines.length > 0
+    ? "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + debtReminderLines.join("\n\n")
     : "";
 
   switch (action) {
@@ -5861,28 +5879,59 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         "• Repay within **7 days**\n\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
         "*Miss the deadline = auto gambling ban + Don Clint notified.*\n" +
-        "*Use **Cosa pay debt [amount]** anytime to repay early.*";
+        "*Once a loan is active, use **Cosa pay loan [amount]** to repay it (this is separate from regular **Cosa pay debt**).*";
     }
     case "check_debt": {
       const debt = await eco.getDebt(message.author.id);
-      if (!debt || debt === 0) return "✅ You have no debt. Stay out of trouble.";
-      return "🔴 **YOUR DEBT**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou owe the Family: **💵 " + debt.toLocaleString() + " Cash**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Use **Cosa pay debt [amount]** or **Cosa loan** to get funds.*\n*Gambling is locked until debt is cleared.*";
+      const activeLoanCD = activeLoanData.get(message.author.id);
+      const loanCDLine = activeLoanCD
+        ? "\n📋 **ACTIVE LOAN: 💵 " + activeLoanCD.amount.toLocaleString() + " Cash** (" + activeLoanCD.type + ") due in **" + Math.max(0, Math.ceil((activeLoanCD.dueDate - Date.now()) / (24*60*60*1000))) + " day(s)**\n*Use **Cosa pay loan [amount]** to repay it. Miss the deadline = auto gambling ban + Don Clint notified.*"
+        : "";
+      if ((!debt || debt === 0) && !activeLoanCD) return "✅ You have no debt and no active loan. Stay out of trouble.";
+      const debtSection = debt > 0
+        ? "🔴 **YOUR DEBT**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou owe the Family: **💵 " + debt.toLocaleString() + " Cash**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Use **Cosa pay debt [amount]** or **Cosa loan** to get funds.*\n*Gambling is locked until debt is cleared.*"
+        : "✅ You have no separate debt.";
+      return debtSection + loanCDLine;
     }
     case "pay_debt": {
+      // NOTE: "debt" (eco.getDebt / wallet.debt) and an active "loan" (activeLoanData)
+      // are tracked completely separately. Paying debt here does NOT touch an
+      // outstanding loan balance — use "Cosa pay loan [amount]" for that.
       const debt = await eco.getDebt(message.author.id);
-      if (!debt || debt === 0) return "✅ You have no debt to pay.";
+      if (!debt || debt === 0) return "✅ You have no debt to pay." + (activeLoanData.has(message.author.id) ? " *(You do have an active loan — use **Cosa pay loan [amount]** for that.)*" : "");
       const copper = eco.parseBet(cmd.amount, cmd.tier);
       if (!copper) return "Invalid amount.";
       const result = await eco.payDebt(message.author.id, copper);
       if (!result) return "Insufficient funds to pay that amount.";
       const remaining = result.debt || 0;
       if (remaining === 0) {
+        // Only lift the gambling ban here if it's not being held by an active loan default.
+        if (!activeLoanData.has(message.author.id)) gamblingBlacklist.delete(message.author.id);
+        return "✅ **DEBT CLEARED!** Gambling ban lifted (if it was debt-related). Don't let it happen again. 🤵";
+      }
+      return "💸 Paid **💵 " + copper.toLocaleString() + " Cash** toward your debt.\nRemaining debt: **💵 " + remaining.toLocaleString() + " Cash**";
+    }
+    case "pay_loan": {
+      const activeLoanPay = activeLoanData.get(message.author.id);
+      if (!activeLoanPay) return "✅ You have no active loan to pay off. *(Debt and loans are separate — check **Cosa debt** for regular debt.)*";
+      const copperLoan = eco.parseBet(cmd.amount, cmd.tier);
+      if (!copperLoan) return "Invalid amount.";
+      const wLoan = await eco.getWallet(message.author.id);
+      const balLoan = eco.walletToCopper(wLoan);
+      if (balLoan < copperLoan) return "Insufficient funds. Your balance: **" + eco.formatWallet(wLoan) + "**.";
+      const payAmount = Math.min(copperLoan, activeLoanPay.amount);
+      await eco.saveWallet({ ...wLoan, ...eco.fromCopper(balLoan - payAmount) });
+      const remainingLoan = activeLoanPay.amount - payAmount;
+      if (remainingLoan <= 0) {
         gamblingBlacklist.delete(message.author.id);
         activeLoanData.delete(message.author.id);
         await deleteLoan(message.author.id);
-        return "✅ **DEBT CLEARED!** Loan repaid. Gambling ban lifted. Don't let it happen again. 🤵";
+        return "✅ **LOAN FULLY REPAID!** (" + activeLoanPay.type + ") Gambling ban lifted (if any). Don Clint is pleased. 🤵";
       }
-      return "💸 Paid **💵 " + copper.toLocaleString() + " Cash** toward your debt.\nRemaining debt: **💵 " + remaining.toLocaleString() + " Cash**";
+      activeLoanPay.amount = remainingLoan;
+      activeLoanData.set(message.author.id, activeLoanPay);
+      await saveLoan(message.author.id, activeLoanPay);
+      return "💸 Paid **💵 " + payAmount.toLocaleString() + " Cash** toward your **" + activeLoanPay.type + "**.\nRemaining loan balance: **💵 " + remainingLoan.toLocaleString() + " Cash**";
     }
     case "loan": {
       if (message.author.id === MASTER_ID) return "🤵 The Don needs no loan.";
@@ -5916,26 +5965,27 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       loanCooldowns.set(message.author.id, Date.now());
       // 7-day enforcement
       setTimeout(async () => {
-        if (!activeLoanData.has(message.author.id)) return;
-        const rem2 = await eco.getDebt(message.author.id);
+        const stillActiveLoan2 = activeLoanData.get(message.author.id);
+        if (!stillActiveLoan2) return;
+        const rem2 = stillActiveLoan2.amount || 0;
         if (rem2 > 0) {
           const bankDeducted2 = await bank.deductFromBank(message.author.id, rem2);
           if (bankDeducted2 >= rem2) {
-            const ww = await eco.getWallet(message.author.id);
-            await eco.saveWallet({ ...ww, debt: 0 });
             activeLoanData.delete(message.author.id);
             await deleteLoan(message.author.id);
             const g2 = client.guilds.cache.first();
             const ac2 = g2?.channels.cache.get(LOCKDOWN_CHANNEL_ID);
-            if (ac2) await ac2.send("✅ **AUTO LOAN CLEARED** — <@" + message.author.id + ">'s bank covered their debt. ✅").catch(()=>{});
+            if (ac2) await ac2.send("✅ **AUTO LOAN CLEARED** — <@" + message.author.id + ">'s bank covered their loan. ✅").catch(()=>{});
           } else {
+            // Partial bank coverage still applies toward the loan balance
+            const remainingAfterBank2 = rem2 - bankDeducted2;
             gamblingBlacklist.add(message.author.id);
             activeLoanData.delete(message.author.id);
             await deleteLoan(message.author.id);
             const g2 = client.guilds.cache.first();
             const ac2 = g2?.channels.cache.get(LOCKDOWN_CHANNEL_ID);
             const u2 = await client.users.fetch(message.author.id).catch(()=>null);
-            if (ac2) await ac2.send("⚠️ **LOAN DEFAULT** ⚠️\n<@" + MASTER_ID + "> — **" + (u2?.username||message.author.id) + "** defaulted on **" + loanType2.label + "**.\nRemaining: 💵 " + rem2.toLocaleString() + " Cash\nAuto gambling ban applied.").catch(()=>{});
+            if (ac2) await ac2.send("⚠️ **LOAN DEFAULT** ⚠️\n<@" + MASTER_ID + "> — **" + (u2?.username||message.author.id) + "** defaulted on **" + loanType2.label + "**.\nRemaining: 💵 " + remainingAfterBank2.toLocaleString() + " Cash\nAuto gambling ban applied.").catch(()=>{});
           }
         } else {
           activeLoanData.delete(message.author.id);
@@ -5977,7 +6027,10 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const debt = await eco.getDebt(cmd.targetId);
       const debtLine = debt > 0 ? "\n🔴 **DEBT: 💵 " + debt.toLocaleString() + " Cash** *(gambling locked)*" : "";
       const activeLoan = activeLoanData.get(cmd.targetId);
-      const loanLine = activeLoan ? "\n📋 **LOAN REPAYMENT: 💵 " + activeLoan.amount.toLocaleString() + " Cash** due in **" + Math.max(0, Math.ceil((activeLoan.dueDate - Date.now()) / (24*60*60*1000))) + " day(s)** — " + activeLoan.type : "";
+      const loanLine = activeLoan
+        ? "\n📋 **LOAN REPAYMENT: 💵 " + activeLoan.amount.toLocaleString() + " Cash** due in **" + Math.max(0, Math.ceil((activeLoan.dueDate - Date.now()) / (24*60*60*1000))) + " day(s)** — " + activeLoan.type +
+          (isSelf ? "\n💡 Pay it off with **Cosa pay debt [amount]** (partial payments allowed).\n⚠️ **Miss the deadline and you're auto-blacklisted from gambling + Don Clint gets notified.**" : "")
+        : "";
       const flexLine = total >= 1000000 ? "\n*That's **" + shortForm(total) + " Cash** in raw value. The whole neighborhood bows.* 🪙" : "";
       return "💰 **" + walletName + " Wallet**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + eco.formatWallet(w) + debtLine + loanLine + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Total: " + total.toLocaleString() + " Cash*" + flexLine + debtReminderSuffix;
     }
