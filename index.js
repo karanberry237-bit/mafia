@@ -1996,21 +1996,24 @@ const groqKeys = [
 ].filter(Boolean);
 
 // ── Model selection ───────────────────────────────────────────────────────────
-// llama-3.1-8b-instant is still a Groq PRODUCTION model (131k context, 560 t/s,
-// cheapest available) and is NOT a reasoning model — its output is clean prose,
-// which is what the persona needs. Kept as the chat default.
+// The old defaults (llama-3.1-8b-instant / llama-3.3-70b-versatile) were
+// deprecated by Groq on 2026-06-17 and shut down on 2026-08-16, so we've moved
+// to the recommended replacements:
+//   chat  -> openai/gpt-oss-20b  (fastest on Groq, ~1000 t/s, cheap)
+//   parse -> openai/gpt-oss-120b (stronger structured-JSON / instruction following)
 //
-// Command parsing is a different job: aiParseGodCommands can ban/kick/delete, so
-// instruction-following and resistance to hallucinated IDs matter far more than
-// speed. llama-3.3-70b-versatile is also production, also non-reasoning, and is
-// substantially more reliable at structured JSON.
-//
-// openai/gpt-oss-20b is the fastest model on Groq (~1000 t/s) and smarter than
-// 8b, but it IS a reasoning model — without reasoning_format:"parsed" its chain
-// of thought can leak into message content. Set GROQ_MODEL_CHAT to try it; the
-// reasoning_format passthrough below keeps the output clean if you do.
-const AI_MODEL_CHAT  = process.env.GROQ_MODEL_CHAT  || "llama-3.1-8b-instant";
-const AI_MODEL_PARSE = process.env.GROQ_MODEL_PARSE || "llama-3.3-70b-versatile";
+// Both are REASONING models. Two consequences, both handled in rateLimitedGroqCall:
+//   1. Their chain-of-thought would otherwise leak into message content, so we
+//      always send reasoning_format ("parsed") for reasoning models — this keeps
+//      response.choices[0].message.content clean (reasoning lands in a separate
+//      field we ignore).
+//   2. Reasoning tokens cost money/latency, so we default reasoning_effort to
+//      "low" (overridable per-call). That keeps the per-message overhead small
+//      while still fixing the parser reliability that plain models lacked.
+// Override either model via GROQ_MODEL_CHAT / GROQ_MODEL_PARSE if Groq's lineup
+// shifts again.
+const AI_MODEL_CHAT  = process.env.GROQ_MODEL_CHAT  || "openai/gpt-oss-20b";
+const AI_MODEL_PARSE = process.env.GROQ_MODEL_PARSE || "openai/gpt-oss-120b";
 
 // Only genuine reasoning models accept the `reasoning_format` parameter. Sending
 // it to a non-reasoning model (llama-3.3-70b-versatile, llama-3.1-8b-instant)
@@ -2131,9 +2134,15 @@ async function rateLimitedGroqCall(messages, opts = {}) {
       const timeoutPromise = new Promise((_, rej) =>
         setTimeout(() => rej(new Error("Groq timeout after 20s")), 20000)
       );
+      const activeModel = opts.model || AI_MODEL_CHAT;
+      const reasoning = isReasoningModel(activeModel);
+      // For reasoning models, ALWAYS send a reasoning_format (default "parsed")
+      // so their chain-of-thought never leaks into content, and cap the thinking
+      // with reasoning_effort (default "low") to keep token cost/latency down.
+      // For non-reasoning models, send neither — Groq 400s on both.
       const callPromise = client.chat.completions.create({
-        model: opts.model || AI_MODEL_CHAT,
-        ...(opts.reasoningFormat && isReasoningModel(opts.model || AI_MODEL_CHAT) ? { reasoning_format: opts.reasoningFormat } : {}),
+        model: activeModel,
+        ...(reasoning ? { reasoning_format: opts.reasoningFormat || "parsed", reasoning_effort: opts.reasoningEffort || "low" } : {}),
         max_tokens: opts.maxTokens || 150,
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
         ...(opts.jsonMode ? { response_format: { type: "json_object" } } : {}),
