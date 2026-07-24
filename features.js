@@ -1229,9 +1229,9 @@ const SHOP_ITEMS = {
   rob_shield: {
     id: "rob_shield",
     name: "🤐 Snitch Insurance",
-    desc: "Immune to a shakedown for 24 hours",
+    desc: "Immune to a shakedown for 1 hour",
     price: 50000,        // 50,000 Cash
-    duration: 24 * 60 * 60 * 1000,
+    duration: 60 * 60 * 1000,
     rarity: "common",
   },
   lucky_charm: {
