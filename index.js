@@ -360,7 +360,7 @@ const MOODS = [
   { name: "Vengeful",            emoji: "🗡️", desc: "Someone wronged the Family. Cosa does not forget.",                    roastBoost: true,  mercyReduced: true  },
   { name: "Euphoric",            emoji: "✨", desc: "Cosa is riding high. A good day for the Family.",                      roastBoost: false, mercyReduced: false },
   { name: "Ominous",             emoji: "⛈️", desc: "Something's coming. Cosa can feel it.",                                roastBoost: false, mercyReduced: true  },
-  { name: "Drunk",               emoji: "🥃", desc: "Cosa's had too much grappa at the social club. Speech is slurred, thoughts are scattered, but the heart is warm.",  roastBoost: false, mercyReduced: false, drunk: true },
+  { name: "Drunk",               emoji: "🥃", desc: "Cosa's had too much grappa at the social club. Speech is slurred, thoughts are scattered, but the heart is warm act like a drunken person in a bar slur a lot and talk slowly more then usual like a true drunk person .",  roastBoost: false, mercyReduced: false, drunk: true },
   { name: "Lovesick",            emoji: "💘", desc: "Cosa is distracted by something — or someone. Every response is dramatic and romantic.",                           roastBoost: false, mercyReduced: false },
   { name: "Battle-Ready",        emoji: "🔫", desc: "Cosa is itching for a fight. Every message feels like a declaration of war.",                                       roastBoost: true,  mercyReduced: true  },
   { name: "Philosophical",       emoji: "🌌", desc: "Cosa ponders loyalty, honor, and the cost of this life. Speaks in riddles and deep thoughts.",                       roastBoost: false, mercyReduced: false },
