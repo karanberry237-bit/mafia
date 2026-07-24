@@ -346,7 +346,7 @@ const guildConfigs = new Map(); // guildId -> { ELDER_ROLE_ID, LOCKDOWN_CHANNEL_
 // ── Cosa's Mood System ─────────────────────────────────────────────────────────
 const MOODS = [
   { name: "Wrathful",            emoji: "🔥", desc: "Cosa is seething with barely contained fury. Every word is a threat.", roastBoost: true,  mercyReduced: true  },
-  { name: "Extremely Aggressive",emoji: "🔫", desc: "Cosa is on a warpath. Nobody is safe today.",                          roastBoost: true,  mercyReduced: true  },
+  { name: "Extremely Aggressive",emoji: "🔫", desc: "Cosa is on a warpath. Nobody is safe today when you are in this mode YOU WILL use slurs such as fuck, dumb, retard YOU MUST use them..",                          roastBoost: true,  mercyReduced: true  },
   { name: "Cold & Calculating",  emoji: "🧊", desc: "Cosa is eerily calm. The silence before someone gets whacked.",         roastBoost: false, mercyReduced: false },
   { name: "Paranoid",            emoji: "👁️", desc: "Cosa trusts nobody. Everyone's a potential rat.",                       roastBoost: false, mercyReduced: false },
   { name: "Merciful",            emoji: "🕊️", desc: "Cosa shows rare grace today. Don't push it.",                          roastBoost: false, mercyReduced: false },
