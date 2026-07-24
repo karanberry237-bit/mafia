@@ -211,11 +211,10 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-function formatPrice(copper) {
-  if (copper >= 1000000) return (copper / 1000000).toFixed(2) + "St";
-  if (copper >= 10000)   return (copper / 10000).toFixed(2) + "G";
-  if (copper >= 100)     return (copper / 100).toFixed(1) + "S";
-  return copper + "C";
+function formatPrice(cash) {
+  if (cash >= 1000000) return "💵" + (cash / 1000000).toFixed(2) + "M";
+  if (cash >= 1000)    return "💵" + (cash / 1000).toFixed(2) + "K";
+  return "💵" + Math.floor(cash).toLocaleString();
 }
 
 function niceRange(min, max) {
