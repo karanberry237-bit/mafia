@@ -6035,7 +6035,14 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const rankKey = getFamilyRank(message.author.id);
       const rankLevel = isDon ? 9 : (rankKey && RANKS[rankKey] ? RANKS[rankKey].level : 0);
       const fn = { work: jobs.doWork, crime: jobs.doCrime, scavenge: jobs.doScavenge, smuggle: jobs.doSmuggle }[cmd.action];
-      return await fn(message.author.id, rankLevel, isDon);
+      // Job losses flow to the Don exactly like gambling losses: real cash to his
+      // wallet + tracked in the treasury. (Shortfalls become the player's debt.)
+      const vig = async (amount) => {
+        if (!amount || amount <= 0) return;
+        await eco.addCopper(MASTER_ID, amount).catch(() => {});
+        addToTreasuryFees(amount, "gambling");
+      };
+      return await fn(message.author.id, rankLevel, isDon, { vig });
     }
     case "quests":
       return jobs.getQuestBoard(message.author.id);

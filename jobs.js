@@ -6,6 +6,7 @@
 // simply clears the timers (players lose nothing but a wait).
 
 const eco = require("./economy");
+const features = require("./features");
 
 // ── Cooldowns ──────────────────────────────────────────────────────────────────
 const WORK_COOLDOWN_MS     = 30 * 60 * 1000;      // 30 min
@@ -41,6 +42,26 @@ function rankMultiplier(rankLevel) {
 
 function rint(min, max) { return Math.floor(min + Math.random() * (max - min + 1)); }
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+// ── Loss handling ────────────────────────────────────────────────────────────
+// A failed job costs the FULL loss amount — it is never capped at the wallet.
+// The wallet pays what it can; any shortfall becomes debt to the Family (no
+// dipping into the player's bank vault). Whatever real cash is taken becomes the
+// Don's vig income via deps.vig(). The Don himself never pays.
+async function applyLoss(userId, loss, deps, isDon) {
+  if (isDon || loss <= 0) return { paidFromWallet: 0, debtAdded: 0 };
+  const wallet = await eco.getWallet(userId);
+  const have = eco.walletToCopper(wallet);
+  const paidFromWallet = Math.min(have, loss);
+  if (paidFromWallet > 0) await eco.deductCopper(userId, paidFromWallet);
+  const debtAdded = loss - paidFromWallet;
+  if (debtAdded > 0) await eco.addDebt(userId, debtAdded);
+  // Only real cash actually taken flows to the Don — debt isn't minted as income.
+  if (paidFromWallet > 0 && deps && typeof deps.vig === "function") {
+    await deps.vig(paidFromWallet);
+  }
+  return { paidFromWallet, debtAdded };
+}
 
 // ── Flavor pools ────────────────────────────────────────────────────────────────
 const WORK_JOBS = [
@@ -114,7 +135,7 @@ async function doWork(userId, rankLevel, isDon) {
 }
 
 // ── CRIME — risky, bigger reward, can backfire ──────────────────────────────────
-async function doCrime(userId, rankLevel, isDon) {
+async function doCrime(userId, rankLevel, isDon, deps = {}) {
   const cd = checkCooldown("crime", userId, CRIME_COOLDOWN_MS, isDon);
   if (cd) return `⏰ Too hot on the streets right now. Lay low for **${cd}**.`;
 
@@ -134,16 +155,18 @@ async function doCrime(userId, rankLevel, isDon) {
       `New balance: ${eco.formatWallet(newW)}`
     );
   } else if (roll < 0.85) {
-    // Caught — fine (capped at what they have)
-    const wallet = await eco.getWallet(userId);
-    const have = eco.walletToCopper(wallet);
-    const fine = Math.min(have, Math.floor(rint(6000, 16000) * mult));
-    if (fine > 0) await eco.deductCopper(userId, fine);
+    // Caught — fine is paid in full; shortfall becomes debt, cash goes to the Don.
+    // Sized to bite against the 9k–28k success payout so a bust is a real setback.
+    const fine = Math.floor(rint(12000, 30000) * mult);
+    const { debtAdded } = await applyLoss(userId, fine, deps, isDon);
     const newW = await eco.getWallet(userId);
+    const debtLine = debtAdded > 0
+      ? `\n🔴 You couldn't cover it — **💵 ${debtAdded.toLocaleString()} Cash** added to your debt to the Family.`
+      : "";
     return (
       `🚔 **Busted.**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `You tried to pull a job but ${pick(CRIME_CAUGHT)}. It cost you **💵 ${fine.toLocaleString()} Cash**.\n` +
+      `You tried to pull a job but ${pick(CRIME_CAUGHT)}. It cost you **💵 ${fine.toLocaleString()} Cash**.${debtLine}\n` +
       `New balance: ${eco.formatWallet(newW)}`
     );
   } else {
@@ -179,15 +202,18 @@ async function doScavenge(userId, rankLevel, isDon) {
 }
 
 // ── SMUGGLE — long cooldown, high stakes ────────────────────────────────────────
-async function doSmuggle(userId, rankLevel, isDon) {
+async function doSmuggle(userId, rankLevel, isDon, deps = {}) {
   const cd = checkCooldown("smuggle", userId, SMUGGLE_COOLDOWN_MS, isDon);
   if (cd) return `⏰ The route's being watched. Wait **${cd}** before the next run.`;
 
   setCooldown("smuggle", userId);
   const mult = rankMultiplier(rankLevel);
-  // Biggest payout on the board, so the odds are a coin-flip and busts hurt.
+  // Fair high-stakes coin-flip: win and bust are the SAME magnitude, so this is a
+  // real gamble, not a free printer. A bust is never capped at the wallet — what
+  // you can't cover in cash becomes debt to the Family, and the cash you do lose
+  // becomes the Don's vig.
   if (Math.random() < 0.48) {
-    const pay = Math.floor(rint(110000, 270000) * mult);
+    const pay = Math.floor(rint(70000, 160000) * mult);
     const newW = await eco.addCopper(userId, pay);
     recordQuest(userId, "smuggle");
     return (
@@ -197,15 +223,16 @@ async function doSmuggle(userId, rankLevel, isDon) {
       `New balance: ${eco.formatWallet(newW)}`
     );
   } else {
-    const wallet = await eco.getWallet(userId);
-    const have = eco.walletToCopper(wallet);
-    const loss = Math.min(have, Math.floor(rint(60000, 150000) * mult));
-    if (loss > 0) await eco.deductCopper(userId, loss);
+    const loss = Math.floor(rint(70000, 160000) * mult);
+    const { debtAdded } = await applyLoss(userId, loss, deps, isDon);
     const newW = await eco.getWallet(userId);
+    const debtLine = debtAdded > 0
+      ? `\n🔴 You couldn't cover it — **💵 ${debtAdded.toLocaleString()} Cash** added to your debt to the Family.`
+      : "";
     return (
       `💥 **Run went bad.**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `You ${pick(SMUGGLE_BUST)}. Lost **💵 ${loss.toLocaleString()} Cash** covering your tracks.\n` +
+      `You ${pick(SMUGGLE_BUST)}. The bill came to **💵 ${loss.toLocaleString()} Cash** covering your tracks.${debtLine}\n` +
       `New balance: ${eco.formatWallet(newW)}`
     );
   }
@@ -220,7 +247,9 @@ const QUEST_TEMPLATES = [
   { key: "crime",    goal: 2, label: "Land 2 successful crimes",  cmd: "Cosa crime" },
   { key: "scavenge", goal: 5, label: "Scavenge 5 times",          cmd: "Cosa scavenge" },
 ];
-const QUEST_BONUS = 3000;
+// Clearing the board drops a rarity-weighted item from the Family stash (see
+// features.grantRandomQuestItem) — jobs already pay plenty of Cash, so the reward
+// here is loot instead.
 
 // userId -> { day: "YYYY-MM-DD", progress: {work,crime,scavenge,...}, claimed: bool }
 const questState = new Map();
@@ -256,9 +285,9 @@ function getQuestBoard(userId) {
   });
   const all = questComplete(q);
   let footer;
-  if (q.claimed) footer = `🏆 Today's bonus already claimed. Resets at midnight UTC.`;
-  else if (all)  footer = `🎉 All done! Claim your **💵 ${QUEST_BONUS.toLocaleString()} Cash** bonus with **Cosa quest claim**.`;
-  else           footer = `Complete all three, then run **Cosa quest claim** for **💵 ${QUEST_BONUS.toLocaleString()} Cash**.`;
+  if (q.claimed) footer = `🏆 Today's reward already claimed. Resets at midnight UTC.`;
+  else if (all)  footer = `🎉 All done! Claim your **mystery item** from the Family stash with **Cosa quest claim** — could be anything up to 🟠 Legendary.`;
+  else           footer = `Complete all three, then run **Cosa quest claim** for a random item (rarer loot = luckier you).`;
   return (
     `📋 **DAILY BOUNTY BOARD** *(resets midnight UTC)*\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -270,15 +299,18 @@ function getQuestBoard(userId) {
 
 async function claimQuest(userId) {
   const q = getQuest(userId);
-  if (q.claimed) return `🏆 You've already claimed today's bounty bonus. Come back after midnight UTC.`;
+  if (q.claimed) return `🏆 You've already claimed today's bounty reward. Come back after midnight UTC.`;
   if (!questComplete(q)) return `🔫 You haven't finished all three bounties yet.\n\n${getQuestBoard(userId)}`;
   q.claimed = true;
-  const newW = await eco.addCopper(userId, QUEST_BONUS);
+  const reward = await features.grantRandomQuestItem(userId);
   return (
     `🏆 **BOUNTY BOARD CLEARED!**\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `Don Clint slides you a **💵 ${QUEST_BONUS.toLocaleString()} Cash** bonus for a productive day.\n` +
-    `New balance: ${eco.formatWallet(newW)}`
+    `Don Clint digs into the Family stash and tosses you some loot:\n` +
+    `${reward.rarityLabel} — **${reward.item.name}**\n` +
+    `*${reward.item.desc}*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `See it with **Cosa inventory** • use it with **Cosa use ${reward.item.id}**`
   );
 }
 
@@ -293,7 +325,7 @@ const JOBS_HELP = [
   "",
   "📋  QUESTS",
   "  Cosa quests     ← view the daily bounty board",
-  "  Cosa quest claim ← claim your all-done bonus",
+  "  Cosa quest claim ← clear the board for a random shop item (rarity-weighted)",
   "```",
 ].join("\n");
 

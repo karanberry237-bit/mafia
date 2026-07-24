@@ -1230,6 +1230,7 @@ const SHOP_ITEMS = {
     desc: "Immune to a shakedown for 24 hours",
     price: 50000,        // 50,000 Cash
     duration: 24 * 60 * 60 * 1000,
+    rarity: "common",
   },
   lucky_charm: {
     id: "lucky_charm",
@@ -1237,6 +1238,7 @@ const SHOP_ITEMS = {
     desc: "Better odds for 5 minutes — rerolls bad spins on slots (no match) & bad wheel spins (<1x), +5% coinflip win chance. No payout boost. Max 3 per day.",
     price: 5000000,      // 5,000,000 Cash — expensive for a reason
     duration: 5 * 60 * 1000,
+    rarity: "epic",
   },
   xp_boost: {
     id: "xp_boost",
@@ -1244,6 +1246,7 @@ const SHOP_ITEMS = {
     desc: "Double your next daily cut",
     price: 100000,       // 100,000 Cash
     duration: null,
+    rarity: "uncommon",
   },
   noble_pass: {
     id: "noble_pass",
@@ -1251,6 +1254,7 @@ const SHOP_ITEMS = {
     desc: "Skip a gambling cooldown once",
     price: 5000,         // 5,000 Cash
     duration: null,
+    rarity: "common",
   },
   heist_boost: {
     id: "heist_boost",
@@ -1258,6 +1262,7 @@ const SHOP_ITEMS = {
     desc: "+20% heist success chance for your next heist",
     price: 200000,       // 200,000 Cash
     duration: null,
+    rarity: "rare",
   },
   stock_tip: {
     id: "stock_tip",
@@ -1265,6 +1270,7 @@ const SHOP_ITEMS = {
     desc: "Shows pending buy/sell pressure + momentum signals for all stocks — see what's coming before the next candle",
     price: 100000,       // 100,000 Cash
     duration: null,
+    rarity: "uncommon",
   },
   kings_call: {
     id: "kings_call",
@@ -1272,7 +1278,20 @@ const SHOP_ITEMS = {
     desc: "Summons Don Clint to intervene in the market. He decides which stock and whether to pump or crash. 24h server cooldown. No refunds.",
     price: 10000000,     // 10,000,000 Cash
     duration: null,
+    rarity: "legendary",
   },
+};
+
+// ── Rarity → quest-drop weighting ─────────────────────────────────────────────
+// Higher weight = more likely to drop from a completed quest board. Legendary is
+// the jackpot (the 10M Don's Call), epic close behind (the 5M Loaded Dice).
+const RARITY_WEIGHT = { common: 100, uncommon: 45, rare: 20, epic: 6, legendary: 2 };
+const RARITY_LABEL  = {
+  common:    "⚪ Common",
+  uncommon:  "🟢 Uncommon",
+  rare:      "🔵 Rare",
+  epic:      "🟣 Epic",
+  legendary: "🟠 Legendary",
 };
 
 const userInventories = new Map();
@@ -1543,6 +1562,46 @@ async function loadInventories() {
   } catch (e) { console.error("[LOAD INV]", e.message); }
 }
 
+// ── Granting items (no charge) ────────────────────────────────────────────────
+// Drops an item straight into a player's inventory — used by quest rewards.
+// Mirrors buyShopItem's inventory bookkeeping (uses vs. timed duration) but skips
+// payment and daily-limit checks entirely.
+function grantItem(userId, itemId, quantity = 1) {
+  const item = SHOP_ITEMS[itemId];
+  if (!item) return null;
+  if (!userInventories.has(userId)) userInventories.set(userId, {});
+  const inv = userInventories.get(userId);
+
+  if (item.duration) {
+    const currentExpiry = inv[itemId]?.expiresAt || Date.now();
+    const newExpiry = Math.max(Date.now(), currentExpiry) + item.duration * quantity;
+    inv[itemId] = { expiresAt: newExpiry };
+    const timeLeft = newExpiry - Date.now();
+    setTimeout(() => {
+      const i = userInventories.get(userId);
+      if (i && i[itemId]?.expiresAt <= Date.now()) delete i[itemId];
+    }, timeLeft);
+  } else {
+    inv[itemId] = { uses: (inv[itemId]?.uses || 0) + quantity };
+  }
+
+  saveInventory(userId, inv).catch(() => {});
+  return item;
+}
+
+// Picks one shop item weighted by rarity and grants it. Returns the granted item
+// plus its rarity label for display. Legendary is the rare jackpot.
+async function grantRandomQuestItem(userId) {
+  const ids = Object.keys(SHOP_ITEMS);
+  const weighted = ids.map(id => ({ id, w: RARITY_WEIGHT[SHOP_ITEMS[id].rarity] || 10 }));
+  const total = weighted.reduce((a, x) => a + x.w, 0);
+  let r = Math.random() * total;
+  let chosenId = weighted[weighted.length - 1].id;
+  for (const x of weighted) { r -= x.w; if (r <= 0) { chosenId = x.id; break; } }
+  const item = grantItem(userId, chosenId, 1);
+  return { item, rarity: item.rarity, rarityLabel: RARITY_LABEL[item.rarity] || item.rarity };
+}
+
 module.exports = {
   initFeatures,
   // AFK
@@ -1573,4 +1632,5 @@ module.exports = {
   // Shop
   SHOP_ITEMS, buyShopItem, useShopItem, hasEffect, consumeItem,
   getShopDisplay, getInventoryDisplay, loadInventories,
+  grantItem, grantRandomQuestItem, RARITY_LABEL,
 };
