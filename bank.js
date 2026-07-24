@@ -164,8 +164,33 @@ async function wipeAllBanks() {
   return true;
 }
 
+// ── Vault Skip — permanent, once-per-account-ever flag ───────────────────────
+// Stored in empire_data (not the shop inventory) so the "used" state survives
+// even if the item somehow ends up back in someone's inventory later.
+async function isVaultSkipUsed(userId) {
+  try {
+    const { data } = await supabase.from("empire_data").select("value").eq("key", "vault_skip_used_" + userId).maybeSingle();
+    return !!data?.value?.used;
+  } catch (e) {
+    console.error("[VAULT SKIP CHECK]", e.message);
+    return false;
+  }
+}
+
+async function markVaultSkipUsed(userId) {
+  try {
+    await supabase.from("empire_data").upsert(
+      { key: "vault_skip_used_" + userId, value: { used: true, usedAt: new Date().toISOString() } },
+      { onConflict: "key" }
+    );
+  } catch (e) {
+    console.error("[VAULT SKIP MARK]", e.message);
+  }
+}
+
 module.exports = {
   initBank, getBankAccount, saveBankAccount, deposit, withdraw,
   upgradeTier, getBankBalance, deductFromBank, formatCopper,
-  runDailyBankProcessing, wipeAllBanks, VAULT_TIERS, TIER_ORDER, getNextTier, processBank
+  runDailyBankProcessing, wipeAllBanks, VAULT_TIERS, TIER_ORDER, getNextTier, processBank,
+  isVaultSkipUsed, markVaultSkipUsed,
 };
