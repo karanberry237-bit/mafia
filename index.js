@@ -6047,12 +6047,16 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const now = Date.now();
       const last = w.last_daily ? new Date(w.last_daily).getTime() : 0;
       const cooldown = 20 * 60 * 60 * 1000; // 20 hours
-      if (now - last < cooldown) {
+      const dailyCooldownActive = (now - last) < cooldown;
+      const secondWindActive = features.hasEffect(message.author.id, "second_wind");
+      if (dailyCooldownActive && !secondWindActive) {
         const remaining = cooldown - (now - last);
         const hrs = Math.floor(remaining / 3600000);
         const mins = Math.floor((remaining % 3600000) / 60000);
         return `⏰ You already claimed your daily. Come back in **${hrs}h ${mins}m**.`;
       }
+      const secondWindUsed = dailyCooldownActive && secondWindActive;
+      if (secondWindUsed) features.consumeItem(message.author.id, "second_wind");
       const rankKey = getFamilyRank(message.author.id) || "streetrat";
       const reward = eco.getDailyAmount(rankKey);
       const marriageBonus = await features.getMarriageBonus(message.author.id);
@@ -6078,9 +6082,10 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const newW = await eco.addCopper(message.author.id, finalReward);
       newW.last_daily = new Date().toISOString();
       await eco.saveWallet(newW);
-      const marriageLine = marriageBonus > 0 ? `\n💍 **Marriage bonus:** +10% applied!` : "";
+      const marriageLine = marriageBonus > 0 ? `\n💍 **Marriage bonus:** +${Math.round(marriageBonus * 100)}% applied!${marriageBonus > 0.10 ? " (Honeymoon Fund active)" : ""}` : "";
       const boostLine = hasBoost ? `\n💎 **Daily Boost:** 2x applied!` : "";
-      return "📅 **Daily Cut Claimed!**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou received: " + eco.formatWallet(eco.fromCopper(finalReward)) + marriageLine + boostLine + "\nNew balance: " + eco.formatWallet(newW) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Higher rank in the Family = better daily cut.*" + debtReminderSuffix;
+      const secondWindLine = secondWindUsed ? `\n💰 **Second Wind** let you claim early — this window's used up now.` : "";
+      return "📅 **Daily Cut Claimed!**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou received: " + eco.formatWallet(eco.fromCopper(finalReward)) + marriageLine + boostLine + secondWindLine + "\nNew balance: " + eco.formatWallet(newW) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Higher rank in the Family = better daily cut.*" + debtReminderSuffix;
     }
     case "work":
     case "crime":
@@ -6296,18 +6301,22 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         if (!deducted) return "Insufficient funds. Check your balance with **Cosa balance**.";
       }
       const slotsCharmActive = features.hasEffect(message.author.id, "lucky_charm");
-      const result = eco.playSlots(bet, slotsCharmActive);
+      const slotsHouseFavorActive = features.hasEffect(message.author.id, "house_favor");
+      const result = eco.playSlots(bet, slotsCharmActive, slotsHouseFavorActive);
+      if (slotsHouseFavorActive) features.consumeItem(message.author.id, "house_favor");
       let msg = "🎰 **FAMILY SLOTS**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[ " + result.display + " ]\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
       if (result.winnings > 0) {
         if (message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, result.winnings);
         const charmLine = slotsCharmActive ? " 🍀" : "";
-        msg += result.isJackpot ? "🎉 **JACKPOT! " + result.multiplier + "x** — You won **💵 " + result.winnings.toLocaleString() + " Cash**!" + charmLine : "✅ **" + result.multiplier + "x** — You won **💵 " + result.winnings.toLocaleString() + " Cash**!" + charmLine;
+        const favorLine = slotsHouseFavorActive ? " 🎩" : "";
+        msg += result.isJackpot ? "🎉 **JACKPOT! " + result.multiplier + "x** — You won **💵 " + result.winnings.toLocaleString() + " Cash**!" + charmLine + favorLine : "✅ **" + result.multiplier + "x** — You won **💵 " + result.winnings.toLocaleString() + " Cash**!" + charmLine + favorLine;
       } else {
         msg += "💀 **Nothing.** You lost **💵 " + bet.toLocaleString() + " Cash**. The Family thanks you." + debtReminderSuffix;
         await eco.addCopper(MASTER_ID, bet).catch(()=>{});
         addToTreasuryFees(bet, "gambling");
         await bank.deposit(MASTER_ID, bet).catch(()=>{});
       }
+      if (slotsHouseFavorActive) msg += "\n🎩 **House Favor** protected you from a total wipeout this spin!";
       return msg;
     }
     case "coinflip": {
@@ -6347,11 +6356,13 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         if (!deducted) return "Insufficient funds.";
       }
       const wheelCharmActive = features.hasEffect(message.author.id, "lucky_charm");
-      let seg = eco.spinWheel();
+      const wheelHouseFavorActive = features.hasEffect(message.author.id, "house_favor");
+      let seg = eco.spinWheel(wheelHouseFavorActive);
       // Lucky charm: reroll once if bankrupt or 0.5x (both count as losses)
       if (wheelCharmActive && seg.multiplier <= 0.5) {
-        seg = eco.spinWheel();
+        seg = eco.spinWheel(wheelHouseFavorActive);
       }
+      if (wheelHouseFavorActive) features.consumeItem(message.author.id, "house_favor");
       const winnings = Math.floor(bet * seg.multiplier);
       if (winnings > 0 && message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, winnings);
       if (winnings === 0 && message.author.id !== MASTER_ID) {
@@ -6359,14 +6370,16 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         addToTreasuryFees(bet, "gambling");
       }
       const charmLineWH = wheelCharmActive ? " 🍀" : "";
+      const favorLineWH = wheelHouseFavorActive ? " 🎩" : "";
       let wheelResult;
       if (winnings > 0) {
-        wheelResult = "✅ You won **💵 " + winnings.toLocaleString() + " Cash**!" + charmLineWH;
+        wheelResult = "✅ You won **💵 " + winnings.toLocaleString() + " Cash**!" + charmLineWH + favorLineWH;
       } else if (seg.multiplier === 0.5) {
-        wheelResult = "😬 **0.5x** — You lost half. The Family is merciful today." + charmLineWH;
+        wheelResult = "😬 **0.5x** — You lost half. The Family is merciful today." + charmLineWH + favorLineWH;
       } else {
         wheelResult = "💀 **BANKRUPT!** You lost everything. The Family claims your coins.";
       }
+      if (wheelHouseFavorActive) wheelResult += "\n🎩 **House Favor** protected you from the wipeout segments this spin!";
       return "🎡 **FAMILY WHEEL**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nThe wheel spins...\n\n🎯 **" + seg.label + "**\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + wheelResult;
     }
     case "blackjack": {
