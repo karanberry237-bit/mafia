@@ -1,5 +1,6 @@
 const { createClient } = require("@supabase/supabase-js");
 const eco = require("./economy.js");
+const bank = require("./bank.js");
 const ws = require("ws");
 
 let MASTER_ID;
@@ -1217,7 +1218,8 @@ async function getMarriage(userId) {
 
 async function getMarriageBonus(userId) {
   const m = await getMarriage(userId);
-  return m ? 0.10 : 0;
+  if (!m) return 0;
+  return hasEffect(userId, "honeymoon_fund") ? 0.20 : 0.10;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1280,6 +1282,22 @@ const SHOP_ITEMS = {
     duration: null,
     rarity: "legendary",
   },
+  vault_skip: {
+    id: "vault_skip",
+    name: "🔓 Vault Skip",
+    desc: "Instantly unlocks your next bank vault tier for free — skips the Cash upgrade cost entirely. ⚠️ ONE-TIME USE, EVER. Can't be bought again once used, no matter what.",
+    price: 25000000,     // 25,000,000 Cash — a one-shot legendary shortcut
+    duration: null,
+    rarity: "legendary",
+  },
+  honeymoon_fund: {
+    id: "honeymoon_fund",
+    name: "💍 Honeymoon Fund",
+    desc: "Doubles your marriage daily bonus (+10% → +20%) for 24 hours. Must be married to use.",
+    price: 150000,       // 150,000 Cash
+    duration: 24 * 60 * 60 * 1000,
+    rarity: "rare",
+  },
 };
 
 // ── Rarity → quest-drop weighting ─────────────────────────────────────────────
@@ -1325,6 +1343,16 @@ async function buyShopItem(userId, itemId, quantity = 1) {
   if (!item) return `🔫 Item not found. Check **Cosa shop** for available items.`;
   if (itemId === "rob_shield" && quantity > 1) return `🔫 **Snitch Insurance** can only be held one at a time. Buy 1.`;
   if (quantity < 1 || quantity > 100) return `🔫 Buy between 1 and 100 at a time.`;
+
+  // Vault Skip — permanent, once-per-account-ever. Blocked from re-purchase both
+  // after it's been used (checked against the permanent DB flag in bank.js) and
+  // while an unused copy is still sitting in inventory (no stockpiling).
+  if (itemId === "vault_skip") {
+    if (quantity > 1) return `🔫 **${item.name}** can only ever be bought once. Buy 1.`;
+    if (await bank.isVaultSkipUsed(userId)) return `🔫 You've already used your **one lifetime Vault Skip**. It can never be bought again.`;
+    const existingOwned = (userInventories.get(userId) || {})[itemId];
+    if (existingOwned && (existingOwned.uses || 0) > 0) return `🔫 You already own an unused **${item.name}** — use it with **Cosa use vault_skip** first. You only ever get one, so it can't be bought again on top of it.`;
+  }
 
   // Daily purchase limits
   const DAILY_LIMITS = { lucky_charm: 3 };
@@ -1399,6 +1427,34 @@ async function useShopItem(userId, itemId, quantity = 1) {
     if (quantity > owned.uses) return `🔫 You only have **${owned.uses}** use(s) of **${item.name}**.`;
   }
 
+  // Special case: Vault Skip — one-time-ever free tier upgrade
+  if (itemId === "vault_skip") {
+    if (await bank.isVaultSkipUsed(userId)) {
+      owned.uses = 0;
+      await saveInventory(userId, inv);
+      return `🔫 Your one lifetime **${item.name}** has already been used — this copy is void.`;
+    }
+    const account = await bank.getBankAccount(userId);
+    const nextTierKey = bank.getNextTier(account.vault_tier);
+    if (!nextTierKey) {
+      return `🔫 You're already at the highest vault tier available to you — nothing to skip to. **${item.name}** was **NOT** consumed; hang onto it.`;
+    }
+    if (nextTierKey === "donsvault" && userId !== MASTER_ID) {
+      return `🚫 The Don's Vault is reserved for the boss alone — **${item.name}** can't unlock it. Not consumed.`;
+    }
+    account.vault_tier = nextTierKey;
+    await bank.saveBankAccount(account);
+    owned.uses = 0;
+    await saveInventory(userId, inv);
+    await bank.markVaultSkipUsed(userId);
+    const tierInfo = bank.VAULT_TIERS[nextTierKey];
+    return (
+      `🔓 **VAULT SKIP USED!**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `Your vault jumped straight to **${tierInfo.label}** — the usual **${bank.formatCopper(tierInfo.cost)}** upgrade cost was waived.\n` +
+      `⚠️ *This was a once-in-a-lifetime item — you cannot buy or use another, ever.*`
+    );
+  }
+
   // Special case: market intel
   if (itemId === "stock_tip") {
     owned.uses = 0;
@@ -1462,6 +1518,12 @@ async function useShopItem(userId, itemId, quantity = 1) {
     return `🪪 **Made Pass ready** — you have **${available}** use(s). Next time you hit a gambling cooldown it will be skipped automatically.`;
   }
 
+  // Honeymoon Fund needs an active marriage to have anything to boost
+  if (itemId === "honeymoon_fund") {
+    const marriage = await getMarriage(userId);
+    if (!marriage) return `🔫 You're not married — **${item.name}** has nothing to boost. Get hitched first with **Cosa marry**. Not consumed.`;
+  }
+
   if (!activeEffects.has(userId)) activeEffects.set(userId, new Set());
   activeEffects.get(userId).add(itemId);
 
@@ -1496,6 +1558,24 @@ function consumeItem(userId, itemId) {
     inv[itemId].uses = Math.max(0, inv[itemId].uses - 1);
     saveInventory(userId, inv).catch(() => {});
   }
+}
+
+// Read-only peek at every shop item currently active/usable for a user
+// (used by the /cooldowns command). Never mutates anything.
+function getActiveEffectsSummary(userId) {
+  const inv = userInventories.get(userId) || {};
+  const now = Date.now();
+  const out = [];
+  for (const [itemId, owned] of Object.entries(inv)) {
+    const item = SHOP_ITEMS[itemId];
+    if (!item || !owned) continue;
+    if (owned.expiresAt && owned.expiresAt > now) {
+      out.push({ itemId, name: item.name, kind: "timed", remainingMs: owned.expiresAt - now });
+    } else if (!owned.expiresAt && (owned.uses || 0) > 0) {
+      out.push({ itemId, name: item.name, kind: "uses", usesLeft: owned.uses });
+    }
+  }
+  return out;
 }
 
 function getShopDisplay() {
@@ -1631,6 +1711,7 @@ module.exports = {
   MARRIAGE_COST, DIVORCE_COST,
   // Shop
   SHOP_ITEMS, buyShopItem, useShopItem, hasEffect, consumeItem,
+  getActiveEffectsSummary,
   getShopDisplay, getInventoryDisplay, loadInventories,
   grantItem, grantRandomQuestItem, RARITY_LABEL,
 };
