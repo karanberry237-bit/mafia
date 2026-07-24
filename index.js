@@ -2012,6 +2012,16 @@ const groqKeys = [
 const AI_MODEL_CHAT  = process.env.GROQ_MODEL_CHAT  || "llama-3.1-8b-instant";
 const AI_MODEL_PARSE = process.env.GROQ_MODEL_PARSE || "llama-3.3-70b-versatile";
 
+// Only genuine reasoning models accept the `reasoning_format` parameter. Sending
+// it to a non-reasoning model (llama-3.3-70b-versatile, llama-3.1-8b-instant)
+// makes Groq return a 400, which used to make aiParseGodCommands throw and every
+// AI-parsed god/Jarvis command silently fall through to plain chat — the bot
+// would TALK but never ACT. Gate the param on the model name so it's only ever
+// sent where it's valid.
+function isReasoningModel(model) {
+  return /gpt-oss|qwen|deepseek|minimax|magistral|reasoning|r1\b/i.test(model || "");
+}
+
 const groqClients = groqKeys.map(key => new Groq({ apiKey: key }));
 let currentGroqIndex = 0;
 
@@ -2123,7 +2133,7 @@ async function rateLimitedGroqCall(messages, opts = {}) {
       );
       const callPromise = client.chat.completions.create({
         model: opts.model || AI_MODEL_CHAT,
-        ...(opts.reasoningFormat ? { reasoning_format: opts.reasoningFormat } : {}),
+        ...(opts.reasoningFormat && isReasoningModel(opts.model || AI_MODEL_CHAT) ? { reasoning_format: opts.reasoningFormat } : {}),
         max_tokens: opts.maxTokens || 150,
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
         ...(opts.jsonMode ? { response_format: { type: "json_object" } } : {}),
@@ -3062,6 +3072,10 @@ RULES:
 - channelId must come from a <#123...> mention in the message or the id listed in the server context. If the owner says "this channel" for lock/slowmode/rename, use the current channel id from the context.
 - For give_role/remove_role/edit_role/delete_channel/delete_category, match names against the EXISTING roles/channels in the context (case-insensitive, closest match). create_role/create_channel may use new names.
 - One sentence can contain several actions — output them all, in order.
+- A single instruction often CREATES a role and then GIVES it away. Emit create_role FIRST, then give_role, both referencing the EXACT same roleName. The role modifiers (hoist/color/position) belong on the create_role; the give_role just needs userId + the same roleName. "give it to @x" / "assign it to @x" / "and give <@id> that role" all mean give_role for the role just created.
+- Extract ONLY the actual role name, not the modifiers jammed after it. In "make a role called The Fool hoist it color white keep it at the top and give it to <@1319283946520838195>" the roleName is exactly "The Fool" — "hoist"/"color white"/"at the top" are separate fields, not part of the name. Correct output:
+  {"actions":[{"action":"create_role","roleName":"The Fool","color":"white","hoist":true,"position":"top"},{"action":"give_role","userId":"1319283946520838195","roleName":"The Fool"}]}
+- "keep it at the top"/"put it at the top"/"highest" = position "top"; "at the bottom"/"lowest" = position "bottom". "hoist"/"hoist it"/"show it separately"/"display separately" = hoist true; "don't hoist"/"unhoist" = hoist false.
 - "shut him up" / "silence him" = mute. "get rid of" a channel = delete. "get rid of"/"throw out" a person = kick. "make him X" where X is a role = give_role.
 - NEVER include "permissions" on create_role/edit_role unless the owner explicitly named a specific permission (e.g. "give it administrator", "with mention everyone perm", "manage nicknames"). If no permission was mentioned, omit the field entirely — do NOT guess, default, or add anything "reasonable". A new role must come out with NO permissions unless told otherwise.
 - Valid permission names: Administrator, MentionEveryone, ManageNicknames, ManageRoles, ManageChannels, ManageMessages, ManageGuild, ManageWebhooks, ManageEmojisAndStickers, ManageEvents, ManageThreads, KickMembers, BanMembers, MuteMembers, DeafenMembers, MoveMembers, ModerateMembers, ViewAuditLog, PrioritySpeaker.
@@ -3092,6 +3106,19 @@ async function aiParseGodCommands(text, guild, message) {
     console.error("[GOD AI PARSE]", e.message);
     return null;
   }
+}
+
+// Resolves a role by name, case-insensitive. Falls back to a fresh API fetch
+// when the cache misses — this matters inside a batch where one action creates
+// a role ("The Fool") and the very next action ("give it to @x") must find it
+// even if discord.js hasn't settled the cache yet.
+async function findRoleByName(guild, name) {
+  if (!name) return null;
+  const target = name.toLowerCase();
+  let role = guild.roles.cache.find(r => r.name.toLowerCase() === target);
+  if (role) return role;
+  await guild.roles.fetch().catch(() => {});
+  return guild.roles.cache.find(r => r.name.toLowerCase() === target) || null;
 }
 
 async function executeGodAction(cmd, guild, adminCh) {
@@ -3148,7 +3175,7 @@ async function executeGodAction(cmd, guild, adminCh) {
         return `✅ Role **${role.name}** has been forged${extras.length ? " — " + extras.join(", ") : ""}.`;
       }
       case "edit_role": {
-        const role = guild.roles.cache.find(r => r.name.toLowerCase() === cmd.roleName.toLowerCase());
+        const role = await findRoleByName(guild, cmd.roleName);
         if (!role) return `Role **${cmd.roleName}** not found.`;
         const COLOR_NAMES = {
           red: "#ED4245", green: "#57F287", blue: "#5865F2", yellow: "#FEE75C",
@@ -3188,7 +3215,7 @@ async function executeGodAction(cmd, guild, adminCh) {
         return `✅ Role **${role.name}** updated${extras.length ? " — " + extras.join(", ") : ""}.`;
       }
       case "give_role": {
-        const role = guild.roles.cache.find(r => r.name.toLowerCase() === cmd.roleName.toLowerCase());
+        const role = await findRoleByName(guild, cmd.roleName);
         if (!role) return `Role **${cmd.roleName}** not found.`;
         const member = await guild.members.fetch(cmd.userId).catch(() => null);
         if (!member) return `Member not found.`;
@@ -3199,7 +3226,7 @@ async function executeGodAction(cmd, guild, adminCh) {
         return `✅ Role **${role.name}** granted to <@${cmd.userId}>.`;
       }
       case "remove_role": {
-        const role = guild.roles.cache.find(r => r.name.toLowerCase() === cmd.roleName.toLowerCase());
+        const role = await findRoleByName(guild, cmd.roleName);
         if (!role) return `Role **${cmd.roleName}** not found.`;
         const member = await guild.members.fetch(cmd.userId).catch(() => null);
         if (!member) return `Member not found.`;

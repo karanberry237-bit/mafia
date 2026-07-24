@@ -10,8 +10,8 @@ const features = require("./features");
 
 // ── Cooldowns ──────────────────────────────────────────────────────────────────
 const WORK_COOLDOWN_MS     = 30 * 60 * 1000;      // 30 min
-const CRIME_COOLDOWN_MS    = 45 * 60 * 1000;      // 45 min
-const SCAVENGE_COOLDOWN_MS = 10 * 60 * 1000;      // 10 min
+const CRIME_COOLDOWN_MS    = 22.5 * 60 * 1000;    // 22.5 min (halved from 45)
+const SCAVENGE_COOLDOWN_MS = 5 * 60 * 1000;       // 5 min (halved from 10)
 const SMUGGLE_COOLDOWN_MS  = 90 * 60 * 1000;      // 90 min
 
 const cooldowns = {
