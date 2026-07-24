@@ -35,6 +35,19 @@ function checkCooldown(kind, userId, ms, isDon) {
 }
 function setCooldown(kind, userId) { cooldowns[kind].set(userId, Date.now()); }
 
+// Fast Hands: if active, halve the cooldown this job action sets and consume
+// the item. Works by back-dating the "last used" timestamp by half the
+// cooldown window, so checkCooldown sees half the wait already elapsed.
+function setCooldownMaybeHalved(kind, userId, ms, isDon) {
+  if (!isDon && features.hasEffect(userId, "fast_hands")) {
+    cooldowns[kind].set(userId, Date.now() - ms / 2);
+    features.consumeItem(userId, "fast_hands");
+    return true; // fast hands triggered
+  }
+  cooldowns[kind].set(userId, Date.now());
+  return false;
+}
+
 // Read-only peek at all job cooldowns for a user (used by the /cooldowns command).
 // Reuses checkCooldown, which never mutates state — safe to call anytime.
 function getCooldownStatus(userId, isDon) {
@@ -133,7 +146,7 @@ async function doWork(userId, rankLevel, isDon) {
   const mult = rankMultiplier(rankLevel);
   const pay = Math.floor(rint(2500, 8000) * mult);
   const job = pick(WORK_JOBS);
-  setCooldown("work", userId);
+  const fastHandsUsed = setCooldownMaybeHalved("work", userId, WORK_COOLDOWN_MS, isDon);
   const newW = await eco.addCopper(userId, pay);
   recordQuest(userId, "work");
 
@@ -141,7 +154,8 @@ async function doWork(userId, rankLevel, isDon) {
     `💼 **Honest Work** *(well, honest-ish)*\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `You ${job.verb} ${job.where} and earned **💵 ${pay.toLocaleString()} Cash**.\n` +
-    `New balance: ${eco.formatWallet(newW)}`
+    `New balance: ${eco.formatWallet(newW)}` +
+    (fastHandsUsed ? `\n⚡ **Fast Hands** cut this cooldown in half!` : "")
   );
 }
 
@@ -150,7 +164,8 @@ async function doCrime(userId, rankLevel, isDon, deps = {}) {
   const cd = checkCooldown("crime", userId, CRIME_COOLDOWN_MS, isDon);
   if (cd) return `⏰ Too hot on the streets right now. Lay low for **${cd}**.`;
 
-  setCooldown("crime", userId);
+  const fastHandsUsed = setCooldownMaybeHalved("crime", userId, CRIME_COOLDOWN_MS, isDon);
+  const fastHandsLine = fastHandsUsed ? `\n⚡ **Fast Hands** cut this cooldown in half!` : "";
   const mult = rankMultiplier(rankLevel);
   const roll = Math.random();
 
@@ -163,29 +178,36 @@ async function doCrime(userId, rankLevel, isDon, deps = {}) {
       `🔫 **Score!**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
       `You ${pick(CRIME_SUCCESS)} and walked with **💵 ${pay.toLocaleString()} Cash**.\n` +
-      `New balance: ${eco.formatWallet(newW)}`
+      `New balance: ${eco.formatWallet(newW)}${fastHandsLine}`
     );
   } else if (roll < 0.85) {
     // Caught — fine is paid in full; shortfall becomes debt, cash goes to the Don.
     // Sized to bite against the 9k–28k success payout so a bust is a real setback.
-    const fine = Math.floor(rint(12000, 30000) * mult);
+    let fine = Math.floor(rint(12000, 30000) * mult);
+    let crewBackupUsed = false;
+    if (!isDon && features.hasEffect(userId, "crew_backup")) {
+      fine = Math.floor(fine / 2);
+      features.consumeItem(userId, "crew_backup");
+      crewBackupUsed = true;
+    }
     const { debtAdded } = await applyLoss(userId, fine, deps, isDon);
     const newW = await eco.getWallet(userId);
     const debtLine = debtAdded > 0
       ? `\n🔴 You couldn't cover it — **💵 ${debtAdded.toLocaleString()} Cash** added to your debt to the Family.`
       : "";
+    const crewLine = crewBackupUsed ? `\n👥 **Crew Backup** cut your losses in half!` : "";
     return (
       `🚔 **Busted.**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `You tried to pull a job but ${pick(CRIME_CAUGHT)}. It cost you **💵 ${fine.toLocaleString()} Cash**.${debtLine}\n` +
-      `New balance: ${eco.formatWallet(newW)}`
+      `You tried to pull a job but ${pick(CRIME_CAUGHT)}. It cost you **💵 ${fine.toLocaleString()} Cash**.${debtLine}${crewLine}\n` +
+      `New balance: ${eco.formatWallet(newW)}${fastHandsLine}`
     );
   } else {
     // Clean escape, no gain
     return (
       `🏃 **Aborted.**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `The job smelled wrong so you bailed. No cash, but no heat either.`
+      `The job smelled wrong so you bailed. No cash, but no heat either.${fastHandsLine}`
     );
   }
 }
@@ -195,7 +217,7 @@ async function doScavenge(userId, rankLevel, isDon) {
   const cd = checkCooldown("scavenge", userId, SCAVENGE_COOLDOWN_MS, isDon);
   if (cd) return `⏰ Nothing left to pick over yet. Try again in **${cd}**.`;
 
-  setCooldown("scavenge", userId);
+  const fastHandsUsed = setCooldownMaybeHalved("scavenge", userId, SCAVENGE_COOLDOWN_MS, isDon);
   let pay = rint(400, 1800);
   let bonusLine = "";
   if (Math.random() < 0.08) {
@@ -208,7 +230,8 @@ async function doScavenge(userId, rankLevel, isDon) {
   return (
     `🔦 **Scavenging**\n` +
     `You ${pick(SCAVENGE_FINDS)} — **💵 ${pay.toLocaleString()} Cash**.${bonusLine}\n` +
-    `New balance: ${eco.formatWallet(newW)}`
+    `New balance: ${eco.formatWallet(newW)}` +
+    (fastHandsUsed ? `\n⚡ **Fast Hands** cut this cooldown in half!` : "")
   );
 }
 
@@ -217,7 +240,8 @@ async function doSmuggle(userId, rankLevel, isDon, deps = {}) {
   const cd = checkCooldown("smuggle", userId, SMUGGLE_COOLDOWN_MS, isDon);
   if (cd) return `⏰ The route's being watched. Wait **${cd}** before the next run.`;
 
-  setCooldown("smuggle", userId);
+  const fastHandsUsed = setCooldownMaybeHalved("smuggle", userId, SMUGGLE_COOLDOWN_MS, isDon);
+  const fastHandsLine = fastHandsUsed ? `\n⚡ **Fast Hands** cut this cooldown in half!` : "";
   const mult = rankMultiplier(rankLevel);
   // Fair high-stakes coin-flip: win and bust are the SAME magnitude, so this is a
   // real gamble, not a free printer. A bust is never capped at the wallet — what
@@ -231,20 +255,27 @@ async function doSmuggle(userId, rankLevel, isDon, deps = {}) {
       `🚢 **Shipment delivered.**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
       `You ${pick(SMUGGLE_ROUTES)} and cleared **💵 ${pay.toLocaleString()} Cash**.\n` +
-      `New balance: ${eco.formatWallet(newW)}`
+      `New balance: ${eco.formatWallet(newW)}${fastHandsLine}`
     );
   } else {
-    const loss = Math.floor(rint(70000, 160000) * mult);
+    let loss = Math.floor(rint(70000, 160000) * mult);
+    let crewBackupUsed = false;
+    if (!isDon && features.hasEffect(userId, "crew_backup")) {
+      loss = Math.floor(loss / 2);
+      features.consumeItem(userId, "crew_backup");
+      crewBackupUsed = true;
+    }
     const { debtAdded } = await applyLoss(userId, loss, deps, isDon);
     const newW = await eco.getWallet(userId);
     const debtLine = debtAdded > 0
       ? `\n🔴 You couldn't cover it — **💵 ${debtAdded.toLocaleString()} Cash** added to your debt to the Family.`
       : "";
+    const crewLine = crewBackupUsed ? `\n👥 **Crew Backup** cut your losses in half!` : "";
     return (
       `💥 **Run went bad.**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `You ${pick(SMUGGLE_BUST)}. The bill came to **💵 ${loss.toLocaleString()} Cash** covering your tracks.${debtLine}\n` +
-      `New balance: ${eco.formatWallet(newW)}`
+      `You ${pick(SMUGGLE_BUST)}. The bill came to **💵 ${loss.toLocaleString()} Cash** covering your tracks.${debtLine}${crewLine}\n` +
+      `New balance: ${eco.formatWallet(newW)}${fastHandsLine}`
     );
   }
 }
