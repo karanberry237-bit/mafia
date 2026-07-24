@@ -1298,6 +1298,38 @@ const SHOP_ITEMS = {
     duration: 24 * 60 * 60 * 1000,
     rarity: "rare",
   },
+  crew_backup: {
+    id: "crew_backup",
+    name: "👥 Crew Backup",
+    desc: "Halves the fine/loss on your next crime or smuggle bust. Only consumed if you actually get caught — a clean run or success leaves it untouched for next time.",
+    price: 90000,        // 90,000 Cash
+    duration: null,
+    rarity: "uncommon",
+  },
+  fast_hands: {
+    id: "fast_hands",
+    name: "⚡ Fast Hands",
+    desc: "Halves the cooldown set by your very next work/crime/scavenge/smuggle run — whichever job you do first after using this.",
+    price: 65000,        // 65,000 Cash
+    duration: null,
+    rarity: "uncommon",
+  },
+  house_favor: {
+    id: "house_favor",
+    name: "🎰 House Favor",
+    desc: "Guarantees no total-loss (💀/wipeout) result on your very next slots or wheel spin — whichever you play first. Doesn't boost payouts, just removes the floor once.",
+    price: 800000,       // 800,000 Cash
+    duration: null,
+    rarity: "rare",
+  },
+  second_wind: {
+    id: "second_wind",
+    name: "💰 Second Wind",
+    desc: "Lets you claim your daily reward a second time within the same 20h window, once.",
+    price: 3000000,      // 3,000,000 Cash — priced as a treat, not a farming loop
+    duration: null,
+    rarity: "epic",
+  },
 };
 
 // ── Rarity → quest-drop weighting ─────────────────────────────────────────────
@@ -1516,6 +1548,19 @@ async function useShopItem(userId, itemId, quantity = 1) {
     const available = owned.uses || 0;
     if (available <= 0) return `🔫 You have no **Made Pass** uses left.`;
     return `🪪 **Made Pass ready** — you have **${available}** use(s). Next time you hit a gambling cooldown it will be skipped automatically.`;
+  }
+
+  // Passive items — these apply automatically to the next relevant action
+  // (jobs.js / slots-wheel / daily handlers check hasEffect + consume them
+  // directly) rather than being manually "activated" via Cosa use.
+  const PASSIVE_AUTO_ITEMS = {
+    crew_backup: "It automatically halves your next crime/smuggle bust — no need to activate it, just go do the job.",
+    fast_hands:  "It automatically halves the cooldown from your next work/crime/scavenge/smuggle run — no need to activate it, just go do the job.",
+    house_favor: "It automatically guarantees no total-loss result on your next slots or wheel spin — no need to activate it, just go spin.",
+    second_wind: "It automatically lets your next **Cosa daily** ignore the cooldown — no need to activate it, just claim your daily.",
+  };
+  if (PASSIVE_AUTO_ITEMS[itemId]) {
+    return `🔫 **${item.name}** doesn't need to be manually used. ${PASSIVE_AUTO_ITEMS[itemId]} (Not consumed.)`;
   }
 
   // Honeymoon Fund needs an active marriage to have anything to boost
