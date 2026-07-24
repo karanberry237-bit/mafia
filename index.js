@@ -8225,6 +8225,7 @@ async function init() {
         const sub = interaction.options.getSubcommand();
         const isDon = interaction.user.id === MASTER_ID;
         const DON_ONLY_SUBS = new Set(["grant", "revoke", "editors"]);
+        const channelId = interaction.channel?.id;
 
         if (DON_ONLY_SUBS.has(sub)) {
           if (!isDon) {
@@ -8232,7 +8233,7 @@ async function init() {
             return;
           }
         } else {
-          const allowed = isDon || await leaderboard.isEditor(interaction.user.id);
+          const allowed = isDon || await leaderboard.isEditor(channelId, interaction.user.id);
           if (!allowed) {
             await interaction.reply({ content: "🔫 You don't have permission to manage the leaderboard.", ephemeral: true }).catch(() => {});
             return;
@@ -8243,30 +8244,30 @@ async function init() {
 
         if (sub === "grant") {
           const user = interaction.options.getUser("user");
-          const result = await leaderboard.addEditor(user.id);
+          const result = await leaderboard.addEditor(channelId, user.id);
           if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
           await interaction.editReply(
             result.alreadyPresent
-              ? `ℹ️ <@${user.id}> already has leaderboard permissions.`
-              : `✅ <@${user.id}> can now use \`/leaderboard set\`, \`remove\`, \`clear\`, \`post\`, \`refresh\`, and \`view\`.`
+              ? `ℹ️ <@${user.id}> already has leaderboard permissions in this channel.`
+              : `✅ <@${user.id}> can now use \`/leaderboard set\`, \`remove\`, \`clear\`, \`post\`, \`refresh\`, and \`view\` in this channel.`
           );
           return;
         }
         if (sub === "revoke") {
           const user = interaction.options.getUser("user");
-          const result = await leaderboard.removeEditor(user.id);
+          const result = await leaderboard.removeEditor(channelId, user.id);
           if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
           await interaction.editReply(
             result.wasPresent
-              ? `✅ <@${user.id}>'s leaderboard permissions have been revoked.`
-              : `ℹ️ <@${user.id}> didn't have leaderboard permissions.`
+              ? `✅ <@${user.id}>'s leaderboard permissions in this channel have been revoked.`
+              : `ℹ️ <@${user.id}> didn't have leaderboard permissions in this channel.`
           );
           return;
         }
         if (sub === "editors") {
-          const ids = await leaderboard.getEditorIds();
-          if (!ids.length) { await interaction.editReply("🏆 No editors granted yet — only Don Clint can manage the leaderboard."); return; }
-          await interaction.editReply("🏆 **Leaderboard editors:**\n" + ids.map(id => `• <@${id}>`).join("\n"));
+          const ids = await leaderboard.getEditorIds(channelId);
+          if (!ids.length) { await interaction.editReply("🏆 No editors granted yet in this channel — only Don Clint can manage the leaderboard."); return; }
+          await interaction.editReply("🏆 **Leaderboard editors (this channel):**\n" + ids.map(id => `• <@${id}>`).join("\n"));
           return;
         }
 
@@ -8276,42 +8277,42 @@ async function init() {
           const region = interaction.options.getString("region");
           const country = interaction.options.getString("country");
           const stage = interaction.options.getString("stage");
-          console.log("[LB SET CALL DEBUG] rank=", rank, "| typeof=", typeof rank, "| user=", user?.id, "| region=", region, "| country=", country, "| stage=", stage);
-          const result = await leaderboard.setEntry(rank, user.id, region, country, stage, interaction.guild?.id);
+          console.log("[LB SET CALL DEBUG] channel=", channelId, "| rank=", rank, "| typeof=", typeof rank, "| user=", user?.id, "| region=", region, "| country=", country, "| stage=", stage);
+          const result = await leaderboard.setEntry(channelId, rank, user.id, region, country, stage);
           if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
           const robloxNote = result.roblox
             ? `Linked Roblox: **${result.roblox.username || result.roblox.robloxId}**`
             : "⚠️ No Bloxlink-verified Roblox account found for that user — entry saved without an avatar.";
-          const liveNote = result.messageUpdated ? "Live leaderboard message updated." : "No leaderboard message posted yet — use `/leaderboard post` to put it up.";
+          const liveNote = result.messageUpdated ? "Live leaderboard message updated." : "No leaderboard message posted yet in this channel — use `/leaderboard post` to put it up.";
           await interaction.editReply(`✅ Set rank **#${rank}** to <@${user.id}>.\n${robloxNote}\n${liveNote}`);
           return;
         }
         if (sub === "remove") {
           const rank = interaction.options.getInteger("rank");
-          const result = await leaderboard.removeEntry(rank);
+          const result = await leaderboard.removeEntry(channelId, rank);
           if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
           await interaction.editReply(`✅ Removed rank **#${rank}**.` + (result.messageUpdated ? " Live message updated." : ""));
           return;
         }
         if (sub === "clear") {
-          await leaderboard.clearAll();
-          await interaction.editReply("✅ Leaderboard cleared.");
+          await leaderboard.clearAll(channelId);
+          await interaction.editReply("✅ Leaderboard cleared for this channel.");
           return;
         }
         if (sub === "post") {
-          const result = await leaderboard.postLeaderboard(interaction.channel);
+          const result = await leaderboard.postLeaderboard(channelId, interaction.channel);
           if (!result.success) { await interaction.editReply("🔫 " + result.reason); return; }
           await interaction.editReply("✅ Leaderboard posted. Future `/leaderboard set`/`remove` calls will update this message in place.");
           return;
         }
         if (sub === "refresh") {
-          const result = await leaderboard.refreshAll();
+          const result = await leaderboard.refreshAll(channelId);
           await interaction.editReply(`✅ Refreshed Roblox data for **${result.count}** entries.` + (result.messageUpdated ? " Live message updated." : " No posted message found — use `/leaderboard post`."));
           return;
         }
         if (sub === "view") {
-          const entries = await leaderboard.getAllEntries();
-          if (!entries.length) { await interaction.editReply("🏆 No leaderboard entries yet."); return; }
+          const entries = await leaderboard.getAllEntries(channelId);
+          if (!entries.length) { await interaction.editReply("🏆 No leaderboard entries yet in this channel."); return; }
           const embeds = entries.map(e => {
             const nameLine = e.roblox_id ? `[${e.roblox_username || "Unknown"}](https://www.roblox.com/users/${e.roblox_id}/profile)` : `<@${e.discord_id}>`;
             const eb = new EmbedBuilder().setDescription(`**#${e.rank} ${nameLine}**\n<@${e.discord_id}>\nRegion: - **${e.region || "—"}**\nCountry: - ${e.country_emoji || "—"}\nStage: - **${e.stage || "—"}**`);
