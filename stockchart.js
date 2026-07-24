@@ -61,9 +61,9 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 function formatPrice(cash) {
-  if (cash >= 1000000) return "💵" + (cash / 1000000).toFixed(2) + "M";
-  if (cash >= 1000)    return "💵" + (cash / 1000).toFixed(2) + "K";
-  return "💵" + Math.floor(cash).toLocaleString();
+  if (cash >= 1000000) return "$" + (cash / 1000000).toFixed(2) + "M";
+  if (cash >= 1000)    return "$" + (cash / 1000).toFixed(2) + "K";
+  return "$" + Math.floor(cash).toLocaleString();
 }
 
 function niceRange(min, max) {
