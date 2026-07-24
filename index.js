@@ -4340,6 +4340,7 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+(quest|bount(?:y|ies))\s+claim\b/.test(lower)) return { action: "quest_claim" };
   if (/\bcosa\s+(quests?|bount(?:y|ies))\b/.test(lower)) return { action: "quests" };
   if (/\bcosa\s+(jobs|hustles?)\b/.test(lower)) return { action: "jobs_help" };
+  if (/\bcosa\s+(cooldowns|cds?|timers)\b/.test(lower)) return { action: "cooldowns" };
   if (/\bcosa\s+clone\s+server\b/.test(lower)) {
     const idMatch = text.match(/(\d{17,20})/);
     return { action: "clone_server", sourceGuildId: idMatch ? idMatch[1] : null };
@@ -4588,6 +4589,7 @@ function detectPublicCommand(text, message) {
   if (/\bcosa\s+(quest|bount(?:y|ies))\s+claim\b/.test(lower)) return { action: "quest_claim" };
   if (/\bcosa\s+(quests?|bount(?:y|ies))\b/.test(lower)) return { action: "quests" };
   if (/\bcosa\s+(jobs|hustles?)\b/.test(lower)) return { action: "jobs_help" };
+  if (/\bcosa\s+(cooldowns|cds?|timers)\b/.test(lower)) return { action: "cooldowns" };
   if (/\bcosa\s+(leaderboard|richest|lb)\b/.test(lower)) return { action: "leaderboard" };
   if (/\bcosa\s+pay\b/.test(lower) && targetId) {
     const cleanText = text.replace(/<@!?\d+>/g, "").trim();
@@ -4798,7 +4800,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   }
 
   // Route eco commands to public handler
-  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb"];
+  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","cooldowns","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb"];
   if (ecoActions.includes(action)) {
     return await executePublicCommand(message, cmd, channelId);
   }
@@ -6103,6 +6105,102 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       return await jobs.claimQuest(message.author.id);
     case "jobs_help":
       return jobs.JOBS_HELP;
+    case "cooldowns": {
+      const isDon = message.author.id === MASTER_ID;
+      const userId = message.author.id;
+
+      function fmtMs(ms) {
+        const totalSecs = Math.ceil(ms / 1000);
+        const hrs = Math.floor(totalSecs / 3600);
+        const mins = Math.floor((totalSecs % 3600) / 60);
+        const secs = totalSecs % 60;
+        if (hrs > 0) return `${hrs}h ${mins}m`;
+        if (mins > 0) return `${mins}m ${secs}s`;
+        return `${secs}s`;
+      }
+      function cdLine(emoji, label, cdLeftStr) {
+        return cdLeftStr ? `${emoji} ${label}: ⏳ **${cdLeftStr}**` : `${emoji} ${label}: ✅ **Ready**`;
+      }
+
+      // Daily
+      let dailyLine;
+      if (isDon) {
+        dailyLine = cdLine("📅", "Daily", null);
+      } else {
+        const w = await eco.getWallet(userId);
+        const last = w.last_daily ? new Date(w.last_daily).getTime() : 0;
+        const dailyCd = 20 * 60 * 60 * 1000;
+        const left = dailyCd - (Date.now() - last);
+        dailyLine = cdLine("📅", "Daily", left > 0 ? fmtMs(left) : null);
+      }
+
+      // Jobs (work/crime/scavenge/smuggle)
+      const jobCds = jobs.getCooldownStatus(userId, isDon);
+      const jobLines = [
+        cdLine("💼", "Work", jobCds.work),
+        cdLine("🔫", "Crime", jobCds.crime),
+        cdLine("🔦", "Scavenge", jobCds.scavenge),
+        cdLine("🚢", "Smuggle", jobCds.smuggle),
+      ];
+
+      // Gambling — one shared cooldown across slots/coinflip/wheel/blackjack/race
+      let gambleLine;
+      const debt = await eco.getDebt(userId);
+      if (isDon) {
+        gambleLine = cdLine("🎰", "Gambling", null);
+      } else if (gamblingBlacklist.has(userId)) {
+        gambleLine = "🎰 Gambling: ⛔ **Blacklisted**";
+      } else if (debt > 0) {
+        gambleLine = "🎰 Gambling: 🔴 **Blocked — pay off your debt first**";
+      } else {
+        const lastGamble = gambleCooldowns.get(userId) || 0;
+        const leftGamble = GAMBLE_COOLDOWN_MS - (Date.now() - lastGamble);
+        gambleLine = cdLine("🎰", "Gambling", leftGamble > 0 ? fmtMs(leftGamble) : null);
+      }
+
+      // Rob
+      const lastRob = robCooldowns.get(userId) || 0;
+      const leftRob = ROB_COOLDOWN_MS - (Date.now() - lastRob);
+      const robLine = cdLine("🦹", "Rob", (!isDon && leftRob > 0) ? fmtMs(leftRob) : null);
+
+      // Chess challenge
+      const lastChess = chessCooldowns.get(userId) || 0;
+      const leftChess = CHESS_COOLDOWN_MS - (Date.now() - lastChess);
+      const chessLine = cdLine("♟️", "Chess challenge", (!isDon && leftChess > 0) ? fmtMs(leftChess) : null);
+
+      // Active loan (not a cooldown, but relevant "what's ticking" status)
+      const loan = activeLoanData.get(userId);
+      let loanLine = "";
+      if (loan) {
+        const daysLeft = Math.max(0, Math.ceil((loan.dueDate - Date.now()) / (24 * 60 * 60 * 1000)));
+        loanLine = `\n📋 Active loan: **💵 ${loan.amount.toLocaleString()} Cash** due in **${daysLeft} day(s)**`;
+      }
+
+      // Active shop item effects (timed buffs + remaining uses)
+      const activeEffects = features.getActiveEffectsSummary(userId);
+      let effectsLine = "";
+      if (activeEffects.length) {
+        const effLines = activeEffects.map(e =>
+          e.kind === "timed"
+            ? `${e.name} — **${fmtMs(e.remainingMs)}** left`
+            : `${e.name} — **${e.usesLeft}** use(s) left`
+        );
+        effectsLine = `\n🧪 Active items:\n` + effLines.map(l => `  • ${l}`).join("\n");
+      }
+
+      return (
+        `⏰ **YOUR COOLDOWNS**\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        dailyLine + "\n" +
+        jobLines.join("\n") + "\n" +
+        gambleLine + "\n" +
+        robLine + "\n" +
+        chessLine +
+        loanLine +
+        effectsLine +
+        (isDon ? "\n\n*Don Clint bypasses all cooldowns.*" : "")
+      );
+    }
     case "clone_server": {
       if (message.author.id !== MASTER_ID) return "🚫 Only Don Clint can clone a server's structure.";
       if (!cmd.sourceGuildId) return "Usage: `cosa clone server <sourceGuildId>` (run this in the destination server, and give me the source server's ID).";
