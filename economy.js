@@ -170,7 +170,7 @@ function spinSlot() {
   return SLOT_SYMBOLS[SLOT_SYMBOLS.length - 1];
 }
 
-function playSlots(bet, charmActive = false) {
+function playSlots(bet, charmActive = false, houseFavorActive = false) {
   const reels = [spinSlot(), spinSlot(), spinSlot()];
   // Loaded dice: reroll the worst reel once if no match
   if (charmActive) {
@@ -179,6 +179,16 @@ function playSlots(bet, charmActive = false) {
       // Find the odd one out and reroll it
       const idx = reels[0].emoji === reels[1].emoji ? 2 : reels[1].emoji === reels[2].emoji ? 0 : 1;
       reels[idx] = spinSlot();
+    }
+  }
+  // House Favor: guarantee no 💀 (total-loss) symbol makes it into the final result
+  if (houseFavorActive) {
+    for (let i = 0; i < reels.length; i++) {
+      let tries = 0;
+      while (reels[i].multiplier === 0 && tries < 8) {
+        reels[i] = spinSlot();
+        tries++;
+      }
     }
   }
   const display = reels.map(r => r.emoji).join(" | ");
@@ -211,11 +221,23 @@ const WHEEL_SEGMENTS = [
   { label: "5x ⚡",         multiplier: 5,   weight: 30  },
 ];
 
-function spinWheel() {
-  const total = WHEEL_SEGMENTS.reduce((a, s) => a + s.weight, 0);
-  let r = Math.random() * total;
-  for (const s of WHEEL_SEGMENTS) { r -= s.weight; if (r <= 0) return s; }
-  return WHEEL_SEGMENTS[0];
+function spinWheel(houseFavorActive = false) {
+  function roll() {
+    const total = WHEEL_SEGMENTS.reduce((a, s) => a + s.weight, 0);
+    let r = Math.random() * total;
+    for (const s of WHEEL_SEGMENTS) { r -= s.weight; if (r <= 0) return s; }
+    return WHEEL_SEGMENTS[0];
+  }
+  let seg = roll();
+  // House Favor: guarantee no true 0x wipeout segment (0.5x still can happen — that's a partial loss, not the floor)
+  if (houseFavorActive) {
+    let tries = 0;
+    while (seg.multiplier === 0 && tries < 8) {
+      seg = roll();
+      tries++;
+    }
+  }
+  return seg;
 }
 
 // ── Blackjack ─────────────────────────────────────────────────────────────────
