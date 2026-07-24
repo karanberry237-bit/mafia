@@ -142,7 +142,7 @@ function addToTreasuryFees(amount, type) {
   saveTreasuryStats().catch(() => {});
 }
 // robCooldowns, coinflipCooldowns: per-guild, see guildDataStore below.
-const ROB_COOLDOWN_MS = 5 * 60 * 1000;
+const ROB_COOLDOWN_MS = 30 * 60 * 1000;
 const COINFLIP_COOLDOWN_MS = 5 * 60 * 1000;
 const loanCooldowns = new Map();
 const activeLoanData = new Map(); // userId -> { amount, dueDate, rankKey }
@@ -3973,9 +3973,9 @@ function formatTime(ms) {
   if (ms < 86400000) return `${Math.round(ms/3600000)} hours`;
   return `${Math.round(ms/86400000)} days`;
 }
-function setPendingConfirm(channelId, action, data) {
+function setPendingConfirm(channelId, action, data, issuerId) {
   const ts = Date.now();
-  pendingConfirmations.set(channelId, { action, data, timestamp: ts });
+  pendingConfirmations.set(channelId, { action, data, timestamp: ts, issuerId });
   setTimeout(() => { if (pendingConfirmations.get(channelId)?.timestamp === ts) pendingConfirmations.delete(channelId); }, 30000);
 }
 
@@ -4786,7 +4786,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   }
   if (action === "eco_nuke") {
     if (userId !== MASTER_ID) return "Don only.";
-    setPendingConfirm(channelId, "eco_nuke", {});
+    setPendingConfirm(channelId, "eco_nuke", {}, userId);
     return "⚠️ **THIS WILL WIPE ALL BALANCES.** Type **yes** to confirm or ignore to cancel.";
   }
   if (action === "daily_rates") {
@@ -5111,11 +5111,11 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
         return `💥 **${rich.length} player(s) wiped** — anyone with 💵 10,000,000+ Cash has been reset to 0. The Family rebalances. 🤵`;
       } catch (e) { return `Failed: ${e.message}`; }
     }
-    case "ban_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "ban", { targetId, reason }); return `⚠️ **Ban <@${targetId}>?** Reason: *${reason}*\nSay **"yes"** to confirm. *(30s)*`;
-    case "kick_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "kick", { targetId, reason }); return `⚠️ **Kick <@${targetId}>?** Reason: *${reason}*\nSay **"yes"** to confirm. *(30s)*`;
-    case "strip_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "strip_role", { targetId }); return `⚠️ **Strip ALL roles from <@${targetId}>?** Say **"yes"** to confirm. *(30s)*`;
-    case "exile_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "exile", { targetId }); return `⚠️ **Exile <@${targetId}>?** Say **"yes"** to confirm. *(30s)*`;
-    case "temp_exile_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "temp_exile", { targetId, durationMs }); return `⚠️ **Temp exile <@${targetId}> for ${formatTime(durationMs)}?** Say **"yes"** to confirm. *(30s)*`;
+    case "ban_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "ban", { targetId, reason }, userId); return `⚠️ **Ban <@${targetId}>?** Reason: *${reason}*\nSay **"yes"** to confirm. *(30s)*`;
+    case "kick_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "kick", { targetId, reason }, userId); return `⚠️ **Kick <@${targetId}>?** Reason: *${reason}*\nSay **"yes"** to confirm. *(30s)*`;
+    case "strip_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "strip_role", { targetId }, userId); return `⚠️ **Strip ALL roles from <@${targetId}>?** Say **"yes"** to confirm. *(30s)*`;
+    case "exile_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "exile", { targetId }, userId); return `⚠️ **Exile <@${targetId}>?** Say **"yes"** to confirm. *(30s)*`;
+    case "temp_exile_confirm": if (!guild) return "Server only."; setPendingConfirm(channelId, "temp_exile", { targetId, durationMs }, userId); return `⚠️ **Temp exile <@${targetId}> for ${formatTime(durationMs)}?** Say **"yes"** to confirm. *(30s)*`;
 
     case "exile": { await message.channel.send(`⛓️ Exiling <@${targetId}>...`).catch(() => {}); const r = await exileUser(guild, targetId); await sendModLog(guild, { action: "Exile", moderator: modName, target: `<@${targetId}>` }); return r; }
     case "temp_exile": { await message.channel.send(`⛓️ Temp exiling <@${targetId}> for ${formatTime(durationMs)}...`).catch(() => {}); const r = await exileUser(guild, targetId, durationMs); await sendModLog(guild, { action: `Temp Exile (${formatTime(durationMs)})`, moderator: modName, target: `<@${targetId}>` }); return r; }
@@ -5356,33 +5356,37 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
 }
 
 // ── Execute Public Command ────────────────────────────────────────────────────
-// Discord hard-caps a single message at 2000 characters. Long responses (e.g.
-// the shop list, help text) used to silently fail — .reply() would throw,
-// the .catch() fallback to .channel.send() would throw for the same reason,
-// and the error just got logged to console while the user only saw "typing…"
-// and then nothing. This splits on line breaks (falling back to hard slices)
-// and sends each chunk as its own message.
+// Discord hard-caps a plain message at 2000 characters, but an embed
+// description holds up to 4096 — so anything over 2000 gets wrapped in a
+// single embed instead of being split into multiple messages. If content is
+// so long it still can't fit one embed (4096), it spills into a couple more
+// embeds attached to that SAME message (Discord allows up to 10 embeds per
+// message, ~6000 combined chars) rather than sending multiple messages.
 async function sendLongReply(message, text) {
-  const LIMIT = 2000;
-  if (text.length <= LIMIT) {
+  const PLAIN_LIMIT = 2000;
+  const EMBED_LIMIT = 4096;
+  const MAX_EMBEDS = 10;
+
+  if (text.length <= PLAIN_LIMIT) {
     await message.reply(text).catch(async () => {
       await message.channel.send(text).catch(e => console.error("[SEND FAIL]", e.message));
     });
     return;
   }
 
+  // Split into embed-sized chunks on line breaks (hard-slice any single
+  // line that's absurdly long on its own).
   const lines = text.split("\n");
   const chunks = [];
   let current = "";
   for (const line of lines) {
-    // A single line longer than the limit still needs hard-slicing.
-    if (line.length > LIMIT) {
+    if (line.length > EMBED_LIMIT) {
       if (current) { chunks.push(current); current = ""; }
-      for (let i = 0; i < line.length; i += LIMIT) chunks.push(line.slice(i, i + LIMIT));
+      for (let i = 0; i < line.length; i += EMBED_LIMIT) chunks.push(line.slice(i, i + EMBED_LIMIT));
       continue;
     }
     const candidate = current ? current + "\n" + line : line;
-    if (candidate.length > LIMIT) {
+    if (candidate.length > EMBED_LIMIT) {
       chunks.push(current);
       current = line;
     } else {
@@ -5391,14 +5395,18 @@ async function sendLongReply(message, text) {
   }
   if (current) chunks.push(current);
 
-  for (let i = 0; i < chunks.length; i++) {
-    const send = i === 0
-      ? () => message.reply(chunks[i])
-      : () => message.channel.send(chunks[i]);
-    await send().catch(async () => {
-      await message.channel.send(chunks[i]).catch(e => console.error("[SEND FAIL]", e.message));
-    });
+  let embedChunks = chunks;
+  if (embedChunks.length > MAX_EMBEDS) {
+    embedChunks = embedChunks.slice(0, MAX_EMBEDS);
+    const last = embedChunks[MAX_EMBEDS - 1];
+    embedChunks[MAX_EMBEDS - 1] = last.slice(0, EMBED_LIMIT - 40) + "\n\n*…truncated, too long to display.*";
   }
+
+  const embeds = embedChunks.map(chunk => new EmbedBuilder().setColor(0x8B0000).setDescription(chunk));
+
+  await message.reply({ embeds }).catch(async () => {
+    await message.channel.send({ embeds }).catch(e => console.error("[SEND FAIL]", e.message));
+  });
 }
 
 async function executePublicCommand(message, cmd, channelId) {
@@ -7864,8 +7872,23 @@ async function init() {
       return;
     }
 
-    if (isModUserBool && lower === "yes" && pendingConfirmations.has(channelId)) {
-      const { action, data } = pendingConfirmations.get(channelId);
+    if (lower === "yes" && pendingConfirmations.has(channelId)) {
+      const { action, data, issuerId } = pendingConfirmations.get(channelId);
+      // Only the mod who actually issued the command may confirm it — this
+      // was previously scoped to the CHANNEL only, so anyone else who typed
+      // "yes" (including, disastrously, the target of the kick/ban/exile
+      // themselves) could confirm someone else's pending action as long as
+      // they separately passed the isModUserBool/canDo checks below.
+      if (issuerId && message.author.id !== issuerId) {
+        await message.reply("🔫 Only the person who issued that command can confirm it.").catch(()=>{});
+        return;
+      }
+      // Never let the target of the action be the one confirming it, full stop.
+      if (data?.targetId && message.author.id === data.targetId) {
+        pendingConfirmations.delete(channelId);
+        await message.reply("🔫 You can't confirm an action against yourself.").catch(()=>{});
+        return;
+      }
       const actionMap = { purge: "canPurge", ban: "canBan", kick: "canKick", strip_role: "canStrip", exile: "canExile", temp_exile: "canExile", eco_nuke: null };
       const permKey = actionMap[action];
       if (permKey && !canDo(message.author.id, permKey)) { pendingConfirmations.delete(channelId); await message.reply("🔫 Your rank does not permit this action.").catch(()=>{}); return; }
