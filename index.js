@@ -1042,6 +1042,14 @@ function formatTimerConfig(ms) {
 // ── Family Rank Helpers ────────────────────────────────────────────────────────
 function getFamilyRank(userId) { return familyRoster.get(userId) || null; }
 function getRankData(userId) { const rank = getFamilyRank(userId); return rank ? RANKS[rank] : null; }
+// Numeric rank level for hierarchy comparisons. Don Clint always outranks
+// everyone (even above "boss"), and anyone with no title at all sits at 0 —
+// below every real rank — so they can still be targeted by any moderator.
+function getRankLevel(userId) {
+  if (userId === MASTER_ID) return Infinity;
+  const data = getRankData(userId);
+  return data ? data.level : 0;
+}
 function getDisplayName(userId, username) {
   if (userId === MASTER_ID) return "Don Clint";
   const rank = getFamilyRank(userId);
@@ -4701,6 +4709,19 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   if (targetedActions.includes(action) && targetId) {
     if (targetId === MASTER_ID) return "You dare raise a hand against Don Clint? Absolutely not. 💀";
     if (targetId === userId) return "You can't use that command on yourself. Don't waste my time.";
+    // Rank hierarchy: you can only act on someone strictly below your own
+    // rank level. Cosa itself has no rank of its own to fall back on — it
+    // was previously possible for e.g. a Capo to have Cosa ban/kick/mute a
+    // Boss or another Capo just because they held canBan/canKick, with
+    // nothing comparing the two ranks against each other.
+    // Don Clint is explicitly exempt — he outranks everyone by definition,
+    // regardless of whatever rank (if any) happens to be on his roster entry.
+    if (userId !== MASTER_ID && getRankLevel(targetId) >= getRankLevel(userId)) {
+      const targetRank = getRankData(targetId);
+      return targetRank
+        ? `🚫 <@${targetId}> outranks or matches you (**${targetRank.title}**). You can't touch someone at or above your own rank.`
+        : `🚫 <@${targetId}> outranks or matches you. You can't touch someone at or above your own rank.`;
+    }
   }
 
   // ── Admin Economy Commands (Don only) ───────────────────────────────────────
