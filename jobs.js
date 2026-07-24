@@ -35,6 +35,17 @@ function checkCooldown(kind, userId, ms, isDon) {
 }
 function setCooldown(kind, userId) { cooldowns[kind].set(userId, Date.now()); }
 
+// Read-only peek at all job cooldowns for a user (used by the /cooldowns command).
+// Reuses checkCooldown, which never mutates state — safe to call anytime.
+function getCooldownStatus(userId, isDon) {
+  return {
+    work:     checkCooldown("work", userId, WORK_COOLDOWN_MS, isDon),
+    crime:    checkCooldown("crime", userId, CRIME_COOLDOWN_MS, isDon),
+    scavenge: checkCooldown("scavenge", userId, SCAVENGE_COOLDOWN_MS, isDon),
+    smuggle:  checkCooldown("smuggle", userId, SMUGGLE_COOLDOWN_MS, isDon),
+  };
+}
+
 function rankMultiplier(rankLevel) {
   // rankLevel: 0 (street rat) .. 8 (boss). Each rank adds +40%.
   return 1 + Math.max(0, rankLevel) * 0.4;
@@ -326,11 +337,14 @@ const JOBS_HELP = [
   "📋  QUESTS",
   "  Cosa quests     ← view the daily bounty board",
   "  Cosa quest claim ← clear the board for a random shop item (rarity-weighted)",
+  "",
+  "⏰  Cosa cooldowns ← see every timer (jobs, gambling, rob, chess, daily, loan) in one place",
   "```",
 ].join("\n");
 
 module.exports = {
   doWork, doCrime, doScavenge, doSmuggle,
   getQuestBoard, claimQuest, recordQuest,
+  getCooldownStatus,
   JOBS_HELP,
 };
