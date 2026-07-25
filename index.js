@@ -14,6 +14,12 @@ const stockChart = require("./stockchart.js");
 const { tickFirmCandles } = require("./firmchart.js");
 const leaderboard = require("./leaderboard.js");
 const { cloneServerStructure } = require("./cloneServer.js");
+const gangs = require("./gangs.js");
+const turf = require("./turf.js");
+const businesses = require("./businesses.js");
+const alliances = require("./alliances.js");
+const bounties = require("./bounties.js");
+const auditlog = require("./auditlog.js");
 // chessCooldowns, gambleCooldowns: per-guild, see the guildDataStore accessor
 // block below (defined once activateGuildConfig exists). gamblingBlacklist
 // stays a single shared Set — it's tied to the loan/debt system (loans.js),
@@ -176,6 +182,11 @@ process.on('uncaughtException', (error) => console.error('Uncaught Exception:', 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, { realtime: { transport: ws } });
 eco.initEconomy(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 bank.initBank(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+gangs.initGangs(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+turf.initTurf(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+businesses.initBusinesses(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+alliances.initAlliances(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+bounties.initBounties(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // ── Loan Persistence ──────────────────────────────────────────────────────────
 async function saveLoan(userId, loanData) {
@@ -1127,6 +1138,21 @@ function resolveRankKey(input) {
 // phrasing doesn't suddenly stop parsing.
 const TIER_ALIAS_PATTERN = "stellar|diamonds?|gold|chips?|silver|cash|copper";
 function normalizeTierAlias() { return "copper"; }
+
+// Parses amounts like "5k", "2.5m", "1b", or plain "50000" — used by the new
+// gang/business/bounty/gift commands so players can type short-form amounts.
+function parseShortAmount(text) {
+  if (!text) return null;
+  const m = text.match(/(\d+(?:\.\d+)?)\s*(k|m|b)?/i);
+  if (!m) return null;
+  let n = parseFloat(m[1]);
+  const suffix = (m[2] || "").toLowerCase();
+  if (suffix === "k") n *= 1e3;
+  else if (suffix === "m") n *= 1e6;
+  else if (suffix === "b") n *= 1e9;
+  n = Math.floor(n);
+  return n > 0 ? n : null;
+}
 
 // ── Mod Log ───────────────────────────────────────────────────────────────────
 async function sendModLog(guild, { action, moderator, target, reason, extra }) {
@@ -4382,18 +4408,18 @@ function detectMasterCommand(text, message, explicitTrigger) {
   // Admin economy commands
   if (/\bcosa\s+set\s+balance\b/.test(lower) && targetId) {
     const cleanT = text.replace(/<@!?\d+>/g,"").trim();
-    const m = cleanT.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
+    const m = cleanT.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "eco_set", targetId, amount: m?.[1], tier: normalizeTierAlias(m?.[2]) };
   }
   if (/\bcosa\s+reset\s+balance\b/.test(lower) && targetId) return { action: "eco_reset", targetId };
   if (/\bcosa\s+give\b/.test(lower) && targetId && !/\brole\b/i.test(lower)) {
     const cleanT = text.replace(/<@!?\d+>/g,"").trim();
-    const m = cleanT.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
+    const m = cleanT.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "eco_give", targetId, amount: m?.[1], tier: normalizeTierAlias(m?.[2]) };
   }
   if (/\bcosa\s+take\b/.test(lower) && targetId) {
     const cleanT = text.replace(/<@!?\d+>/g,"").trim();
-    const m = cleanT.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
+    const m = cleanT.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "eco_take", targetId, amount: m?.[1], tier: normalizeTierAlias(m?.[2]) };
   }
   if (/\bcosa\s+tax\b/.test(lower) && targetId) {
@@ -4422,8 +4448,8 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+eco\s+stats\b/.test(lower)) return { action: "eco_stats" };
   if (/\bcosa\s+eco\s+wipe\s+rich\b/.test(lower)) return { action: "wipe_rich" };
   if (/\bcosa\s+daily\s+rates\b/.test(lower)) return { action: "daily_rates" };
-  if (/\bcosa\s+bank\s+deposit\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_deposit", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
-  if (/\bcosa\s+bank\s+withdraw\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_withdraw", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+bank\s+deposit\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_deposit", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+bank\s+withdraw\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_withdraw", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
   if (/\bcosa\s+bank\s+upgrade\b/.test(lower)) return { action: "bank_upgrade" };
   if (/\bcosa\s+bank\s+tiers\b/.test(lower)) return { action: "bank_tiers" };
   if (/\bcosa\s+bank\b/.test(lower)) return { action: "bank_balance" };
@@ -4441,8 +4467,8 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+mood\b/.test(lower)) return { action: "show_mood" };
   // Economy commands
   if (/\bcosa\s+balance\b/.test(lower)) return { action: "balance", targetId: targetId || message.author.id };
-  if (/\bcosa\s+bank\s+deposit\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_deposit", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
-  if (/\bcosa\s+bank\s+withdraw\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_withdraw", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+bank\s+deposit\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_deposit", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+bank\s+withdraw\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_withdraw", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
   if (/\bcosa\s+bank\s+upgrade\b/.test(lower)) return { action: "bank_upgrade" };
   if (/\bcosa\s+bank\s+tiers\b/.test(lower)) return { action: "bank_tiers" };
   if (/\bcosa\s+bank\b/.test(lower)) return { action: "bank_balance" };
@@ -4462,7 +4488,7 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+(leaderboard|richest|lb)\b/.test(lower)) return { action: "leaderboard" };
   if (/\bcosa\s+pay\b/.test(lower) && targetId) {
     const cleanText = text.replace(/<@!?\d+>/g, "").trim();
-    const amtMatch = cleanText.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
+    const amtMatch = cleanText.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "pay", targetId, amount: amtMatch?.[1], tier: normalizeTierAlias(amtMatch?.[2]) };
   }
   if (/\bcosa\s+rob\b/.test(lower) && targetId) return { action: "rob", targetId };
@@ -4470,28 +4496,28 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+normal\s+loan\b/.test(lower)) return { action: "loan", size: "loan" };
   if (/\bcosa\s+elite\s+loan\b/.test(lower)) return { action: "loan", size: "elite" };
   if (/\bcosa\s+ultra\s+loan\b/.test(lower)) return { action: "loan", size: "ultra" };
-  if (/\bcosa\s+pay\s+loan\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_loan", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
-  if (/\bcosa\s+pay\s+debt\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_debt", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+pay\s+loan\b/.test(lower)) { const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_loan", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+pay\s+debt\b/.test(lower)) { const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_debt", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
   if (/\bcosa\s+debt\b/.test(lower)) return { action: "check_debt" };
   if (/\bcosa\s+slots\b/.test(lower)) {
-    const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
+    const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "slots", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) };
   }
   if (/\bcosa\s+coinflip\b/.test(lower)) {
-    const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
+    const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "coinflip", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]), choice: /heads/i.test(text) ? "heads" : /tails/i.test(text) ? "tails" : null };
   }
   if (/\bcosa\s+wheel\b/.test(lower)) {
-    const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
+    const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "wheel", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) };
   }
   if (/\bcosa\s+blackjack\b/.test(lower)) {
-    const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
+    const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "blackjack", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) };
   }
   if (/\bcosa\s+(hit|stand)\b/.test(lower)) return { action: lower.includes("hit") ? "bj_hit" : "bj_stand" };
   if (/\bcosa\s+race\b/.test(lower)) {
-    const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
+    const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "race", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) };
   }
 
@@ -4584,6 +4610,78 @@ function detectPublicCommand(text, message) {
   if (/\bcosa\s+remind\b/.test(lower)) return { action: "remind", durationMs: parseDuration(text), reason: text.replace(/\bcosa\b/i,"").replace(/\bremind\s+me\b/i,"").replace(/\bin\s+\d+\s+\w+/i,"").trim() };
   if (/\bcosa\s+rank\s+(help|commands|cmds)\b/.test(lower)) return { action: "rank_help" };
   if (/\bcosa\s+(notoriety|noto|rep|reputation)\b/.test(lower)) return { action: "notoriety", targetId };
+
+  // ── Gangs ────────────────────────────────────────────────────────────────
+  if (/\bcosa\s+gang\s+create\b/.test(lower)) {
+    const name = text.replace(/.*\bgang\s+create\b/i, "").trim();
+    return { action: "gang_create", gangName: name };
+  }
+  if (/\bcosa\s+gang\s+invite\b/.test(lower) && targetId) return { action: "gang_invite", targetId };
+  if (/\bcosa\s+gang\s+accept\b/.test(lower)) return { action: "gang_accept" };
+  if (/\bcosa\s+gang\s+leave\b/.test(lower)) return { action: "gang_leave" };
+  if (/\bcosa\s+gang\s+disband\b/.test(lower)) return { action: "gang_disband" };
+  if (/\bcosa\s+gang\s+kick\b/.test(lower) && targetId) return { action: "gang_kick", targetId };
+  if (/\bcosa\s+gang\s+promote\b/.test(lower) && targetId) {
+    const roleMatch = lower.match(/\b(officer|member)\b/);
+    return { action: "gang_promote", targetId, newRole: roleMatch ? roleMatch[1] : "officer" };
+  }
+  if (/\bcosa\s+gang\s+transfer\b/.test(lower) && targetId) return { action: "gang_transfer", targetId };
+  if (/\bcosa\s+gang\s+deposit\b/.test(lower)) {
+    const amt = parseShortAmount(text.replace(/.*\bgang\s+deposit\b/i, ""));
+    return { action: "gang_deposit", amount: amt };
+  }
+  if (/\bcosa\s+gang\s+info\b/.test(lower)) {
+    const name = text.replace(/.*\bgang\s+info\b/i, "").trim();
+    return { action: "gang_info", gangName: name, targetId };
+  }
+  if (/\bcosa\s+gang\b/.test(lower)) return { action: "gang_info", gangName: "", targetId };
+
+  // ── Turf Wars ────────────────────────────────────────────────────────────
+  if (/\bcosa\s+turf\s+list\b/.test(lower)) return { action: "turf_list" };
+  if (/\bcosa\s+turf\s+claim\b/.test(lower)) {
+    const zone = text.replace(/.*\bturf\s+claim\b/i, "").trim();
+    return { action: "turf_claim", zoneName: zone };
+  }
+  if (/\bcosa\s+turf\s+attack\b/.test(lower)) {
+    const zone = text.replace(/.*\bturf\s+attack\b/i, "").trim();
+    return { action: "turf_attack", zoneName: zone };
+  }
+  if (/\bcosa\s+turf\b/.test(lower)) return { action: "turf_list" };
+
+  // ── Businesses ───────────────────────────────────────────────────────────
+  const bizTypeMatch = lower.match(/\b(laundromat|nightclub|shipping|casino)\b/);
+  if (/\bcosa\s+business\s+buy\b/.test(lower)) return { action: "business_buy", bizType: bizTypeMatch ? bizTypeMatch[1] : null };
+  if (/\bcosa\s+business\s+upgrade\b/.test(lower)) return { action: "business_upgrade", bizType: bizTypeMatch ? bizTypeMatch[1] : null };
+  if (/\bcosa\s+business\s+security\b/.test(lower)) return { action: "business_security", bizType: bizTypeMatch ? bizTypeMatch[1] : null };
+  if (/\bcosa\s+business\s+collect\b/.test(lower)) return { action: "business_collect", bizType: bizTypeMatch ? bizTypeMatch[1] : null };
+  if (/\bcosa\s+business\s+pay\b/.test(lower)) return { action: "business_pay", bizType: bizTypeMatch ? bizTypeMatch[1] : null };
+  if (/\bcosa\s+business\s+raid\b/.test(lower) && targetId) return { action: "business_raid", targetId, bizType: bizTypeMatch ? bizTypeMatch[1] : null };
+  if (/\bcosa\s+(business|businesses)\b/.test(lower)) return { action: "business_list", targetId: targetId || message.author.id };
+
+  // ── Alliances ────────────────────────────────────────────────────────────
+  if (/\bcosa\s+alliance\s+propose\b/.test(lower)) {
+    const name = text.replace(/.*\balliance\s+propose\b/i, "").trim();
+    return { action: "alliance_propose", gangName: name };
+  }
+  if (/\bcosa\s+alliance\s+accept\b/.test(lower)) return { action: "alliance_accept" };
+  if (/\bcosa\s+alliance\s+break\b/.test(lower)) {
+    const name = text.replace(/.*\balliance\s+break\b/i, "").trim();
+    return { action: "alliance_break", gangName: name };
+  }
+
+  // ── Bounties ─────────────────────────────────────────────────────────────
+  if (/\bcosa\s+bounty\s+place\b/.test(lower) && targetId) {
+    const amt = parseShortAmount(text.replace(/.*\bbounty\s+place\b/i, "").replace(/<@!?\d+>/g, ""));
+    return { action: "bounty_place", targetId, amount: amt };
+  }
+  if (/\bcosa\s+bounty\s+board\b/.test(lower)) return { action: "bounty_board" };
+  if (/\bcosa\s+bounty\b/.test(lower)) return { action: "bounty_board" };
+
+  // ── Gifting ──────────────────────────────────────────────────────────────
+  if (/\bcosa\s+gift\b/.test(lower) && targetId) {
+    const amt = parseShortAmount(text.replace(/.*\bgift\b/i, "").replace(/<@!?\d+>/g, ""));
+    return { action: "gift", targetId, amount: amt };
+  }
   if (/\bcosa\s+(eco|economy)\b/.test(lower)) return { action: "eco_help" };
   if (/\bcosa\s+(help|commands|cmds)\b/.test(lower)) return { action: "help" };
   if (/\bcosa\s+prophecy\b/.test(lower)) return { action: "prophecy", targetId: targetId || message.author.id };
@@ -4615,7 +4713,7 @@ function detectPublicCommand(text, message) {
 
   // ── Giveaway ─────────────────────────────────────────────────────────────
   if (/\bcosa\s+giveaway\b/.test(lower)) {
-    const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?\s+([\dhms]+)/i);
+    const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?\s+([\dhms]+)/i);
     return m ? { action: "giveaway", amount: m[1], tier: normalizeTierAlias(m[2]), duration: m[3] } : { action: "giveaway_help" };
   }
   if (/\bcosa\s+greroll\b/.test(lower) || /\bcosa\s+giveaway\s+reroll\b/.test(lower)) {
@@ -4634,7 +4732,7 @@ function detectPublicCommand(text, message) {
   // ── Heist ─────────────────────────────────────────────────────────────────
   if (/\bcosa\s+heist\s+join\b/.test(lower)) return { action: "heist_join" };
   if (/\bcosa\s+heist\b/.test(lower)) {
-    const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
+    const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return m ? { action: "heist_start", amount: m[1], tier: normalizeTierAlias(m[2]) } : null;
   }
 
@@ -4708,7 +4806,7 @@ function detectPublicCommand(text, message) {
   if (/\bcosa\s+(leaderboard|richest|lb)\b/.test(lower)) return { action: "leaderboard" };
   if (/\bcosa\s+pay\b/.test(lower) && targetId) {
     const cleanText = text.replace(/<@!?\d+>/g, "").trim();
-    const amtMatch = cleanText.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
+    const amtMatch = cleanText.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "pay", targetId, amount: amtMatch?.[1], tier: normalizeTierAlias(amtMatch?.[2]) };
   }
   if (/\bcosa\s+rob\b/.test(lower) && targetId) return { action: "rob", targetId };
@@ -4716,20 +4814,20 @@ function detectPublicCommand(text, message) {
   if (/\bcosa\s+normal\s+loan\b/.test(lower)) return { action: "loan", size: "loan" };
   if (/\bcosa\s+elite\s+loan\b/.test(lower)) return { action: "loan", size: "elite" };
   if (/\bcosa\s+ultra\s+loan\b/.test(lower)) return { action: "loan", size: "ultra" };
-  if (/\bcosa\s+pay\s+loan\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_loan", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
-  if (/\bcosa\s+pay\s+debt\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_debt", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+pay\s+loan\b/.test(lower)) { const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_loan", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+pay\s+debt\b/.test(lower)) { const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "pay_debt", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
   if (/\bcosa\s+debt\b/.test(lower)) return { action: "check_debt" };
-  if (/\bcosa\s+bank\s+deposit\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_deposit", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
-  if (/\bcosa\s+bank\s+withdraw\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_withdraw", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+bank\s+deposit\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_deposit", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+bank\s+withdraw\b/.test(lower)) { const m = text.replace(/<@!?\d+>/g,"").match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "bank_withdraw", amount: m?.[1], tier: normalizeTierAlias(m?.[2]) }; }
   if (/\bcosa\s+bank\s+upgrade\b/.test(lower)) return { action: "bank_upgrade" };
   if (/\bcosa\s+bank\s+tiers\b/.test(lower)) return { action: "bank_tiers" };
   if (/\bcosa\s+bank\b/.test(lower)) return { action: "bank_balance" };
-  if (/\bcosa\s+slots\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "slots", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) }; }
-  if (/\bcosa\s+coinflip\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "coinflip", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]), choice: /heads/i.test(text) ? "heads" : /tails/i.test(text) ? "tails" : null }; }
-  if (/\bcosa\s+wheel\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "wheel", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) }; }
-  if (/\bcosa\s+blackjack\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "blackjack", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+slots\b/.test(lower)) { const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "slots", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+coinflip\b/.test(lower)) { const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "coinflip", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]), choice: /heads/i.test(text) ? "heads" : /tails/i.test(text) ? "tails" : null }; }
+  if (/\bcosa\s+wheel\b/.test(lower)) { const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "wheel", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+blackjack\b/.test(lower)) { const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "blackjack", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) }; }
   if (/\bcosa\s+(hit|stand)\b/.test(lower)) return { action: lower.includes("hit") ? "bj_hit" : "bj_stand" };
-  if (/\bcosa\s+race\b/.test(lower)) { const m = text.match(/(\d+)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "race", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) }; }
+  if (/\bcosa\s+race\b/.test(lower)) { const m = text.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i); return { action: "race", amount: m?.[1] || "100", tier: normalizeTierAlias(m?.[2]) }; }
 
   // ── Firms ─────────────────────────────────────────────────────────────────
   if (/\bcosa\s+firm\s+create\b/.test(lower)) {
@@ -4961,7 +5059,10 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       "• `cosa blacklist gambling @user` / `cosa unblacklist @user` — gambling only\n\n" +
       "**📊 Info**\n" +
       "• `cosa eco stats` — economy overview\n" +
-      "• `cosa daily rates` — daily payout by rank\n" +
+      "• `cosa daily rates` — daily payout by rank\n\n" +
+      "**📜 Audit Log**\n" +
+      "• `/auditlog setchannel #channel` — where big wins, heists, turf fights, raids, bounties & gifts get posted\n" +
+      "• `/auditlog status` — check what's currently set\n" +
       "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
       "*Notoriety tiers: " + eco.NOTORIETY_TIERS.map(t => t.name).join(" → ") + "*";
   }
@@ -5658,6 +5759,179 @@ async function executePublicCommand(message, cmd, channelId) {
 
   switch (action) {
     case "8ball": { const r = EIGHT_BALL_RESPONSES[Math.floor(Math.random()*EIGHT_BALL_RESPONSES.length)]; return cmd.question ? `🎱 *${cmd.question}*\n\n${r}` : `🎱 ${r}`; }
+
+    // ── Gangs ────────────────────────────────────────────────────────────
+    case "gang_create": {
+      const res = await gangs.createGang(message.author.id, cmd.gangName);
+      if (!res.success) return "❌ " + res.reason;
+      return `🕴️ **${res.gang.name}** has been founded. You're the leader. Invite members with **Cosa gang invite @user**.`;
+    }
+    case "gang_invite": {
+      const res = await gangs.inviteMember(message.author.id, cmd.targetId);
+      if (!res.success) return "❌ " + res.reason;
+      return `📨 Invited <@${cmd.targetId}> to **${res.gang.name}**. They have 5 minutes to **Cosa gang accept**.`;
+    }
+    case "gang_accept": {
+      const res = await gangs.acceptInvite(message.author.id);
+      if (!res.success) return "❌ " + res.reason;
+      return `🕴️ You've joined **${res.gang.name}**.`;
+    }
+    case "gang_leave": {
+      const res = await gangs.leaveGang(message.author.id);
+      if (!res.success) return "❌ " + res.reason;
+      return `👋 You left **${res.gang.name}**.`;
+    }
+    case "gang_disband": {
+      const res = await gangs.disbandGang(message.author.id);
+      if (!res.success) return "❌ " + res.reason;
+      return `💥 **${res.gang.name}** has been disbanded.`;
+    }
+    case "gang_kick": {
+      const res = await gangs.kickMember(message.author.id, cmd.targetId);
+      if (!res.success) return "❌ " + res.reason;
+      return `👢 Kicked <@${cmd.targetId}> from **${res.gang.name}**.`;
+    }
+    case "gang_promote": {
+      const res = await gangs.promoteMember(message.author.id, cmd.targetId, cmd.newRole);
+      if (!res.success) return "❌ " + res.reason;
+      return `⭐ <@${cmd.targetId}> is now **${cmd.newRole}**.`;
+    }
+    case "gang_transfer": {
+      const res = await gangs.transferLeadership(message.author.id, cmd.targetId);
+      if (!res.success) return "❌ " + res.reason;
+      return `👑 Leadership transferred to <@${cmd.targetId}>.`;
+    }
+    case "gang_deposit": {
+      if (!cmd.amount) return "Invalid amount. Try **Cosa gang deposit 50k**.";
+      const res = await gangs.depositToGang(message.author.id, cmd.amount, eco.deductCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `💰 Deposited **${eco.fmt(cmd.amount)} Cash** into **${res.gang.name}**'s treasury. New total: **${eco.fmt(res.gang.treasury)}**.`;
+    }
+    case "gang_info": {
+      let target = cmd.gangName ? await gangs.getGangByName(cmd.gangName) : null;
+      if (!target) {
+        const uid = cmd.targetId || message.author.id;
+        const ug = await gangs.getUserGang(uid);
+        if (!ug) return cmd.gangName ? "❌ Gang not found." : "You're not in a gang. Create one with **Cosa gang create [name]**.";
+        target = ug.gang;
+      }
+      const members = await gangs.getMembers(target.id);
+      return gangs.formatGangCard(target, members);
+    }
+
+    // ── Turf Wars ────────────────────────────────────────────────────────
+    case "turf_list": {
+      const zones = await turf.getAllZones();
+      if (zones.length === 0) return "🗺️ Turf hasn't been set up yet — ask the Don to restart the bot to seed zones.";
+      return "🗺️ **TURF WAR MAP**\n\n" + turf.formatZoneList(zones);
+    }
+    case "turf_claim": {
+      if (!cmd.zoneName) return "Which zone? Use **Cosa turf list** to see names.";
+      const res = await turf.claimZone(message.author.id, cmd.zoneName);
+      if (!res.success) return "❌ " + res.reason;
+      auditlog.logTurfFight(message.guild?.id, message.author.id, message.author.id, res.zone.name, true).catch(() => {});
+      return `🏴 **${res.gang.name}** has claimed **${res.zone.name}**!`;
+    }
+    case "turf_attack": {
+      if (!cmd.zoneName) return "Which zone? Use **Cosa turf list** to see names.";
+      const res = await turf.attackZone(message.author.id, cmd.zoneName);
+      if (!res.success) return "❌ " + res.reason;
+      const defenderName = res.defenderGang ? res.defenderGang.name : "the defenders";
+      auditlog.logTurfFight(message.guild?.id, message.author.id, message.author.id, res.zone.name, res.won).catch(() => {});
+      return res.won
+        ? `⚔️ **${res.attackerGang.name}** stormed **${res.zone.name}** and took it from **${defenderName}**!`
+        : `⚔️ **${res.attackerGang.name}**'s attack on **${res.zone.name}** was repelled by **${defenderName}**.`;
+    }
+
+    // ── Businesses ───────────────────────────────────────────────────────
+    case "business_buy": {
+      if (!cmd.bizType) return "Which type? Choose: laundromat, nightclub, shipping, casino.";
+      const res = await businesses.buyBusiness(message.author.id, cmd.bizType, eco.deductCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `🏢 You opened a **${businesses.getFlavorName(cmd.bizType, 1)}**! Use **Cosa business collect ${cmd.bizType}** once it's earned something.`;
+    }
+    case "business_upgrade": {
+      if (!cmd.bizType) return "Which type? Choose: laundromat, nightclub, shipping, casino.";
+      const res = await businesses.upgradeBusiness(message.author.id, cmd.bizType, eco.deductCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `📈 Upgraded to **${businesses.getFlavorName(cmd.bizType, res.business.tier)}** (Tier ${res.business.tier}).`;
+    }
+    case "business_security": {
+      if (!cmd.bizType) return "Which type? Choose: laundromat, nightclub, shipping, casino.";
+      const res = await businesses.upgradeSecurity(message.author.id, cmd.bizType, eco.deductCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `🛡️ Security upgraded to **${res.level.label}**.`;
+    }
+    case "business_collect": {
+      if (!cmd.bizType) return "Which type? Choose: laundromat, nightclub, shipping, casino.";
+      const res = await businesses.collectBusiness(message.author.id, cmd.bizType, eco.addCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `💰 Collected **${eco.fmt(res.collected)} Cash** from your business.`;
+    }
+    case "business_pay": {
+      if (!cmd.bizType) return "Which type? Choose: laundromat, nightclub, shipping, casino.";
+      const res = await businesses.payUpkeep(message.author.id, cmd.bizType, eco.deductCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `🧾 Paid off **${eco.fmt(res.paid)} Cash** in upkeep. Income is flowing again.`;
+    }
+    case "business_raid": {
+      if (!cmd.bizType) return "Which type? Choose: laundromat, nightclub, shipping, casino.";
+      if (cmd.targetId === message.author.id) return "You can't raid your own business.";
+      const res = await businesses.raidBusiness(message.author.id, cmd.targetId, cmd.bizType, eco.addCopper);
+      if (!res.success) return "❌ " + res.reason;
+      const bizLabel = businesses.BUSINESS_TYPES[cmd.bizType]?.label || cmd.bizType;
+      if (res.outcome === "failed") {
+        auditlog.logBusinessRaid(message.guild?.id, message.author.id, cmd.targetId, bizLabel, 0, false).catch(() => {});
+        return `🚨 You tried to raid <@${cmd.targetId}>'s ${bizLabel} and got caught empty-handed.`;
+      }
+      auditlog.logBusinessRaid(message.guild?.id, message.author.id, cmd.targetId, bizLabel, res.stolen, true).catch(() => {});
+      return `💰 Raided <@${cmd.targetId}>'s ${bizLabel} for **${eco.fmt(res.stolen)} Cash**!`;
+    }
+    case "business_list": {
+      const list = await businesses.getUserBusinesses(cmd.targetId);
+      if (list.length === 0) return "🏢 No businesses owned yet. Try **Cosa business buy laundromat**.";
+      return list.map(b => businesses.formatBusinessCard(b)).join("\n\n");
+    }
+
+    // ── Alliances ────────────────────────────────────────────────────────
+    case "alliance_propose": {
+      if (!cmd.gangName) return "Which gang? **Cosa alliance propose [gang name]**.";
+      const res = await alliances.proposeAlliance(message.author.id, cmd.gangName);
+      if (!res.success) return "❌ " + res.reason;
+      return `🤝 Alliance proposed to **${res.targetGang.name}**. Their leader can accept with **Cosa alliance accept** (expires in 1h).`;
+    }
+    case "alliance_accept": {
+      const res = await alliances.acceptAlliance(message.author.id);
+      if (!res.success) return "❌ " + res.reason;
+      return `🤝 Alliance formed with **${res.fromGangName}**!`;
+    }
+    case "alliance_break": {
+      if (!cmd.gangName) return "Which gang? **Cosa alliance break [gang name]**.";
+      const res = await alliances.breakAlliance(message.author.id, cmd.gangName);
+      if (!res.success) return "❌ " + res.reason;
+      return `💔 Alliance with **${res.targetGang.name}** broken.`;
+    }
+
+    // ── Bounties ─────────────────────────────────────────────────────────
+    case "bounty_place": {
+      if (!cmd.amount) return "Invalid amount. Try **Cosa bounty place @user 100k**.";
+      const res = await bounties.placeBounty(message.author.id, cmd.targetId, cmd.amount, eco.deductCopper, eco.addCopper, MASTER_ID);
+      if (!res.success) return "❌ " + res.reason;
+      return `🎯 Bounty placed on <@${cmd.targetId}> — pool now **${eco.fmt(res.bounty.total_amount)} Cash**. Whoever robs them successfully collects it.`;
+    }
+    case "bounty_board": {
+      const list = await bounties.getAllActiveBounties();
+      return "🎯 **BOUNTY BOARD**\n\n" + bounties.formatBountyBoard(list);
+    }
+
+    // ── Gifting ──────────────────────────────────────────────────────────
+    case "gift": {
+      if (!cmd.amount) return "Invalid amount. Try **Cosa gift @user 5k**.";
+      const res = await eco.giftCopper(message.author.id, cmd.targetId, cmd.amount, eco.addCopper, MASTER_ID);
+      if (!res.success) return "❌ " + res.reason;
+      if (cmd.amount >= 500000) auditlog.logBigGift(message.guild?.id, message.author.id, cmd.targetId, cmd.amount).catch(() => {});
+      return `🎁 Gifted **${eco.fmt(res.net)} Cash** to <@${cmd.targetId}> (${eco.fmt(res.tax)} tax skimmed to the Family).`;
+    }
     case "rps": {
       const choices = ["rock","paper","scissors"], bc = choices[Math.floor(Math.random()*3)], uc = cmd.choice;
       if (!uc) return "Tell me your choice — rock, paper, or scissors.";
@@ -6561,7 +6835,12 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         await eco.addCopper(message.author.id, outcome.amount);
         const currentDebt = await eco.getDebt(message.author.id);
         const debtLine = currentDebt > 0 ? "\n🔴 You still owe **💵 " + eco.fmt(currentDebt) + " Cash** in debt." : "";
-        return "🦹 **ROB SUCCESSFUL!**\nYou swiped **💵 " + eco.fmt(outcome.amount) + " Cash** from **" + targetName + "** without them noticing. 😈" + debtLine;
+        const bountyResult = await bounties.collectBounty(cmd.targetId, message.author.id, eco.addCopper).catch(() => ({ collected: 0 }));
+        const bountyLine = bountyResult.collected > 0
+          ? "\n🎯 **BOUNTY COLLECTED!** An extra **💵 " + eco.fmt(bountyResult.collected) + " Cash** for taking them down."
+          : "";
+        if (bountyResult.collected > 0) auditlog.logBountyCollected(message.guild?.id, message.author.id, cmd.targetId, bountyResult.collected).catch(() => {});
+        return "🦹 **ROB SUCCESSFUL!**\nYou swiped **💵 " + eco.fmt(outcome.amount) + " Cash** from **" + targetName + "** without them noticing. 😈" + debtLine + bountyLine;
       } else if (outcome.result === "caught") {
         const robberBal = eco.walletToCopper(await eco.getWallet(message.author.id));
         if (robberBal >= outcome.fine) {
@@ -7566,6 +7845,16 @@ const commands = [
     .setDescription("Show moderation commands for your rank (Capo and above only, visible only to you)")
     .toJSON(),
   new SlashCommandBuilder()
+    .setName("auditlog")
+    .setDescription("Configure the audit log channel (Don Clint only)")
+    .addSubcommand(sub =>
+      sub.setName("setchannel")
+        .setDescription("Set this server's audit log channel — big wins, heists, turf fights, raids, bounties, gifts")
+        .addChannelOption(opt => opt.setName("channel").setDescription("The channel to post the audit feed in").setRequired(true))
+    )
+    .addSubcommand(sub => sub.setName("status").setDescription("Show the currently configured audit log channel"))
+    .toJSON(),
+  new SlashCommandBuilder()
     .setName("leaderboard")
     .setDescription("Manage the Family rankings leaderboard (Don Clint + granted editors)")
     .addSubcommand(sub =>
@@ -7708,6 +7997,8 @@ async function init() {
         bloxlinkApiKey: process.env.BLOXLINK_API_KEY,
         bloxlinkGuildId: process.env.BLOXLINK_GUILD_ID,
       });
+      auditlog.initAuditLog(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, client);
+      await turf.ensureZonesSeeded().catch(e => console.error("[TURF SEED]", e.message));
       await firms.loadAllFirms();
       console.log("🏢 Firms loaded");
       setInterval(tickFirmCandles, 60_000);
@@ -7728,6 +8019,24 @@ async function init() {
         setTimeout(syncDonBank, 60 * 60 * 1000);
       };
       setTimeout(syncDonBank, 60 * 60 * 1000);
+      // Start daily business processing (income accrual + upkeep)
+      const runBusinessDaily = async () => {
+        await businesses.runDailyBusinessProcessing().catch(e => console.error("[BIZ DAILY]", e.message));
+        setTimeout(runBusinessDaily, 24 * 60 * 60 * 1000);
+      };
+      // Start daily turf processing (gang treasury income + inactivity release)
+      const runTurfDaily = async () => {
+        await turf.runDailyTurfProcessing().catch(e => console.error("[TURF DAILY]", e.message));
+        setTimeout(runTurfDaily, 24 * 60 * 60 * 1000);
+      };
+      // Refund expired bounties every hour
+      const runBountyExpiry = async () => {
+        await bounties.refundExpiredBounties(eco.addCopper).catch(e => console.error("[BOUNTY EXPIRE]", e.message));
+        setTimeout(runBountyExpiry, 60 * 60 * 1000);
+      };
+      setTimeout(runBusinessDaily, 24 * 60 * 60 * 1000);
+      setTimeout(runTurfDaily, 24 * 60 * 60 * 1000);
+      setTimeout(runBountyExpiry, 60 * 60 * 1000);
       setTimeout(runBank, 24 * 60 * 60 * 1000);
       console.log("🏦 Bank daily processing scheduled");
     }
@@ -8857,6 +9166,36 @@ async function init() {
             return eb;
           });
           await interaction.editReply({ embeds });
+          return;
+        }
+        return;
+      }
+
+      if (interaction.commandName === "auditlog") {
+        if (interaction.user.id !== MASTER_ID) {
+          await interaction.reply({ content: "🔫 Only Don Clint can configure the audit log.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        const sub = interaction.options.getSubcommand();
+        const guildId = interaction.guild?.id;
+        if (!guildId) {
+          await interaction.reply({ content: "🔫 This only works inside a server.", ephemeral: true }).catch(() => {});
+          return;
+        }
+
+        if (sub === "setchannel") {
+          const channel = interaction.options.getChannel("channel");
+          const ok = await auditlog.setAuditChannel(guildId, channel.id);
+          if (!ok) { await interaction.reply({ content: "❌ Database error setting the audit log channel.", ephemeral: true }).catch(() => {}); return; }
+          await interaction.reply({ content: `📜 Audit log will now post to <#${channel.id}>.`, ephemeral: true }).catch(() => {});
+          return;
+        }
+        if (sub === "status") {
+          const channelId = await auditlog.getAuditChannel(guildId);
+          await interaction.reply({
+            content: channelId ? `📜 Audit log is currently set to <#${channelId}>.` : "📜 No audit log channel set yet. Use `/auditlog setchannel`.",
+            ephemeral: true,
+          }).catch(() => {});
           return;
         }
         return;
