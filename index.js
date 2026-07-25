@@ -8019,10 +8019,10 @@ async function init() {
         setTimeout(syncDonBank, 60 * 60 * 1000);
       };
       setTimeout(syncDonBank, 60 * 60 * 1000);
-      // Start daily business processing (income accrual + upkeep)
+      // Business income/upkeep ticks every 6h now (was 24h) — sweep on the same cadence
       const runBusinessDaily = async () => {
         await businesses.runDailyBusinessProcessing().catch(e => console.error("[BIZ DAILY]", e.message));
-        setTimeout(runBusinessDaily, 24 * 60 * 60 * 1000);
+        setTimeout(runBusinessDaily, 6 * 60 * 60 * 1000);
       };
       // Start daily turf processing (gang treasury income + inactivity release)
       const runTurfDaily = async () => {
@@ -8034,7 +8034,7 @@ async function init() {
         await bounties.refundExpiredBounties(eco.addCopper).catch(e => console.error("[BOUNTY EXPIRE]", e.message));
         setTimeout(runBountyExpiry, 60 * 60 * 1000);
       };
-      setTimeout(runBusinessDaily, 24 * 60 * 60 * 1000);
+      setTimeout(runBusinessDaily, 6 * 60 * 60 * 1000);
       setTimeout(runTurfDaily, 24 * 60 * 60 * 1000);
       setTimeout(runBountyExpiry, 60 * 60 * 1000);
       setTimeout(runBank, 24 * 60 * 60 * 1000);
