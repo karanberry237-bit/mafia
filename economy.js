@@ -26,9 +26,21 @@ function fromCopper(copper) {
 }
 
 function parseBet(amount) {
-  const num = parseInt(amount);
-  if (isNaN(num) || num <= 0) return null;
-  return num;
+  if (amount === null || amount === undefined) return null;
+  const str = String(amount).trim();
+  const m = str.match(/^(\d+(?:\.\d+)?)\s*(k|m|b)?$/i);
+  if (!m) {
+    // Fallback for plain ints that don't match the shorthand pattern
+    const num = parseInt(str);
+    return (!isNaN(num) && num > 0) ? num : null;
+  }
+  let num = parseFloat(m[1]);
+  const suffix = (m[2] || "").toLowerCase();
+  if (suffix === "k") num *= 1e3;
+  else if (suffix === "m") num *= 1e6;
+  else if (suffix === "b") num *= 1e9;
+  num = Math.floor(num);
+  return num > 0 ? num : null;
 }
 
 // ── Supabase Wallet Store ─────────────────────────────────────────────────────
