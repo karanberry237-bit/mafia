@@ -8221,11 +8221,24 @@ async function init() {
       const isBossPlus = isMaster || getFamilyRank(message.author.id) === "boss";
       if (!isBossPlus) { await message.reply("🔫 Only the Boss or Don Clint can set up channels.").catch(() => {}); return; }
       const typeRaw = lower.replace(/^cosa\s+set\s+channel\s+/i, "").trim().replace(/[\s_]+/g, "-");
+
+      // Audit log is a separate single-channel-per-guild system (Don only,
+      // stored via empire_data through auditlog.js) rather than the
+      // multi-channel array model the rest of CHANNEL_SETTERS uses — handle
+      // it here so "cosa set channel audit" works the same way as the
+      // others instead of needing the separate /auditlog slash command.
+      if (["audit", "auditlog", "audit-log", "audit-logs"].includes(typeRaw)) {
+        if (message.author.id !== MASTER_ID) { await message.reply("🔫 Only Don Clint can set the audit log channel.").catch(() => {}); return; }
+        const ok = await auditlog.setAuditChannel(message.guild.id, message.channelId);
+        await message.reply(ok ? "✅ This channel is now set as the **audit log**." : "❌ Database error setting the audit log channel.").catch(() => {});
+        return;
+      }
+
       const type = CHANNEL_TYPE_ALIASES[typeRaw];
       if (!type) {
         await message.reply(
           "🔫 Unknown channel type. Available: " +
-          Object.keys(CHANNEL_SETTERS).map(k => `\`${k}\``).join(", ") +
+          Object.keys(CHANNEL_SETTERS).map(k => `\`${k}\``).join(", ") + ", `audit`" +
           "\nUsage: **cosa set channel <type>** — run it in the channel you want to designate."
         ).catch(() => {});
         return;
@@ -8803,7 +8816,7 @@ async function init() {
         return;
       }
       const suggestion = suggestCommandCorrection(userTextNormalized, explicitTrigger);
-      if (suggestion) {
+      if (suggestion && !detectPublicCommand(userTextNormalized, message)) {
         await message.reply(suggestion).catch(()=>{});
         return;
       }
