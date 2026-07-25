@@ -61,7 +61,7 @@ async function createGang(userId, name) {
   if (name.length > MAX_GANG_NAME_LEN) return { success: false, reason: `Gang name must be ${MAX_GANG_NAME_LEN} characters or fewer.` };
 
   const already = await getUserGang(userId);
-  if (already) return { success: false, reason: `You're already in **${already.gang.name}**. Leave it first with **/gang leave**.` };
+  if (already) return { success: false, reason: `You're already in **${already.gang.name}**. Leave it first with **Cosa gang leave**.` };
 
   const existing = await getGangByName(name);
   if (existing) return { success: false, reason: "A gang with that name already exists." };
@@ -124,7 +124,7 @@ async function leaveGang(userId) {
   if (!ug) return { success: false, reason: "You're not in a gang." };
   if (ug.membership.role === "leader") {
     const members = await getMembers(ug.gang.id);
-    if (members.length > 1) return { success: false, reason: "You're the leader — promote someone else or use **/gang disband** first." };
+    if (members.length > 1) return { success: false, reason: "You're the leader — promote someone else or use **Cosa gang disband** first." };
   }
   const { error } = await supabase.from("gang_members").delete().eq("gang_id", ug.gang.id).eq("user_id", userId);
   if (error) { console.error("[GANG LEAVE]", error.message); return { success: false, reason: error.message }; }
@@ -140,7 +140,7 @@ async function kickMember(actorId, targetUserId) {
   const actorGang = await getUserGang(actorId);
   if (!actorGang) return { success: false, reason: "You're not in a gang." };
   if (actorGang.membership.role === "member") return { success: false, reason: "Only leaders/officers can kick." };
-  if (targetUserId === actorId) return { success: false, reason: "You can't kick yourself — use **/gang leave**." };
+  if (targetUserId === actorId) return { success: false, reason: "You can't kick yourself — use **Cosa gang leave**." };
 
   const targetGang = await getUserGang(targetUserId);
   if (!targetGang || targetGang.gang.id !== actorGang.gang.id) return { success: false, reason: "That user isn't in your gang." };
