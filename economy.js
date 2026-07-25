@@ -287,11 +287,60 @@ function setXP(userId, amount) {
   return getNotorietyTier(getXP(userId));
 }
 
-// Admin: set a user straight to a named notoriety tier.
+// A human-readable list of every valid tier — reused by the admin command's
+// error message so a typo always comes back with "here's every valid option."
+function formatTierList() {
+  return NOTORIETY_TIERS.map(t => `${t.emoji} \`${t.key}\` (${t.name})`).join(", ");
+}
+
+// Simple Levenshtein distance — used to catch typos like "kingpn" -> "kingpin"
+// or "ntorious" -> "notorious" without needing an exact match.
+function levenshtein(a, b) {
+  a = a.toLowerCase(); b = b.toLowerCase();
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+// Fuzzy-resolve a tier from typed input. Tries exact key/name match first,
+// then falls back to closest Levenshtein match against key + name (typo
+// tolerance scales a little with word length so "king"->"kingpin" doesn't
+// falsely match while "kingpn"->"kingpin" does).
+function resolveNotorietyTier(input) {
+  if (!input) return { tier: null, corrected: false };
+  const q = input.toLowerCase().trim();
+
+  const exact = NOTORIETY_TIERS.find(t => t.key === q || t.name.toLowerCase() === q);
+  if (exact) return { tier: exact, corrected: false };
+
+  let best = null, bestDist = Infinity;
+  for (const t of NOTORIETY_TIERS) {
+    const dKey = levenshtein(q, t.key);
+    const dName = levenshtein(q, t.name.toLowerCase());
+    const d = Math.min(dKey, dName);
+    if (d < bestDist) { bestDist = d; best = t; }
+  }
+  const threshold = Math.max(2, Math.ceil(Math.min(best?.key.length || 0, q.length) * 0.4));
+  if (best && bestDist <= threshold) return { tier: best, corrected: true, distance: bestDist };
+  return { tier: null, corrected: false };
+}
+
+// Admin: set a user straight to a named notoriety tier. Typo-tolerant —
+// returns { tier, corrected, from } on a fuzzy match, or null if nothing
+// close enough was found (caller should show formatTierList() in that case).
 function setNotorietyTier(userId, tierKey) {
-  const t = NOTORIETY_TIERS.find(x => x.key === tierKey.toLowerCase());
-  if (!t) return null;
-  return setXP(userId, t.xp);
+  const { tier, corrected } = resolveNotorietyTier(tierKey);
+  if (!tier) return null;
+  const result = setXP(userId, tier.xp);
+  return { ...result, corrected, inputWas: tierKey };
 }
 
 function isEcoBanned(userId) {
@@ -435,7 +484,43 @@ function shouldRewardChat(userId) {
 // Active blackjack games: userId -> { playerHand, dealerHand, bet, channelId }
 const bjGames = new Map();
 
+// ── Gifting ────────────────────────────────────────────────────────────────
+// Send Cash directly to another user. Small tax skimmed to the Don's treasury,
+// same vig pattern used elsewhere (bank fees, bounty posting fee).
+const GIFT_TAX_PCT = 0.03; // 3%
+const GIFT_DAILY_CAP = 5_000_000; // per-user cap on total Cash gifted per rolling 24h
+const giftDailyTotals = new Map(); // userId -> { total, resetAt }
+
+function checkGiftCap(userId, amount) {
+  const now = Date.now();
+  let entry = giftDailyTotals.get(userId);
+  if (!entry || now >= entry.resetAt) {
+    entry = { total: 0, resetAt: now + 24 * 60 * 60 * 1000 };
+  }
+  if (entry.total + amount > GIFT_DAILY_CAP) return false;
+  entry.total += amount;
+  giftDailyTotals.set(userId, entry);
+  return true;
+}
+
+async function giftCopper(fromId, toId, amount, addToTreasury, masterId) {
+  if (fromId === toId) return { success: false, reason: "You can't gift Cash to yourself." };
+  if (amount <= 0) return { success: false, reason: "Gift amount must be positive." };
+  if (!checkGiftCap(fromId, amount)) return { success: false, reason: `Daily gifting cap reached (${fmt(GIFT_DAILY_CAP)}/day).` };
+
+  const deducted = await deductCopper(fromId, amount);
+  if (!deducted) return { success: false, reason: "Insufficient funds." };
+
+  const tax = Math.floor(amount * GIFT_TAX_PCT);
+  const net = amount - tax;
+  await addCopper(toId, net);
+  if (tax > 0 && addToTreasury) await addToTreasury(masterId, tax);
+
+  return { success: true, net, tax };
+}
+
 module.exports = {
+  giftCopper, GIFT_TAX_PCT, GIFT_DAILY_CAP,
   fromCopper, formatWallet, walletToCopper, parseBet, fmt,
   initEconomy, getWallet, saveWallet, addCopper, deductCopper, getLeaderboard,
   getDailyAmount, DAILY_REWARDS,
@@ -445,7 +530,7 @@ module.exports = {
   getDebt, addDebt, payDebt, formatDebt,
   // Notoriety leveling
   NOTORIETY_TIERS, loadNotoriety, saveNotoriety,
-  getXP, addXP, setXP, setNotorietyTier,
+  getXP, addXP, setXP, setNotorietyTier, resolveNotorietyTier, formatTierList,
   getNotorietyTier, getNextNotorietyTier, getNotorietyBonus,
   isEcoBanned, setEcoBan,
 };
