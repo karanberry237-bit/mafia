@@ -132,12 +132,23 @@ async function deductCopper(userId, copperAmount) {
 }
 
 async function getLeaderboard(limit = 10) {
-  const { data, error } = await supabase.from("wallets").select("*").order("total_earned", { ascending: false }).limit(limit);
+  // Order by "copper" as a first-pass filter (cheap on the DB side), but pull
+  // extra rows and re-sort in JS by TRUE current balance (walletToCopper —
+  // flattens any legacy silver/gold/stellar left over from before the
+  // currency flatten). Sorting by total_earned here was the bug: that's a
+  // lifetime stat that drifts from current balance the moment someone
+  // spends, gambles, or gets robbed, so the displayed order looked scrambled
+  // even though the sort itself was "working."
+  const { data, error } = await supabase.from("wallets").select("*").order("copper", { ascending: false }).limit(Math.max(limit * 5, 50));
   if (error) {
     console.error("[GET LEADERBOARD ERROR]", error.message);
     return [];
   }
-  return data || [];
+  const sorted = (data || [])
+    .map(w => ({ ...w, _balance: walletToCopper(w) }))
+    .sort((a, b) => b._balance - a._balance)
+    .slice(0, limit);
+  return sorted;
 }
 
 // ── Daily Rewards by Rank ─────────────────────────────────────────────────────
