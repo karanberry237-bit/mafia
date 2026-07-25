@@ -1,5 +1,6 @@
 const { createClient } = require("@supabase/supabase-js");
 const ws = require("ws");
+const { fmt } = require("./economy");
 
 let supabase;
 function initBank(url, key) {
@@ -13,7 +14,7 @@ const VAULT_TIERS = {
   shoebox:    { label: "📦 Shoebox",            maxStorage: 50 * 10000,              cost: 0,                interestRate: 0.005, feeRate: 0.001, emoji: "📦" },
   deposit:    { label: "🔑 Safety Deposit Box", maxStorage: 500 * 10000,             cost: 20 * 10000,       interestRate: 0.010, feeRate: 0.002, emoji: "🔑" },
   safe:       { label: "🔒 The Safe",           maxStorage: 2000 * 10000,            cost: 80 * 10000,       interestRate: 0.015, feeRate: 0.003, emoji: "🔒" },
-  vault:      { label: "🏦 Bank Vault",         maxStorage: 10 * 1000000,            cost: 300 * 10000,      interestRate: 0.020, feeRate: 0.004, emoji: "🏦" },
+  vault:      { label: "🏦 Bank Vault",         maxStorage: 35 * 1000000,            cost: 300 * 10000,      interestRate: 0.020, feeRate: 0.004, emoji: "🏦" },
   offshore:   { label: "🛳️ Offshore Account",   maxStorage: 50 * 1000000,            cost: 5 * 1000000,      interestRate: 0.025, feeRate: 0.005, emoji: "🛳️" },
   shell:      { label: "🏢 Shell Company",      maxStorage: 150 * 1000000,           cost: 20 * 1000000,     interestRate: 0.030, feeRate: 0.006, emoji: "🏢" },
   swiss:      { label: "🇨🇭 Swiss Account",      maxStorage: 400 * 1000000,           cost: 80 * 1000000,     interestRate: 0.035, feeRate: 0.007, emoji: "🇨🇭" },
@@ -135,7 +136,7 @@ async function deductFromBank(userId, amount) {
 
 function formatCopper(copper) {
   // Flat currency: everything is Cash now. No denominations.
-  return "💵 " + Math.floor(copper).toLocaleString() + " Cash";
+  return "💵 " + fmt(Math.floor(copper)) + " Cash";
 }
 
 // ── Daily Processing (called every 24h) ──────────────────────────────────────

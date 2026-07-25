@@ -180,7 +180,7 @@ function parsePriceArg(str) {
 
 function formatCopper(cu) {
   // Flat currency: everything is Cash now.
-  return `💵 ${Math.floor(cu).toLocaleString()} Cash`;
+  return `💵 ${eco.fmt(Math.floor(cu))} Cash`;
 }
 
 // ── Spike announcement ───────────────────────────────────────────────────────

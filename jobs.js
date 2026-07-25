@@ -153,7 +153,7 @@ async function doWork(userId, rankLevel, isDon) {
   return (
     `💼 **Honest Work** *(well, honest-ish)*\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `You ${job.verb} ${job.where} and earned **💵 ${pay.toLocaleString()} Cash**.\n` +
+    `You ${job.verb} ${job.where} and earned **💵 ${eco.fmt(pay)} Cash**.\n` +
     `New balance: ${eco.formatWallet(newW)}` +
     (fastHandsUsed ? `\n⚡ **Fast Hands** cut this cooldown in half!` : "")
   );
@@ -177,7 +177,7 @@ async function doCrime(userId, rankLevel, isDon, deps = {}) {
     return (
       `🔫 **Score!**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `You ${pick(CRIME_SUCCESS)} and walked with **💵 ${pay.toLocaleString()} Cash**.\n` +
+      `You ${pick(CRIME_SUCCESS)} and walked with **💵 ${eco.fmt(pay)} Cash**.\n` +
       `New balance: ${eco.formatWallet(newW)}${fastHandsLine}`
     );
   } else if (roll < 0.85) {
@@ -193,13 +193,13 @@ async function doCrime(userId, rankLevel, isDon, deps = {}) {
     const { debtAdded } = await applyLoss(userId, fine, deps, isDon);
     const newW = await eco.getWallet(userId);
     const debtLine = debtAdded > 0
-      ? `\n🔴 You couldn't cover it — **💵 ${debtAdded.toLocaleString()} Cash** added to your debt to the Family.`
+      ? `\n🔴 You couldn't cover it — **💵 ${eco.fmt(debtAdded)} Cash** added to your debt to the Family.`
       : "";
     const crewLine = crewBackupUsed ? `\n👥 **Crew Backup** cut your losses in half!` : "";
     return (
       `🚔 **Busted.**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `You tried to pull a job but ${pick(CRIME_CAUGHT)}. It cost you **💵 ${fine.toLocaleString()} Cash**.${debtLine}${crewLine}\n` +
+      `You tried to pull a job but ${pick(CRIME_CAUGHT)}. It cost you **💵 ${eco.fmt(fine)} Cash**.${debtLine}${crewLine}\n` +
       `New balance: ${eco.formatWallet(newW)}${fastHandsLine}`
     );
   } else {
@@ -223,13 +223,13 @@ async function doScavenge(userId, rankLevel, isDon) {
   if (Math.random() < 0.08) {
     const bonus = rint(4000, 10000);
     pay += bonus;
-    bonusLine = `\n✨ **Rare find!** +💵 ${bonus.toLocaleString()} Cash`;
+    bonusLine = `\n✨ **Rare find!** +💵 ${eco.fmt(bonus)} Cash`;
   }
   const newW = await eco.addCopper(userId, pay);
   recordQuest(userId, "scavenge");
   return (
     `🔦 **Scavenging**\n` +
-    `You ${pick(SCAVENGE_FINDS)} — **💵 ${pay.toLocaleString()} Cash**.${bonusLine}\n` +
+    `You ${pick(SCAVENGE_FINDS)} — **💵 ${eco.fmt(pay)} Cash**.${bonusLine}\n` +
     `New balance: ${eco.formatWallet(newW)}` +
     (fastHandsUsed ? `\n⚡ **Fast Hands** cut this cooldown in half!` : "")
   );
@@ -254,7 +254,7 @@ async function doSmuggle(userId, rankLevel, isDon, deps = {}) {
     return (
       `🚢 **Shipment delivered.**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `You ${pick(SMUGGLE_ROUTES)} and cleared **💵 ${pay.toLocaleString()} Cash**.\n` +
+      `You ${pick(SMUGGLE_ROUTES)} and cleared **💵 ${eco.fmt(pay)} Cash**.\n` +
       `New balance: ${eco.formatWallet(newW)}${fastHandsLine}`
     );
   } else {
@@ -268,13 +268,13 @@ async function doSmuggle(userId, rankLevel, isDon, deps = {}) {
     const { debtAdded } = await applyLoss(userId, loss, deps, isDon);
     const newW = await eco.getWallet(userId);
     const debtLine = debtAdded > 0
-      ? `\n🔴 You couldn't cover it — **💵 ${debtAdded.toLocaleString()} Cash** added to your debt to the Family.`
+      ? `\n🔴 You couldn't cover it — **💵 ${eco.fmt(debtAdded)} Cash** added to your debt to the Family.`
       : "";
     const crewLine = crewBackupUsed ? `\n👥 **Crew Backup** cut your losses in half!` : "";
     return (
       `💥 **Run went bad.**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `You ${pick(SMUGGLE_BUST)}. The bill came to **💵 ${loss.toLocaleString()} Cash** covering your tracks.${debtLine}${crewLine}\n` +
+      `You ${pick(SMUGGLE_BUST)}. The bill came to **💵 ${eco.fmt(loss)} Cash** covering your tracks.${debtLine}${crewLine}\n` +
       `New balance: ${eco.formatWallet(newW)}${fastHandsLine}`
     );
   }

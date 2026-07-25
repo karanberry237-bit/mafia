@@ -850,7 +850,7 @@ async function getPortfolio(userId) {
 
   // Flat currency: everything is Cash now.
   function fmt(copper) {
-    return `💵 ${Math.abs(Math.round(copper)).toLocaleString()} Cash`;
+    return `💵 ${eco.fmt(Math.abs(Math.round(copper)))} Cash`;
   }
 
   let totalValue = 0;
@@ -1397,7 +1397,7 @@ async function buyShopItem(userId, itemId, quantity = 1) {
 
   const totalPrice = item.price * quantity;
   const deducted = await eco.deductCopper(userId, totalPrice).catch(() => null);
-  if (!deducted) return `🔫 You need **💵 ${totalPrice.toLocaleString()} Cash** to buy ${quantity}x **${item.name}**.`;
+  if (!deducted) return `🔫 You need **💵 ${eco.fmt(totalPrice)} Cash** to buy ${quantity}x **${item.name}**.`;
 
   // Record daily purchase count
   if (DAILY_LIMITS && DAILY_LIMITS[itemId] !== undefined) recordDailyPurchase(userId, itemId, quantity);
@@ -1428,7 +1428,7 @@ async function buyShopItem(userId, itemId, quantity = 1) {
     `🛒 **PURCHASED!** ${quantity}x ${item.name}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `${item.desc}\n` +
-    `💰 Total cost: **💵 ${totalPrice.toLocaleString()} Cash**\n` +
+    `💰 Total cost: **💵 ${eco.fmt(totalPrice)} Cash**\n` +
     (totalDuration ? `⏰ Total duration: **${Math.round(totalDuration / 60000)} minutes**` : `🎯 **${quantity} use(s) added to inventory**`) +
     `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `*Use it with **Cosa use ${itemId}***`
@@ -1625,7 +1625,7 @@ function getActiveEffectsSummary(userId) {
 
 function getShopDisplay() {
   function fmtPrice(copper) {
-    return `💵 ${Math.floor(copper).toLocaleString()} Cash`;
+    return `💵 ${eco.fmt(Math.floor(copper))} Cash`;
   }
   const lines = [`🛒 **FAMILY SHOP**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`];
   for (const [id, item] of Object.entries(SHOP_ITEMS)) {

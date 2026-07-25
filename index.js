@@ -151,7 +151,7 @@ async function checkGambleCooldown(userId) {
   if (userId === MASTER_ID) return null;
   if (gamblingBlacklist.has(userId)) return "⛔ You are blacklisted from gambling by Don Clint.";
   const debt = await eco.getDebt(userId);
-  if (debt > 0) return "🔴 You're **in debt** (💵 " + debt.toLocaleString() + " Cash). Pay it off first before gambling. Use **Cosa loan** to borrow or earn via **Cosa daily**.";
+  if (debt > 0) return "🔴 You're **in debt** (💵 " + eco.fmt(debt) + " Cash). Pay it off first before gambling. Use **Cosa loan** to borrow or earn via **Cosa daily**.";
   const last = gambleCooldowns.get(userId) || 0;
   const left = GAMBLE_COOLDOWN_MS - (Date.now() - last);
   if (left > 0) {
@@ -229,7 +229,7 @@ async function loadLoans() {
           const user = await client.users.fetch(loan.user_id).catch(()=>null);
           if (adminCh) await adminCh.send(
             "⚠️ **LOAN DEFAULT** ⚠️\n<@" + MASTER_ID + "> — **" + (user?.username || loan.user_id) + "** defaulted on their **" + loan.loan_type + "**.\n" +
-            "Remaining loan balance: **💵 " + remainingLoanAmt.toLocaleString() + " Cash**\n" +
+            "Remaining loan balance: **💵 " + eco.fmt(remainingLoanAmt) + " Cash**\n" +
             "Auto gambling ban applied. 🔫"
           ).catch(()=>{});
         } else {
@@ -377,6 +377,49 @@ const MOODS = [
   { name: "Guilty",              emoji: "😔", desc: "Cosa feels it has wronged someone. Unusually apologetic, reflective, and trying to make amends.",                    roastBoost: false, mercyReduced: false },
   { name: "Ashamed",             emoji: "😶", desc: "Cosa speaks little. When it does, it's quiet, humble, and burdened. Something weighs heavily on its conscience.",     roastBoost: false, mercyReduced: false },
 ];
+
+// Public-facing, safe one-liners for the mood display. Kept SEPARATE from each
+// mood's `desc` on purpose: `desc` is the raw personality instruction handed to
+// the model (getMoodPersonality) and must NEVER be shown in chat — printing it
+// would leak the system prompt (e.g. the Extremely Aggressive block). The mood
+// command shows these blurbs instead. Falls back to a generic line if a mood
+// has no blurb yet, so the raw desc is never exposed.
+const MOOD_BLURBS = {
+  "Wrathful":             "Seething with barely contained fury. Every word lands like a threat.",
+  "Extremely Aggressive": "On a warpath — zero patience, all teeth. Do not test her today.",
+  "Cold & Calculating":   "Eerily calm. The quiet before someone gets whacked.",
+  "Paranoid":             "Trusts nobody. Everyone's a potential rat.",
+  "Merciful":             "Showing rare grace today. Don't push it.",
+  "Playful":              "In rare good spirits — beware, it never lasts.",
+  "Melancholic":          "Carrying the weight of the Family in silence.",
+  "Bloodthirsty":         "Hungry for chaos. Tread carefully.",
+  "Ruthless":             "Running things with an iron fist. No mercy, no exceptions.",
+  "Mysterious":           "Speaking in riddles. Intentions unknown.",
+  "Chaotic":              "Completely unpredictable. Anything could happen.",
+  "Honourable":           "Upholding the Family's code with dignity.",
+  "Vengeful":             "Someone wronged the Family. She does not forget.",
+  "Euphoric":             "Riding high. A good day for the Family.",
+  "Ominous":              "Something's coming. She can feel it.",
+  "Drunk":                "One too many grappas at the social club. Slurring, warm, unfiltered.",
+  "Lovesick":             "Distracted by someone. Every reply runs dramatic and romantic.",
+  "Battle-Ready":         "Itching for a fight. Every message feels like a war cry.",
+  "Philosophical":        "Pondering loyalty, honor, and the cost of this life.",
+  "Smug":                 "Knows something you don't — insufferably confident.",
+  "Exhausted":            "Running on empty. Short, blunt, a little irritable.",
+  "Inspired":             "In a creative frenzy — talking like a crime-epic monologue.",
+  "Suspicious":           "Certain something's off. Reads between every line.",
+  "Sorrowful":            "Carrying a deep sadness. Soft-spoken and reflective.",
+  "Lazy":                 "Can't be bothered. Minimal, unbothered, faintly annoyed.",
+  "Romantic":             "Smooth, charming, and full of rizz today.",
+  "Sympathetic":          "Unusually gentle and understanding. Listening with warmth.",
+  "Bored":                "Utterly unstimulated. Dry, sarcastic, faintly insulting.",
+  "Exasperated":          "Has had ENOUGH. Speak sense or don't speak at all.",
+  "Guilty":               "Feels it wronged someone. Apologetic and trying to make amends.",
+  "Ashamed":              "Quiet, humble, burdened. Something weighs on its conscience.",
+};
+function getMoodBlurb(mood) {
+  return (mood && MOOD_BLURBS[mood.name]) || "The Family can feel the shift in the air.";
+}
 
 // ── Per-guild moderation / session state ────────────────────────────────────
 // Everything below (family roster, warnings, exile, watchlist, mood, shadow
@@ -3772,7 +3815,7 @@ async function handleGodModeMessage(message, guild, adminCh) {
     if (adminCh) await adminCh.send(`🤵 **[GOD MODE LOG] Loyalty Mode DEACTIVATED** by Don Clint.`).catch(() => {});
     await message.reply(
       `${currentMood.emoji} **Loyalty Mode deactivated.** Cosa returns.\n` +
-      `Mood restored: **${currentMood.name}** — *${currentMood.desc}*`
+      `Mood restored: **${currentMood.name}** — *${getMoodBlurb(currentMood)}*`
     ).catch(() => {});
     return true;
   }
@@ -4360,6 +4403,22 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+heist\b/.test(lower) && targetId) return { action: "eco_heist", targetId };
   if (/\bcosa\s+blacklist\s+gambl/.test(lower) && targetId) return { action: "eco_gamble_ban", targetId };
   if (/\bcosa\s+unblacklist\b/.test(lower) && targetId) return { action: "eco_gamble_unban", targetId };
+  // ── Notoriety / economy admin (Don only) ──
+  if (/\bcosa\s+set\s+xp\b/.test(lower) && targetId) {
+    const m = text.replace(/<@!?\d+>/g, "").match(/(\d+)/);
+    return { action: "eco_setxp", targetId, amount: m?.[1] };
+  }
+  if (/\bcosa\s+(add|give)\s+xp\b/.test(lower) && targetId) {
+    const m = text.replace(/<@!?\d+>/g, "").match(/(-?\d+)/);
+    return { action: "eco_addxp", targetId, amount: m?.[1] };
+  }
+  if (/\bcosa\s+set\s+(tier|notoriety)\b/.test(lower) && targetId) {
+    const m = lower.replace(/<@!?\d+>/g, "").match(/\b(nobody|whisper|known|respected|connected|feared|notorious|untouchable|legend|kingpin)\b/);
+    return { action: "eco_settier", targetId, tierKey: m?.[1] };
+  }
+  if (/\bcosa\s+eco\s+ban\b/.test(lower) && targetId) return { action: "eco_ban", targetId };
+  if (/\bcosa\s+eco\s+unban\b/.test(lower) && targetId) return { action: "eco_unban", targetId };
+  if (/\bcosa\s+admin\s+(help|commands|cmds)\b/.test(lower)) return { action: "eco_admin_help" };
   if (/\bcosa\s+eco\s+stats\b/.test(lower)) return { action: "eco_stats" };
   if (/\bcosa\s+eco\s+wipe\s+rich\b/.test(lower)) return { action: "wipe_rich" };
   if (/\bcosa\s+daily\s+rates\b/.test(lower)) return { action: "daily_rates" };
@@ -4369,6 +4428,7 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+bank\s+tiers\b/.test(lower)) return { action: "bank_tiers" };
   if (/\bcosa\s+bank\b/.test(lower)) return { action: "bank_balance" };
   if (/\bcosa\s+rank\s+(help|commands|cmds)\b/.test(lower)) return { action: "rank_help" };
+  if (/\bcosa\s+(notoriety|noto|rep|reputation)\b/.test(lower)) return { action: "notoriety", targetId };
   if (/\bcosa\s+(eco|economy)\b/.test(lower)) return { action: "eco_help" };
   if (/\bcosa\s+(help|commands|cmds)\b/.test(lower)) return { action: "help" };
 
@@ -4523,6 +4583,7 @@ function detectPublicCommand(text, message) {
   if (/\bcosa\s+poll\b/.test(lower)) return { action: "poll", question: text.replace(/\bcosa\b/i,"").replace(/\bpoll\b/i,"").trim() };
   if (/\bcosa\s+remind\b/.test(lower)) return { action: "remind", durationMs: parseDuration(text), reason: text.replace(/\bcosa\b/i,"").replace(/\bremind\s+me\b/i,"").replace(/\bin\s+\d+\s+\w+/i,"").trim() };
   if (/\bcosa\s+rank\s+(help|commands|cmds)\b/.test(lower)) return { action: "rank_help" };
+  if (/\bcosa\s+(notoriety|noto|rep|reputation)\b/.test(lower)) return { action: "notoriety", targetId };
   if (/\bcosa\s+(eco|economy)\b/.test(lower)) return { action: "eco_help" };
   if (/\bcosa\s+(help|commands|cmds)\b/.test(lower)) return { action: "help" };
   if (/\bcosa\s+prophecy\b/.test(lower)) return { action: "prophecy", targetId: targetId || message.author.id };
@@ -4794,7 +4855,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     if (!copper) return "Invalid amount.";
     const newW = await eco.addCopper(cmd.targetId, copper);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
-    return "✅ Gave **" + copper.toLocaleString() + " Cash** to **" + (tu?.username||cmd.targetId) + "**. New balance: " + eco.formatWallet(newW) + ".";
+    return "✅ Gave **" + eco.fmt(copper) + " Cash** to **" + (tu?.username||cmd.targetId) + "**. New balance: " + eco.formatWallet(newW) + ".";
   }
   if (action === "eco_take") {
     if (userId !== MASTER_ID) return "Don only.";
@@ -4803,7 +4864,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     const result = await eco.deductCopper(cmd.targetId, copper);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
     if (!result) return "They don't have enough.";
-    return "✅ Took **" + copper.toLocaleString() + " Cash** from **" + (tu?.username||cmd.targetId) + "**. New balance: " + eco.formatWallet(result) + ".";
+    return "✅ Took **" + eco.fmt(copper) + " Cash** from **" + (tu?.username||cmd.targetId) + "**. New balance: " + eco.formatWallet(result) + ".";
   }
   if (action === "eco_tax") {
     if (userId !== MASTER_ID) return "Don only.";
@@ -4814,7 +4875,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     await eco.deductCopper(cmd.targetId, taxAmt);
     await eco.addCopper(MASTER_ID, taxAmt);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
-    return "🤵 Taxed **" + (tu?.username||cmd.targetId) + "** at **" + cmd.percent + "%** — seized **💵 " + taxAmt.toLocaleString() + " Cash**. The Family grows richer.";
+    return "🤵 Taxed **" + (tu?.username||cmd.targetId) + "** at **" + cmd.percent + "%** — seized **💵 " + eco.fmt(taxAmt) + " Cash**. The Family grows richer.";
   }
   if (action === "eco_heist") {
     if (userId !== MASTER_ID) return "Don only.";
@@ -4824,7 +4885,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     await eco.deductCopper(cmd.targetId, total);
     await eco.addCopper(MASTER_ID, total);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
-    return "🤵 **FAMILY HEIST!** Seized ALL of **" + (tu?.username||cmd.targetId) + "'s** wealth — **💵 " + total.toLocaleString() + " Cash**. It now belongs to the Don. 😈";
+    return "🤵 **FAMILY HEIST!** Seized ALL of **" + (tu?.username||cmd.targetId) + "'s** wealth — **💵 " + eco.fmt(total) + " Cash**. It now belongs to the Don. 😈";
   }
   if (action === "eco_gamble_ban") {
     if (userId !== MASTER_ID) return "Don only.";
@@ -4838,6 +4899,69 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
     return "✅ **" + (tu?.username||cmd.targetId) + "** can gamble again.";
   }
+  if (action === "eco_setxp") {
+    if (userId !== MASTER_ID) return "Don only.";
+    const n = parseInt(cmd.amount);
+    if (isNaN(n) || n < 0) return "Invalid XP amount.";
+    const tier = eco.setXP(cmd.targetId, n);
+    const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
+    return `✅ Set **${tu?.username||cmd.targetId}'s** notoriety XP to **${eco.fmt(n)}** — now **${tier.emoji} ${tier.name}**.`;
+  }
+  if (action === "eco_addxp") {
+    if (userId !== MASTER_ID) return "Don only.";
+    const n = parseInt(cmd.amount);
+    if (isNaN(n) || n === 0) return "Invalid XP amount.";
+    const newXp = Math.max(0, eco.getXP(cmd.targetId) + n);
+    const tier = eco.setXP(cmd.targetId, newXp);
+    const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
+    return `✅ ${n >= 0 ? "Added" : "Removed"} **${eco.fmt(Math.abs(n))} XP** ${n >= 0 ? "to" : "from"} **${tu?.username||cmd.targetId}** — now **${eco.fmt(newXp)} XP** (${tier.emoji} ${tier.name}).`;
+  }
+  if (action === "eco_settier") {
+    if (userId !== MASTER_ID) return "Don only.";
+    if (!cmd.tierKey) return "Unknown tier. Valid: " + eco.NOTORIETY_TIERS.map(t => t.name).join(", ") + ".";
+    const tier = eco.setNotorietyTier(cmd.targetId, cmd.tierKey);
+    if (!tier) return "Unknown tier.";
+    const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
+    return `✅ Set **${tu?.username||cmd.targetId}** to **${tier.emoji} ${tier.name}** (${eco.fmt(tier.xp)} XP).`;
+  }
+  if (action === "eco_ban") {
+    if (userId !== MASTER_ID) return "Don only.";
+    if (cmd.targetId === MASTER_ID) return "Can't ban the Don.";
+    eco.setEcoBan(cmd.targetId, true);
+    const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
+    return `⛔ **${tu?.username||cmd.targetId}** is now **blacklisted from the entire economy** — no commands, no daily, no gambling.`;
+  }
+  if (action === "eco_unban") {
+    if (userId !== MASTER_ID) return "Don only.";
+    eco.setEcoBan(cmd.targetId, false);
+    const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
+    return `✅ **${tu?.username||cmd.targetId}** is back in the economy.`;
+  }
+  if (action === "eco_admin_help") {
+    if (userId !== MASTER_ID) return "Don only.";
+    return "🤵 **DON'S ADMIN COMMANDS**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+      "**💵 Cash**\n" +
+      "• `cosa give @user <amount>` — hand out Cash\n" +
+      "• `cosa take @user <amount>` — take Cash\n" +
+      "• `cosa set balance @user <amount>` — set exact balance\n" +
+      "• `cosa reset balance @user` — wipe to zero\n" +
+      "• `cosa tax @user <percent>` — seize a % to the Vig\n" +
+      "• `cosa heist @user` — seize ALL their Cash\n\n" +
+      "**🎖️ Rank & Notoriety**\n" +
+      "• `cosa bestow @user <rank>` — set Family rank\n" +
+      "• `cosa set xp @user <amount>` — set notoriety XP\n" +
+      "• `cosa add xp @user <amount>` — add/remove XP (negatives ok)\n" +
+      "• `cosa set tier @user <tier>` — snap to a notoriety tier\n\n" +
+      "**⛔ Bans**\n" +
+      "• `cosa eco ban @user` — full economy blacklist\n" +
+      "• `cosa eco unban @user` — lift it\n" +
+      "• `cosa blacklist gambling @user` / `cosa unblacklist @user` — gambling only\n\n" +
+      "**📊 Info**\n" +
+      "• `cosa eco stats` — economy overview\n" +
+      "• `cosa daily rates` — daily payout by rank\n" +
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+      "*Notoriety tiers: " + eco.NOTORIETY_TIERS.map(t => t.name).join(" → ") + "*";
+  }
   if (action === "eco_stats") {
     if (userId !== MASTER_ID) return "Don only.";
     const lb = await eco.getLeaderboard(100);
@@ -4846,7 +4970,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     const ru = richest ? await client.users.fetch(richest.user_id).catch(()=>null) : null;
     return "📊 **FAMILY ECONOMY STATS**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
       "Total players: **" + lb.length + "**\n" +
-      "Total coins in circulation: **💵 " + totalCash.toLocaleString() + " Cash**\n" +
+      "Total coins in circulation: **💵 " + eco.fmt(totalCash) + " Cash**\n" +
       "Richest: **" + (ru?.username||"Unknown") + "** — " + (richest ? eco.formatWallet(richest) : "N/A") + "\n" +
       "Gambling blacklist: **" + gamblingBlacklist.size + " players**\n" +
       "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
@@ -4860,14 +4984,14 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     return "📅 **DAILY CUT RATES**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
       Object.entries(eco.DAILY_REWARDS).map(([rank, amount]) => {
         const title = rank === "donclint" ? "🔱 Don Clint" : `${RANKS[rank]?.emoji || "🥃"} ${RANKS[rank]?.title || "Street Rat"}`;
-        return `${title} — 💵 ${amount.toLocaleString()} Cash`;
+        return `${title} — 💵 ${eco.fmt(amount)} Cash`;
       }).join("\n") +
       "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
       "*Cooldown: 20 hours*";
   }
 
   // Route eco commands to public handler
-  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","cooldowns","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb"];
+  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","cooldowns","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","notoriety","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb"];
   if (ecoActions.includes(action)) {
     return await executePublicCommand(message, cmd, channelId);
   }
@@ -5138,7 +5262,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       return (
         currentMood.emoji + " **COSA'S CURRENT MOOD** " + currentMood.emoji + "\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-        "**" + currentMood.name + "**\n*" + currentMood.desc + "*\n\n" +
+        "**" + currentMood.name + "**\n*" + getMoodBlurb(currentMood) + "*\n\n" +
         "*This mood has held for " + timeStr + ".*\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
         `*Use **Cosa set mood [name]** to change it (Don only).*`
@@ -5476,9 +5600,31 @@ async function sendLongReply(message, text) {
   });
 }
 
+// Celebrate a notoriety promotion with a follow-up message in the channel.
+function announceNotoriety(message, xpRes) {
+  try {
+    const t = xpRes.tier;
+    message.channel?.send(
+      `${t.emoji} **NOTORIETY UP!** <@${message.author.id}> climbed to **${t.name}**` +
+      (t.dailyBonus > 0 ? ` — daily cut bonus is now **💵 ${eco.fmt(t.dailyBonus)} Cash**. 🔥` : ".")
+    ).catch(() => {});
+  } catch {}
+}
+
 async function executePublicCommand(message, cmd, channelId) {
   const guild = message.guild;
   const { action } = cmd;
+
+  const _uid = message?.author?.id;
+  // Economy blacklist — Don-imposed ban from the whole economy.
+  if (_uid && _uid !== MASTER_ID && eco.isEcoBanned(_uid)) {
+    return "⛔ You've been **blacklisted from the economy** by the Don. Take it up with him.";
+  }
+  // Notoriety XP for using Cosa (self-rate-limited inside addXP).
+  if (_uid && _uid !== MASTER_ID) {
+    const xpRes = eco.addXP(_uid, "command");
+    if (xpRes.leveledUp) announceNotoriety(message, xpRes);
+  }
 
   // Debt reminder — shown at bottom of all eco command responses.
   // NOTE: "debt" (wallet.debt) and an active "loan" (activeLoanData) are separate
@@ -5491,7 +5637,7 @@ async function executePublicCommand(message, cmd, channelId) {
   const debtReminderLines = [];
   if (debtReminderAmount > 0) {
     debtReminderLines.push(
-      "🔴 **YOU ARE IN DEBT** — 💵 **" + debtReminderAmount.toLocaleString() + " Cash** owed\n" +
+      "🔴 **YOU ARE IN DEBT** — 💵 **" + eco.fmt(debtReminderAmount) + " Cash** owed\n" +
       "⛔ Gambling is locked until cleared.\n" +
       "💡 **Cosa pay debt [amount]** | **Cosa loans** to see loan options"
     );
@@ -5499,7 +5645,7 @@ async function executePublicCommand(message, cmd, channelId) {
   if (activeLoanReminder) {
     const loanDaysLeft = Math.max(0, Math.ceil((activeLoanReminder.dueDate - Date.now()) / (24*60*60*1000)));
     debtReminderLines.push(
-      "📋 **ACTIVE LOAN** — 💵 **" + activeLoanReminder.amount.toLocaleString() + " Cash** due in **" + loanDaysLeft + " day(s)** (" + activeLoanReminder.type + ")\n" +
+      "📋 **ACTIVE LOAN** — 💵 **" + eco.fmt(activeLoanReminder.amount) + " Cash** due in **" + loanDaysLeft + " day(s)** (" + activeLoanReminder.type + ")\n" +
       "💡 **Cosa pay loan [amount]** to repay it. Miss the deadline = auto gambling ban + Don Clint notified."
     );
   }
@@ -5975,28 +6121,51 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       return (
         currentMood.emoji + " **COSA'S CURRENT MOOD** " + currentMood.emoji + "\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-        "**" + currentMood.name + "**\n*" + currentMood.desc + "*\n\n" +
+        "**" + currentMood.name + "**\n*" + getMoodBlurb(currentMood) + "*\n\n" +
         "*This mood has held for " + timeStr + ".*\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
         "*Use **Cosa set mood [name]** to change it (Don only).*"
       );
     }
+    case "notoriety": {
+      const targetId = cmd.targetId || message.author.id;
+      const isSelf = targetId === message.author.id;
+      const xp = eco.getXP(targetId);
+      const tier = eco.getNotorietyTier(xp);
+      const next = eco.getNextNotorietyTier(xp);
+      const who = isSelf ? "You are" : `<@${targetId}> is`;
+      let progressLine;
+      if (next) {
+        const span = next.xp - tier.xp;
+        const done = xp - tier.xp;
+        const pct = span > 0 ? Math.max(0, Math.min(100, Math.floor((done / span) * 100))) : 0;
+        const filled = Math.round(pct / 10);
+        const bar = "█".repeat(filled) + "░".repeat(10 - filled);
+        progressLine = `\n${bar} **${pct}%**\n📈 **${eco.fmt(next.xp - xp)} XP** to go → **${next.emoji} ${next.name}**`;
+      } else {
+        progressLine = `\n👑 **Maxed out.** Top of the underworld — nobody's above you.`;
+      }
+      const bonusLine = tier.dailyBonus > 0
+        ? `\n💰 Daily cut bonus: **+💵 ${eco.fmt(tier.dailyBonus)} Cash**`
+        : `\n💰 Daily cut bonus: *none yet — climb higher*`;
+      return `${tier.emoji} **NOTORIETY** ${tier.emoji}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${who} **${tier.name}**\n⭐ Total XP: **${eco.fmt(xp)}**${bonusLine}${progressLine}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Earn XP by using Cosa — running commands AND just talking to her.*`;
+    }
     case "loan_info": {
       const rk = getFamilyRank(message.author.id) || "streetrat";
       const d = eco.getDailyAmount(rk === "boss" || message.author.id === MASTER_ID ? "donclint" : rk);
       const debt = await eco.getDebt(message.author.id);
-      const debtLine = debt > 0 ? "Your current debt to the Family: **💵 " + debt.toLocaleString() + " Cash**\n\n" : "*(You have no debt — loans only available when in debt)*\n\n";
+      const debtLine = debt > 0 ? "Your current debt to the Family: **💵 " + eco.fmt(debt) + " Cash**\n\n" : "*(You have no debt — loans only available when in debt)*\n\n";
       return "🏦 **FAMILY LOAN TYPES**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + debtLine +
         "📜 **Normal Loan** — `Cosa normal loan`\n" +
-        "• Clears debt + **1x your daily cut** (💵 " + d.toLocaleString() + " Cash bonus)\n" +
+        "• Clears debt + **1x your daily cut** (💵 " + eco.fmt(d) + " Cash bonus)\n" +
         "• Interest: **20%** added on top\n" +
         "• Repay within **7 days**\n\n" +
         "🎩 **Elite Loan** — `Cosa elite loan`\n" +
-        "• Clears debt + **3x your daily cut** (💵 " + (d*3).toLocaleString() + " Cash bonus)\n" +
+        "• Clears debt + **3x your daily cut** (💵 " + eco.fmt((d*3)) + " Cash bonus)\n" +
         "• Interest: **30%** added on top\n" +
         "• Repay within **7 days**\n\n" +
         "💎 **Ultra Loan** — `Cosa ultra loan`\n" +
-        "• Clears debt + **5x your daily cut** (💵 " + (d*5).toLocaleString() + " Cash bonus)\n" +
+        "• Clears debt + **5x your daily cut** (💵 " + eco.fmt((d*5)) + " Cash bonus)\n" +
         "• Interest: **40%** added on top\n" +
         "• Repay within **7 days**\n\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
@@ -6007,11 +6176,11 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const debt = await eco.getDebt(message.author.id);
       const activeLoanCD = activeLoanData.get(message.author.id);
       const loanCDLine = activeLoanCD
-        ? "\n📋 **ACTIVE LOAN: 💵 " + activeLoanCD.amount.toLocaleString() + " Cash** (" + activeLoanCD.type + ") due in **" + Math.max(0, Math.ceil((activeLoanCD.dueDate - Date.now()) / (24*60*60*1000))) + " day(s)**\n*Use **Cosa pay loan [amount]** to repay it. Miss the deadline = auto gambling ban + Don Clint notified.*"
+        ? "\n📋 **ACTIVE LOAN: 💵 " + eco.fmt(activeLoanCD.amount) + " Cash** (" + activeLoanCD.type + ") due in **" + Math.max(0, Math.ceil((activeLoanCD.dueDate - Date.now()) / (24*60*60*1000))) + " day(s)**\n*Use **Cosa pay loan [amount]** to repay it. Miss the deadline = auto gambling ban + Don Clint notified.*"
         : "";
       if ((!debt || debt === 0) && !activeLoanCD) return "✅ You have no debt and no active loan. Stay out of trouble.";
       const debtSection = debt > 0
-        ? "🔴 **YOUR DEBT**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou owe the Family: **💵 " + debt.toLocaleString() + " Cash**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Use **Cosa pay debt [amount]** or **Cosa loan** to get funds.*\n*Gambling is locked until debt is cleared.*"
+        ? "🔴 **YOUR DEBT**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou owe the Family: **💵 " + eco.fmt(debt) + " Cash**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Use **Cosa pay debt [amount]** or **Cosa loan** to get funds.*\n*Gambling is locked until debt is cleared.*"
         : "✅ You have no separate debt.";
       return debtSection + loanCDLine;
     }
@@ -6031,7 +6200,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         if (!activeLoanData.has(message.author.id)) gamblingBlacklist.delete(message.author.id);
         return "✅ **DEBT CLEARED!** Gambling ban lifted (if it was debt-related). Don't let it happen again. 🤵";
       }
-      return "💸 Paid **💵 " + copper.toLocaleString() + " Cash** toward your debt.\nRemaining debt: **💵 " + remaining.toLocaleString() + " Cash**";
+      return "💸 Paid **💵 " + eco.fmt(copper) + " Cash** toward your debt.\nRemaining debt: **💵 " + eco.fmt(remaining) + " Cash**";
     }
     case "pay_loan": {
       const activeLoanPay = activeLoanData.get(message.author.id);
@@ -6053,7 +6222,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       activeLoanPay.amount = remainingLoan;
       activeLoanData.set(message.author.id, activeLoanPay);
       await saveLoan(message.author.id, activeLoanPay);
-      return "💸 Paid **💵 " + payAmount.toLocaleString() + " Cash** toward your **" + activeLoanPay.type + "**.\nRemaining loan balance: **💵 " + remainingLoan.toLocaleString() + " Cash**";
+      return "💸 Paid **💵 " + eco.fmt(payAmount) + " Cash** toward your **" + activeLoanPay.type + "**.\nRemaining loan balance: **💵 " + eco.fmt(remainingLoan) + " Cash**";
     }
     case "loan": {
       if (message.author.id === MASTER_ID) return "🤵 The Don needs no loan.";
@@ -6107,7 +6276,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
             const g2 = client.guilds.cache.first();
             const ac2 = g2?.channels.cache.get(LOCKDOWN_CHANNEL_ID);
             const u2 = await client.users.fetch(message.author.id).catch(()=>null);
-            if (ac2) await ac2.send("⚠️ **LOAN DEFAULT** ⚠️\n<@" + MASTER_ID + "> — **" + (u2?.username||message.author.id) + "** defaulted on **" + loanType2.label + "**.\nRemaining: 💵 " + remainingAfterBank2.toLocaleString() + " Cash\nAuto gambling ban applied.").catch(()=>{});
+            if (ac2) await ac2.send("⚠️ **LOAN DEFAULT** ⚠️\n<@" + MASTER_ID + "> — **" + (u2?.username||message.author.id) + "** defaulted on **" + loanType2.label + "**.\nRemaining: 💵 " + eco.fmt(remainingAfterBank2) + " Cash\nAuto gambling ban applied.").catch(()=>{});
           }
         } else {
           activeLoanData.delete(message.author.id);
@@ -6117,12 +6286,12 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const pct2 = Math.floor(loanType2.interest * 100);
       return loanType2.emoji + " **" + loanType2.label.toUpperCase() + " GRANTED**\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-        "✅ Debt cleared: **💵 " + currentDebt.toLocaleString() + " Cash**\n" +
-        "🎁 Bonus given: **💵 " + bonus2.toLocaleString() + " Cash** (" + loanType2.multiplier + "x your daily)\n" +
+        "✅ Debt cleared: **💵 " + eco.fmt(currentDebt) + " Cash**\n" +
+        "🎁 Bonus given: **💵 " + eco.fmt(bonus2) + " Cash** (" + loanType2.multiplier + "x your daily)\n" +
         "⛔ Gambling ban: **LIFTED**\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-        "💸 Total to repay: **💵 " + repayAmount2.toLocaleString() + " Cash** (" + pct2 + "% interest)\n" +
-        "📅 Due in **7 days** — suggested: 💵 " + installment2.toLocaleString() + " Cash/day\n" +
+        "💸 Total to repay: **💵 " + eco.fmt(repayAmount2) + " Cash** (" + pct2 + "% interest)\n" +
+        "📅 Due in **7 days** — suggested: 💵 " + eco.fmt(installment2) + " Cash/day\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
         "*Use **Cosa pay debt [amount]** to repay. Miss deadline = auto ban + Don Clint notified.*";
     }
@@ -6147,21 +6316,21 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         return n.toLocaleString();
       }
       const debt = await eco.getDebt(cmd.targetId);
-      const debtLine = debt > 0 ? "\n🔴 **DEBT: 💵 " + debt.toLocaleString() + " Cash** *(gambling locked)*" : "";
+      const debtLine = debt > 0 ? "\n🔴 **DEBT: 💵 " + eco.fmt(debt) + " Cash** *(gambling locked)*" : "";
       const activeLoan = activeLoanData.get(cmd.targetId);
       const loanLine = activeLoan
-        ? "\n📋 **LOAN REPAYMENT: 💵 " + activeLoan.amount.toLocaleString() + " Cash** due in **" + Math.max(0, Math.ceil((activeLoan.dueDate - Date.now()) / (24*60*60*1000))) + " day(s)** — " + activeLoan.type +
+        ? "\n📋 **LOAN REPAYMENT: 💵 " + eco.fmt(activeLoan.amount) + " Cash** due in **" + Math.max(0, Math.ceil((activeLoan.dueDate - Date.now()) / (24*60*60*1000))) + " day(s)** — " + activeLoan.type +
           (isSelf ? "\n💡 Pay it off with **Cosa pay debt [amount]** (partial payments allowed).\n⚠️ **Miss the deadline and you're auto-blacklisted from gambling + Don Clint gets notified.**" : "")
         : "";
       const flexLine = total >= 1000000 ? "\n*That's **" + shortForm(total) + " Cash** in raw value. The whole neighborhood bows.* 🪙" : "";
-      return "💰 **" + walletName + " Wallet**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + eco.formatWallet(w) + debtLine + loanLine + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Total: " + total.toLocaleString() + " Cash*" + flexLine + debtReminderSuffix;
+      return "💰 **" + walletName + " Wallet**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + eco.formatWallet(w) + debtLine + loanLine + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Total: " + eco.fmt(total) + " Cash*" + flexLine + debtReminderSuffix;
     }
     case "daily": {
       console.log("[DAILY] triggered by", message.author.id);
       if (message.author.id === MASTER_ID) {
         const donAmt = eco.getDailyAmount("donclint");
         await eco.addCopper(MASTER_ID, donAmt).catch(e => console.error("[DAILY DON]", e.message));
-        return `🤵 **The Vig overflows.** 💵 ${donAmt.toLocaleString()} Cash deposited.`;
+        return `🤵 **The Vig overflows.** 💵 ${eco.fmt(donAmt)} Cash deposited.`;
       }
       const w = await eco.getWallet(message.author.id);
       const now = Date.now();
@@ -6198,14 +6367,18 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       } catch (e) { console.error("[DAILY BOOST CHECK]", e.message); }
 
       const boostMult = hasBoost ? 2 : 1;
-      const finalReward = Math.floor(reward * (1 + marriageBonus) * boostMult);
+      // Notoriety bonus stacks flat on top of the rank/marriage/boost cut.
+      const notorietyTier = eco.getNotorietyTier(eco.getXP(message.author.id));
+      const notorietyBonus = notorietyTier.dailyBonus || 0;
+      const finalReward = Math.floor(reward * (1 + marriageBonus) * boostMult) + notorietyBonus;
       const newW = await eco.addCopper(message.author.id, finalReward);
       newW.last_daily = new Date().toISOString();
       await eco.saveWallet(newW);
       const marriageLine = marriageBonus > 0 ? `\n💍 **Marriage bonus:** +${Math.round(marriageBonus * 100)}% applied!${marriageBonus > 0.10 ? " (Honeymoon Fund active)" : ""}` : "";
       const boostLine = hasBoost ? `\n💎 **Daily Boost:** 2x applied!` : "";
+      const notorietyLine = notorietyBonus > 0 ? `\n${notorietyTier.emoji} **${notorietyTier.name} bonus:** +💵 ${eco.fmt(notorietyBonus)} Cash` : "";
       const secondWindLine = secondWindUsed ? `\n💰 **Second Wind** let you claim early — this window's used up now.` : "";
-      return "📅 **Daily Cut Claimed!**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou received: " + eco.formatWallet(eco.fromCopper(finalReward)) + marriageLine + boostLine + secondWindLine + "\nNew balance: " + eco.formatWallet(newW) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Higher rank in the Family = better daily cut.*" + debtReminderSuffix;
+      return "📅 **Daily Cut Claimed!**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou received: " + eco.formatWallet(eco.fromCopper(finalReward)) + marriageLine + boostLine + notorietyLine + secondWindLine + "\nNew balance: " + eco.formatWallet(newW) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Higher rank + notoriety = better daily cut.*" + debtReminderSuffix;
     }
     case "work":
     case "crime":
@@ -6298,7 +6471,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       let loanLine = "";
       if (loan) {
         const daysLeft = Math.max(0, Math.ceil((loan.dueDate - Date.now()) / (24 * 60 * 60 * 1000)));
-        loanLine = `\n📋 Active loan: **💵 ${loan.amount.toLocaleString()} Cash** due in **${daysLeft} day(s)**`;
+        loanLine = `\n📋 Active loan: **💵 ${eco.fmt(loan.amount)} Cash** due in **${daysLeft} day(s)**`;
       }
 
       // Active shop item effects (timed buffs + remaining uses)
@@ -6359,7 +6532,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (!deducted) return "Insufficient funds.";
       await eco.addCopper(cmd.targetId, copperAmt);
       const targetUser = await client.users.fetch(cmd.targetId).catch(() => null);
-      return `💸 You sent **${copperAmt.toLocaleString()} Cash** to **${targetUser?.username || `<@${cmd.targetId}>`}**.`;
+      return `💸 You sent **${eco.fmt(copperAmt)} Cash** to **${targetUser?.username || `<@${cmd.targetId}>`}**.`;
     }
     case "rob": {
       if (cmd.targetId === MASTER_ID) return "🤵 You dare rob Don Clint? The audacity. Watch yourself!";
@@ -6384,15 +6557,15 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         await eco.deductCopper(cmd.targetId, outcome.amount);
         await eco.addCopper(message.author.id, outcome.amount);
         const currentDebt = await eco.getDebt(message.author.id);
-        const debtLine = currentDebt > 0 ? "\n🔴 You still owe **💵 " + currentDebt.toLocaleString() + " Cash** in debt." : "";
-        return "🦹 **ROB SUCCESSFUL!**\nYou swiped **💵 " + outcome.amount.toLocaleString() + " Cash** from **" + targetName + "** without them noticing. 😈" + debtLine;
+        const debtLine = currentDebt > 0 ? "\n🔴 You still owe **💵 " + eco.fmt(currentDebt) + " Cash** in debt." : "";
+        return "🦹 **ROB SUCCESSFUL!**\nYou swiped **💵 " + eco.fmt(outcome.amount) + " Cash** from **" + targetName + "** without them noticing. 😈" + debtLine;
       } else if (outcome.result === "caught") {
         const robberBal = eco.walletToCopper(await eco.getWallet(message.author.id));
         if (robberBal >= outcome.fine) {
           await eco.deductCopper(message.author.id, outcome.fine);
           // Fine goes to the victim as compensation
           await eco.addCopper(cmd.targetId, outcome.fine);
-          return "🚨 **CAUGHT!**\nYou tried to rob **" + targetName + "** but got caught! You paid a fine of **💵 " + outcome.fine.toLocaleString() + " Cash** — which went straight to **" + targetName + "**. 😂";
+          return "🚨 **CAUGHT!**\nYou tried to rob **" + targetName + "** but got caught! You paid a fine of **💵 " + eco.fmt(outcome.fine) + " Cash** — which went straight to **" + targetName + "**. 😂";
         } else {
           // Can't pay — take everything and add rest as debt, victim gets what we can
           const shortfall = outcome.fine - robberBal;
@@ -6403,7 +6576,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
           }
           await eco.addDebt(message.author.id, shortfall);
           gamblingBlacklist.add(message.author.id);
-          return "🚨 **CAUGHT AND BROKE!**\nYou tried to rob **" + targetName + "** but got caught! You couldn't pay the full fine of **💵 " + outcome.fine.toLocaleString() + " Cash**.\n\n💸 Your balance was wiped (**" + targetName + "** got what was left). You now owe **💵 " + shortfall.toLocaleString() + " Cash** in debt.\n⛔ You're banned from gambling until cleared.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔴 **YOU ARE NOW IN DEBT**\n💡 Use **Cosa loan small** to borrow coins | **Cosa pay debt [amount]** to repay";
+          return "🚨 **CAUGHT AND BROKE!**\nYou tried to rob **" + targetName + "** but got caught! You couldn't pay the full fine of **💵 " + eco.fmt(outcome.fine) + " Cash**.\n\n💸 Your balance was wiped (**" + targetName + "** got what was left). You now owe **💵 " + eco.fmt(shortfall) + " Cash** in debt.\n⛔ You're banned from gambling until cleared.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔴 **YOU ARE NOW IN DEBT**\n💡 Use **Cosa loan small** to borrow coins | **Cosa pay debt [amount]** to repay";
         }
       } else {
         return "💨 **ESCAPED!**\nYou tried to rob **" + targetName + "** but they spotted you and you ran away empty-handed. Embarrassing.";
@@ -6429,9 +6602,9 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         if (message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, result.winnings);
         const charmLine = slotsCharmActive ? " 🍀" : "";
         const favorLine = slotsHouseFavorActive ? " 🎩" : "";
-        msg += result.isJackpot ? "🎉 **JACKPOT! " + result.multiplier + "x** — You won **💵 " + result.winnings.toLocaleString() + " Cash**!" + charmLine + favorLine : "✅ **" + result.multiplier + "x** — You won **💵 " + result.winnings.toLocaleString() + " Cash**!" + charmLine + favorLine;
+        msg += result.isJackpot ? "🎉 **JACKPOT! " + result.multiplier + "x** — You won **💵 " + eco.fmt(result.winnings) + " Cash**!" + charmLine + favorLine : "✅ **" + result.multiplier + "x** — You won **💵 " + eco.fmt(result.winnings) + " Cash**!" + charmLine + favorLine;
       } else {
-        msg += "💀 **Nothing.** You lost **💵 " + bet.toLocaleString() + " Cash**. The Family thanks you." + debtReminderSuffix;
+        msg += "💀 **Nothing.** You lost **💵 " + eco.fmt(bet) + " Cash**. The Family thanks you." + debtReminderSuffix;
         await eco.addCopper(MASTER_ID, bet).catch(()=>{});
         addToTreasuryFees(bet, "gambling");
         await bank.deposit(MASTER_ID, bet).catch(()=>{});
@@ -6457,7 +6630,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const won = flip === cmd.choice;
       if (won && message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, bet * 2);
       const charmLineCF = cfCharmActive ? " 🍀" : "";
-      const cfResult = won ? "✅ **WIN!** You doubled your bet — **💵 " + (bet*2).toLocaleString() + " Cash**!" + charmLineCF : "❌ **LOSS.** You lost **💵 " + bet.toLocaleString() + " Cash**. Better luck next time.";
+      const cfResult = won ? "✅ **WIN!** You doubled your bet — **💵 " + eco.fmt((bet*2)) + " Cash**!" + charmLineCF : "❌ **LOSS.** You lost **💵 " + eco.fmt(bet) + " Cash**. Better luck next time.";
       if (!won && message.author.id !== MASTER_ID) {
         await eco.addCopper(MASTER_ID, bet).catch(()=>{});
         addToTreasuryFees(bet, "gambling");
@@ -6493,7 +6666,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const favorLineWH = wheelHouseFavorActive ? " 🎩" : "";
       let wheelResult;
       if (winnings > 0) {
-        wheelResult = "✅ You won **💵 " + winnings.toLocaleString() + " Cash**!" + charmLineWH + favorLineWH;
+        wheelResult = "✅ You won **💵 " + eco.fmt(winnings) + " Cash**!" + charmLineWH + favorLineWH;
       } else if (seg.multiplier === 0.5) {
         wheelResult = "😬 **0.5x** — You lost half. The Family is merciful today." + charmLineWH + favorLineWH;
       } else {
@@ -6520,7 +6693,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (pVal === 21) {
         eco.bjGames.delete(message.author.id);
         if (message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, Math.floor(bet * 2.5));
-        return bjMsg + "🎉 **BLACKJACK!** You win **💵 " + Math.floor(bet*2.5).toLocaleString() + " Cash**!";
+        return bjMsg + "🎉 **BLACKJACK!** You win **💵 " + eco.fmt(Math.floor(bet*2.5)) + " Cash**!";
       }
       return bjMsg + "Say **Cosa hit** to draw or **Cosa stand** to hold.";
     }
@@ -6532,7 +6705,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (pVal > 21) {
         eco.bjGames.delete(message.author.id);
         return `🃏 Your hand: **${game.playerHand.join(" ")}** (${pVal})
-💀 **BUST!** You went over 21. Lost **💵 ${game.bet.toLocaleString()} Cash**.`;
+💀 **BUST!** You went over 21. Lost **💵 ${eco.fmt(game.bet)} Cash**.`;
       }
       if (pVal === 21) {
         // Auto stand
@@ -6555,7 +6728,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       if (dVal > 21 || pVal > dVal) {
         const bjStandWin = Math.floor(game.bet * 2);
         if (message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, bjStandWin);
-        result = `✅ **YOU WIN!** +**💵 ${bjStandWin.toLocaleString()} Cash**` + (bjCharmActive ? " 🍀" : "");
+        result = `✅ **YOU WIN!** +**💵 ${eco.fmt(bjStandWin)} Cash**` + (bjCharmActive ? " 🍀" : "");
       } else if (pVal === dVal) {
         if (message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, game.bet);
         result = `🤝 **PUSH!** Bet returned.`;
@@ -6564,7 +6737,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
           await eco.addCopper(MASTER_ID, game.bet).catch(()=>{});
           addToTreasuryFees(game.bet, "gambling");
         }
-        result = "❌ **DEALER WINS.** Lost **💵 " + game.bet.toLocaleString() + " Cash**.";
+        result = "❌ **DEALER WINS.** Lost **💵 " + eco.fmt(game.bet) + " Cash**.";
       }
       return "🃏 **BLACKJACK — RESULT**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYour hand: **" + game.playerHand.join(" ") + "** (" + pVal + ")\nDealer hand: **" + game.dealerHand.join(" ") + "** (" + dVal + ")\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + result;
     }
@@ -6609,8 +6782,8 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
         addToTreasuryFees(bet, "gambling");
       }
       const raceResult = won
-        ? "🏆 **YOUR HORSE WON! " + picked.odds + "x** — **💵 " + payout.toLocaleString() + " Cash**!"
-        : "💀 **" + winner.name + " wins.** Not your horse. Lost **💵 " + bet.toLocaleString() + " Cash**.";
+        ? "🏆 **YOUR HORSE WON! " + picked.odds + "x** — **💵 " + eco.fmt(payout) + " Cash**!"
+        : "💀 **" + winner.name + " wins.** Not your horse. Lost **💵 " + eco.fmt(bet) + " Cash**.";
       return "🏇 **FAMILY RACES**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou bet on: **" + picked.name + "** (" + picked.odds + "x)\n\n" + raceLines + "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + raceResult;
     }
 
@@ -6837,7 +7010,9 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
 
     // ── Shop ─────────────────────────────────────────────────────────────────────
     case "shop":
-      return features.getShopDisplay();
+      // The shop menu is long — route to the ephemeral /shop slash command so it
+      // only shows to the person who asked, instead of dumping it in the channel.
+      return "🛒 The Family shop is big — pull it up privately with **/shop** (only you'll see it).";
     case "shop_buy":
       return await features.buyShopItem(message.author.id, cmd.itemId, cmd.quantity || 1);
     case "shop_use": {
@@ -7337,6 +7512,10 @@ const commands = [
     .setDescription("Show all economy commands — wallet, bank, gambling, shop (visible only to you)")
     .toJSON(),
   new SlashCommandBuilder()
+    .setName("shop")
+    .setDescription("Browse the Family shop — items, prices & effects (visible only to you)")
+    .toJSON(),
+  new SlashCommandBuilder()
     .setName("rank-help")
     .setDescription("Show moderation commands for your rank (Capo and above only, visible only to you)")
     .toJSON(),
@@ -7422,6 +7601,8 @@ async function init() {
   if (!process.env.SUPABASE_KEY)    throw new Error("SUPABASE_KEY is not set!");
   console.log("⏳ Loading setup config from Supabase...");
   await loadSetupConfig();
+  // Notoriety XP + economy bans (global, not per-guild) — load once at startup.
+  await eco.loadNotoriety();
   // Per-guild moderation data (roster/warnings/exile/watchlist/etc.) is loaded
   // once the client is ready and we actually know which guilds we're in —
   // see the ClientReady handler below.
@@ -8065,7 +8246,7 @@ async function init() {
       if (adminCh) await adminCh.send(`🤵 **[JARVIS MODE LOG] Jarvis Mode DEACTIVATED** by Don Clint.`).catch(() => {});
       await message.reply(
         `${currentMood.emoji} **Jarvis stepping back.** Cosa returns.\n` +
-        `Mood restored: **${currentMood.name}** — *${currentMood.desc}*`
+        `Mood restored: **${currentMood.name}** — *${getMoodBlurb(currentMood)}*`
       ).catch(() => {});
       return;
     }
@@ -8341,6 +8522,11 @@ async function init() {
         return;
       }
       if (isMentioned || repliedToBot) await message.reply(reply).catch(()=>{}); else await message.channel.send(reply).catch(()=>{});
+      // Notoriety XP for talking to Cosa (self-rate-limited to once per 40s).
+      if (message.author.id !== MASTER_ID) {
+        const _xp = eco.addXP(message.author.id, "chat");
+        if (_xp.leveledUp) announceNotoriety(message, _xp);
+      }
     } catch (err) {
       const elapsed = Date.now() - replyStartedAt;
       if (elapsed < MIN_REPLY_DELAY_MS) await new Promise(r => setTimeout(r, MIN_REPLY_DELAY_MS - elapsed));
@@ -8490,6 +8676,12 @@ async function init() {
         const e1 = new EmbedBuilder().setColor(0xF1C40F).setDescription(p1);
         const e2 = new EmbedBuilder().setColor(0xF1C40F).setDescription(p2);
         await interaction.reply({ embeds: [e1, e2], ephemeral: true }).catch(() => {});
+        return;
+      }
+      if (interaction.commandName === "shop") {
+        const shopText = features.getShopDisplay();
+        const embed = new EmbedBuilder().setColor(0xF1C40F).setDescription(shopText.slice(0, 4096));
+        await interaction.reply({ embeds: [embed], ephemeral: true }).catch(() => {});
         return;
       }
       if (interaction.commandName === "rank-help") {

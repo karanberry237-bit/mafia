@@ -9,7 +9,7 @@ const ws = require("ws");
 // flatten) are folded into `copper` automatically the moment they're read —
 // nobody's balance disappears, it just all becomes Cash going forward.
 function formatWallet(wallet) {
-  return `💵 ${Math.floor(wallet.copper || 0).toLocaleString()} Cash`;
+  return `💵 ${fmt(Math.floor(wallet.copper || 0))} Cash`;
 }
 
 function walletToCopper(wallet) {
@@ -95,7 +95,7 @@ async function payDebt(userId, amount) {
 
 function formatDebt(debt) {
   if (!debt || debt === 0) return null;
-  return "🔴 **YOU OWE THE FAMILY: " + debt.toLocaleString() + " Cash**";
+  return "🔴 **YOU OWE THE FAMILY: " + fmt(debt) + " Cash**";
 }
 
 async function addCopper(userId, copperAmount) {
@@ -147,6 +147,161 @@ const DAILY_REWARDS = {
 
 function getDailyAmount(rankKey) {
   return DAILY_REWARDS[rankKey] || DAILY_REWARDS.streetrat;
+}
+
+// ── Short-form number formatting ──────────────────────────────────────────────
+// Turns big Cash amounts into compact strings: 1000 -> "1k", 2500000 -> "2.5m",
+// 1000000000 -> "1b". One decimal place, only when it isn't a round number
+// (so "2m", not "2.0m"). Floors rather than rounds so we never overflow a unit
+// (e.g. 999,999 shows "999.9k", never "1000k"). Below 1000 it's printed as-is.
+function fmt(n) {
+  n = Math.floor(Number(n) || 0);
+  const neg = n < 0;
+  n = Math.abs(n);
+  const unit = (x, suffix) => {
+    const r = Math.floor(x * 10) / 10; // 1 decimal, floored
+    return (Number.isInteger(r) ? String(r) : r.toFixed(1)) + suffix;
+  };
+  let out;
+  if (n < 1e3)       out = String(n);
+  else if (n < 1e6)  out = unit(n / 1e3, "k");
+  else if (n < 1e9)  out = unit(n / 1e6, "m");
+  else if (n < 1e12) out = unit(n / 1e9, "b");
+  else               out = unit(n / 1e12, "t");
+  return (neg ? "-" : "") + out;
+}
+
+// ── Notoriety (activity leveling) ─────────────────────────────────────────────
+// A second ladder, separate from the Family rank. Earned purely by USING Cosa —
+// economy commands and just talking to her. Higher notoriety = a flat daily-cut
+// bonus that STACKS on top of your rank's daily. Grindy on purpose: Kingpin is
+// meant to take a dedicated player a month or two.
+//
+// `xp` on each tier is the CUMULATIVE XP required to reach it.
+const NOTORIETY_TIERS = [
+  { key: "nobody",      name: "Nobody",      emoji: "🚬", xp: 0,      dailyBonus: 0        },
+  { key: "whisper",     name: "Whisper",     emoji: "🍃", xp: 300,    dailyBonus: 5000     },
+  { key: "known",       name: "Known",       emoji: "👀", xp: 1200,   dailyBonus: 25000    },
+  { key: "respected",   name: "Respected",   emoji: "🤝", xp: 3500,   dailyBonus: 75000    },
+  { key: "connected",   name: "Connected",   emoji: "🕸️", xp: 9000,   dailyBonus: 200000   },
+  { key: "feared",      name: "Feared",      emoji: "😰", xp: 22000,  dailyBonus: 600000   },
+  { key: "notorious",   name: "Notorious",   emoji: "📰", xp: 55000,  dailyBonus: 1500000  },
+  { key: "untouchable", name: "Untouchable", emoji: "🛡️", xp: 120000, dailyBonus: 5000000  },
+  { key: "legend",      name: "Legend",      emoji: "🌟", xp: 210000, dailyBonus: 15000000 },
+  { key: "kingpin",     name: "Kingpin",     emoji: "👑", xp: 360000, dailyBonus: 50000000 },
+];
+
+// In-memory cache of per-user XP and economy bans, backed by a single
+// empire_data row ("notoriety_data"). Loaded once at startup, written back on a
+// throttle so per-message XP grants don't hammer the DB.
+const _xpCache = new Map();     // userId -> total xp (number)
+const _ecoBans = new Set();     // userIds banned from the economy
+const _xpCooldowns = new Map(); // userId -> timestamp of last XP grant (anti-spam)
+let _notorietyDirty = false;
+let _notorietyLoaded = false;
+
+// Per-source anti-spam windows. Talking is cheap so it's throttled hard;
+// commands cost a real cooldown/action already, so a light window just stops
+// someone macro-spamming `cosa balance` for infinite XP.
+const XP_COOLDOWNS = { chat: 40 * 1000, command: 8 * 1000 };
+// XP granted per grant, by source (kept modest so Kingpin stays a 1-2 month grind).
+const XP_AMOUNTS = { chat: [6, 10], command: [12, 20] };
+
+async function loadNotoriety() {
+  if (!supabase) { _notorietyLoaded = true; return; }
+  try {
+    const { data } = await supabase.from("empire_data").select("value").eq("key", "notoriety_data").maybeSingle();
+    const v = data?.value || {};
+    _xpCache.clear();
+    for (const [uid, xp] of Object.entries(v.xp || {})) _xpCache.set(uid, Number(xp) || 0);
+    _ecoBans.clear();
+    for (const uid of (v.bans || [])) _ecoBans.add(uid);
+    console.log(`✅ Notoriety loaded — ${_xpCache.size} players, ${_ecoBans.size} banned`);
+  } catch (e) {
+    console.error("[NOTORIETY LOAD]", e.message);
+  }
+  _notorietyLoaded = true;
+  // Periodic flush — only writes when something actually changed.
+  setInterval(() => { if (_notorietyDirty) saveNotoriety().catch(() => {}); }, 20000);
+}
+
+async function saveNotoriety() {
+  if (!supabase || !_notorietyLoaded) return;
+  try {
+    const value = { xp: Object.fromEntries(_xpCache), bans: [..._ecoBans] };
+    await supabase.from("empire_data").upsert({ key: "notoriety_data", value }, { onConflict: "key" });
+    _notorietyDirty = false;
+  } catch (e) {
+    console.error("[NOTORIETY SAVE]", e.message);
+  }
+}
+
+function getXP(userId) {
+  return _xpCache.get(userId) || 0;
+}
+
+// Which tier an XP total falls into.
+function getNotorietyTier(xp) {
+  let tier = NOTORIETY_TIERS[0];
+  for (const t of NOTORIETY_TIERS) { if (xp >= t.xp) tier = t; else break; }
+  return tier;
+}
+
+// The next tier up (or null if already Kingpin), for progress display.
+function getNextNotorietyTier(xp) {
+  for (const t of NOTORIETY_TIERS) { if (xp < t.xp) return t; }
+  return null;
+}
+
+function getNotorietyBonus(userId) {
+  return getNotorietyTier(getXP(userId)).dailyBonus;
+}
+
+// Grant XP for using Cosa. `source` is "chat" or "command"; each has its own
+// anti-spam window. The XP amount is rolled from XP_AMOUNTS for that source.
+// Returns { leveledUp, tier } so callers can announce a promotion. `null` tier
+// change on a cooldowned/no-op call.
+function addXP(userId, source = "command") {
+  const cur = getNotorietyTier(getXP(userId));
+  if (!userId) return { leveledUp: false, tier: cur };
+  const cd = XP_COOLDOWNS[source] || 0;
+  const key = userId + ":" + source;
+  const last = _xpCooldowns.get(key) || 0;
+  if (Date.now() - last < cd) return { leveledUp: false, tier: cur };
+  _xpCooldowns.set(key, Date.now());
+  const [lo, hi] = XP_AMOUNTS[source] || XP_AMOUNTS.command;
+  const amount = lo + Math.floor(Math.random() * (hi - lo + 1));
+  const before = getXP(userId);
+  const after = before + amount;
+  _xpCache.set(userId, after);
+  _notorietyDirty = true;
+  const afterTier = getNotorietyTier(after);
+  return { leveledUp: afterTier.key !== cur.key, tier: afterTier, prevTier: cur, xp: after, gained: amount };
+}
+
+// Admin: hard-set a user's XP (snaps them to whatever tier that lands in).
+function setXP(userId, amount) {
+  _xpCache.set(userId, Math.max(0, Math.floor(amount)));
+  _notorietyDirty = true;
+  saveNotoriety().catch(() => {});
+  return getNotorietyTier(getXP(userId));
+}
+
+// Admin: set a user straight to a named notoriety tier.
+function setNotorietyTier(userId, tierKey) {
+  const t = NOTORIETY_TIERS.find(x => x.key === tierKey.toLowerCase());
+  if (!t) return null;
+  return setXP(userId, t.xp);
+}
+
+function isEcoBanned(userId) {
+  return _ecoBans.has(userId);
+}
+
+function setEcoBan(userId, banned) {
+  if (banned) _ecoBans.add(userId); else _ecoBans.delete(userId);
+  _notorietyDirty = true;
+  saveNotoriety().catch(() => {});
 }
 
 // ── Slots ─────────────────────────────────────────────────────────────────────
@@ -281,11 +436,16 @@ function shouldRewardChat(userId) {
 const bjGames = new Map();
 
 module.exports = {
-  fromCopper, formatWallet, walletToCopper, parseBet,
+  fromCopper, formatWallet, walletToCopper, parseBet, fmt,
   initEconomy, getWallet, saveWallet, addCopper, deductCopper, getLeaderboard,
   getDailyAmount, DAILY_REWARDS,
   playSlots, spinWheel, WHEEL_SEGMENTS,
   bjHandValue, dealCard, newBjHand, bjGames,
   attemptRob, shouldRewardChat,
   getDebt, addDebt, payDebt, formatDebt,
+  // Notoriety leveling
+  NOTORIETY_TIERS, loadNotoriety, saveNotoriety,
+  getXP, addXP, setXP, setNotorietyTier,
+  getNotorietyTier, getNextNotorietyTier, getNotorietyBonus,
+  isEcoBanned, setEcoBan,
 };
