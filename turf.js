@@ -63,7 +63,7 @@ async function getAllZones() {
 
 async function claimZone(userId, zoneName) {
   const zoneDef = getZoneDef(zoneName);
-  if (!zoneDef) return { success: false, reason: "Unknown zone. Use **/turf list** to see zones." };
+  if (!zoneDef) return { success: false, reason: "Unknown zone. Use **Cosa turf list** to see zones." };
 
   const userGang = await gangs.getUserGang(userId);
   if (!userGang) return { success: false, reason: "You need to be in a gang to claim turf." };
@@ -71,7 +71,7 @@ async function claimZone(userId, zoneName) {
 
   const zone = await getZone(zoneDef.name);
   if (!zone) return { success: false, reason: "Zone not found — ask an admin to run turf setup." };
-  if (zone.controller_gang_id) return { success: false, reason: `**${zone.name}** is already controlled. Use **/turf attack** instead.` };
+  if (zone.controller_gang_id) return { success: false, reason: `**${zone.name}** is already controlled. Use **Cosa turf attack** instead.` };
 
   const deducted = await gangs.deductFromGangTreasury(userGang.gang.id, zoneDef.claimCost);
   if (!deducted) return { success: false, reason: `Gang treasury needs **${fmt(zoneDef.claimCost)}** to claim this zone.` };
@@ -106,7 +106,7 @@ async function attackZone(userId, zoneName) {
 
   const zone = await getZone(zoneDef.name);
   if (!zone) return { success: false, reason: "Zone not found." };
-  if (!zone.controller_gang_id) return { success: false, reason: `**${zone.name}** is unclaimed — use **/turf claim** instead.` };
+  if (!zone.controller_gang_id) return { success: false, reason: `**${zone.name}** is unclaimed — use **Cosa turf claim** instead.` };
   if (zone.controller_gang_id === attackerGang.gang.id) return { success: false, reason: "You already control this zone." };
 
   const remaining = getAttackCooldownRemaining(attackerGang.gang.id, zone.name);
