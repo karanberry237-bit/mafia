@@ -27,48 +27,48 @@ function initBusinesses(url, key) {
 
 // ── Business type ladders (5 tiers each) ──────────────────────────────────
 // cost = one-time cost to REACH this tier from the previous one (tier 1 cost = purchase price)
-// income = Cash generated per daily tick at this tier
-// upkeep = Cash owed per daily tick at this tier (unpaid upkeep pauses income accrual)
+// income = Cash generated per tick (every 6h) at this tier
+// upkeep = Cash owed per tick (every 6h) at this tier (unpaid upkeep pauses income accrual)
 // capacity = max pending Cash that can stack up before it must be collected
 const BUSINESS_TYPES = {
   laundromat: {
     label: "🧺 Laundromat", flavor: ["Corner Wash", "Suds & Co.", "The Spin Cycle", "Clean Slate Laundry", "Golden Suds Empire"],
     tiers: [
-      { cost: 50_000,    income: 8_000,   upkeep: 2_000,  capacity: 60_000 },
-      { cost: 150_000,   income: 20_000,  upkeep: 5_000,  capacity: 150_000 },
-      { cost: 400_000,   income: 50_000,  upkeep: 12_000, capacity: 400_000 },
-      { cost: 1_000_000, income: 120_000, upkeep: 30_000, capacity: 1_000_000 },
-      { cost: 2_500_000, income: 300_000, upkeep: 70_000, capacity: 2_500_000 },
+      { cost: 50_000,    income: 2_000,   upkeep: 500,    capacity: 60_000 },
+      { cost: 150_000,   income: 5_000,   upkeep: 1_250,  capacity: 150_000 },
+      { cost: 400_000,   income: 12_500,  upkeep: 3_000,  capacity: 400_000 },
+      { cost: 1_000_000, income: 30_000,  upkeep: 7_500,  capacity: 1_000_000 },
+      { cost: 2_500_000, income: 75_000,  upkeep: 17_500, capacity: 2_500_000 },
     ],
   },
   nightclub: {
     label: "🎷 Nightclub", flavor: ["Back Alley Bar", "The Velvet Room", "Club Onyx", "The Silver Fox", "The Golden Peacock"],
     tiers: [
-      { cost: 150_000,   income: 20_000,  upkeep: 6_000,  capacity: 150_000 },
-      { cost: 400_000,   income: 55_000,  upkeep: 15_000, capacity: 400_000 },
-      { cost: 1_000_000, income: 140_000, upkeep: 35_000, capacity: 1_000_000 },
-      { cost: 2_500_000, income: 350_000, upkeep: 85_000, capacity: 2_500_000 },
-      { cost: 6_000_000, income: 850_000, upkeep: 200_000, capacity: 6_000_000 },
+      { cost: 150_000,   income: 5_000,   upkeep: 1_500,  capacity: 150_000 },
+      { cost: 400_000,   income: 13_750,  upkeep: 3_750,  capacity: 400_000 },
+      { cost: 1_000_000, income: 35_000,  upkeep: 8_750,  capacity: 1_000_000 },
+      { cost: 2_500_000, income: 87_500,  upkeep: 21_250, capacity: 2_500_000 },
+      { cost: 6_000_000, income: 212_500, upkeep: 50_000, capacity: 6_000_000 },
     ],
   },
   shipping: {
     label: "🚢 Shipping Front", flavor: ["Dockside Freight", "Blue Anchor Shipping", "Continental Freight Co.", "Iron Harbor Logistics", "Trans-Atlantic Holdings"],
     tiers: [
-      { cost: 300_000,   income: 40_000,  upkeep: 12_000, capacity: 300_000 },
-      { cost: 800_000,   income: 100_000, upkeep: 28_000, capacity: 800_000 },
-      { cost: 2_000_000, income: 260_000, upkeep: 65_000, capacity: 2_000_000 },
-      { cost: 5_000_000, income: 650_000, upkeep: 160_000, capacity: 5_000_000 },
-      { cost: 12_000_000, income: 1_600_000, upkeep: 400_000, capacity: 12_000_000 },
+      { cost: 300_000,   income: 10_000,  upkeep: 3_000,  capacity: 300_000 },
+      { cost: 800_000,   income: 25_000,  upkeep: 7_000,  capacity: 800_000 },
+      { cost: 2_000_000, income: 65_000,  upkeep: 16_250, capacity: 2_000_000 },
+      { cost: 5_000_000, income: 162_500, upkeep: 40_000, capacity: 5_000_000 },
+      { cost: 12_000_000, income: 400_000, upkeep: 100_000, capacity: 12_000_000 },
     ],
   },
   casino: {
     label: "🎰 Casino", flavor: ["The Backroom Table", "Lucky Sevens", "The High Roller", "Diamond Point Casino", "The Emerald Palace"],
     tiers: [
-      { cost: 800_000,    income: 100_000,   upkeep: 35_000,  capacity: 800_000 },
-      { cost: 2_000_000,  income: 260_000,   upkeep: 80_000,  capacity: 2_000_000 },
-      { cost: 5_000_000,  income: 650_000,   upkeep: 190_000, capacity: 5_000_000 },
-      { cost: 12_000_000, income: 1_600_000, upkeep: 450_000, capacity: 12_000_000 },
-      { cost: 30_000_000, income: 4_000_000, upkeep: 1_100_000, capacity: 30_000_000 },
+      { cost: 800_000,    income: 25_000,   upkeep: 8_750,   capacity: 800_000 },
+      { cost: 2_000_000,  income: 65_000,   upkeep: 20_000,  capacity: 2_000_000 },
+      { cost: 5_000_000,  income: 162_500,  upkeep: 47_500,  capacity: 5_000_000 },
+      { cost: 12_000_000, income: 400_000,  upkeep: 112_500, capacity: 12_000_000 },
+      { cost: 30_000_000, income: 1_000_000, upkeep: 275_000, capacity: 30_000_000 },
     ],
   },
 };
@@ -79,10 +79,10 @@ const BUSINESS_TYPES = {
 // upkeep: extra daily upkeep on top of the business's own upkeep
 const SECURITY_LEVELS = [
   { label: "None",            defense: 0.00, skimCap: 0.50, upkeep: 0 },
-  { label: "🔒 Basic Locks",   defense: 0.10, skimCap: 0.40, upkeep: 1_000 },
-  { label: "💂 Guards",        defense: 0.22, skimCap: 0.30, upkeep: 4_000 },
-  { label: "🔫 Armed Guards",  defense: 0.35, skimCap: 0.20, upkeep: 12_000 },
-  { label: "🪖 Private Army",  defense: 0.50, skimCap: 0.10, upkeep: 35_000 },
+  { label: "🔒 Basic Locks",   defense: 0.10, skimCap: 0.40, upkeep: 250 },
+  { label: "💂 Guards",        defense: 0.22, skimCap: 0.30, upkeep: 1_000 },
+  { label: "🔫 Armed Guards",  defense: 0.35, skimCap: 0.20, upkeep: 3_000 },
+  { label: "🪖 Private Army",  defense: 0.50, skimCap: 0.10, upkeep: 8_750 },
 ];
 // Cost to upgrade security TO each level (index matches SECURITY_LEVELS, index 0 has no cost)
 const SECURITY_UPGRADE_COST = [0, 40_000, 120_000, 350_000, 900_000];
@@ -202,7 +202,7 @@ async function processBusiness(biz) {
   const now = Date.now();
   const lastProcessed = new Date(biz.last_processed).getTime();
   const hoursSince = (now - lastProcessed) / (1000 * 60 * 60);
-  if (hoursSince < 24) return biz;
+  if (hoursSince < 6) return biz;
 
   const def = BUSINESS_TYPES[biz.type];
   if (!def) return biz;
@@ -275,7 +275,7 @@ function formatBusinessCard(biz) {
   const secDef = SECURITY_LEVELS[biz.security_level];
   const flavorName = getFlavorName(biz.type, biz.tier);
   let out = `${def.label} — **${flavorName}** (Tier ${biz.tier}/${def.tiers.length})\n`;
-  out += `📈 Income/day: ${fmt(tierDef.income)} | 🧾 Upkeep/day: ${fmt(tierDef.upkeep)}\n`;
+  out += `📈 Income/6h: ${fmt(tierDef.income)} | 🧾 Upkeep/6h: ${fmt(tierDef.upkeep)}\n`;
   out += `🛡️ Security: ${secDef.label}\n`;
   out += `💰 Pending: ${fmt(biz.pending)} / ${fmt(tierDef.capacity)}\n`;
   if (biz.upkeep_owed > 0) out += `⚠️ Upkeep owed: **${fmt(biz.upkeep_owed)}** (income paused until paid)\n`;
