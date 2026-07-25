@@ -119,7 +119,7 @@ async function buyBusiness(userId, type, deductFromWallet) {
   if (!def) return { success: false, reason: "Unknown business type. Choose: " + Object.keys(BUSINESS_TYPES).join(", ") };
 
   const existing = await getBusiness(userId, type);
-  if (existing) return { success: false, reason: `You already own a **${def.label}**. Use **/business upgrade** to grow it.` };
+  if (existing) return { success: false, reason: `You already own a **${def.label}**. Use **Cosa business upgrade** to grow it.` };
 
   const tier1 = def.tiers[0];
   const deducted = await deductFromWallet(userId, tier1.cost);
