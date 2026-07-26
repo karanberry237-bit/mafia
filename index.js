@@ -8082,6 +8082,9 @@ const commands = [
             )
         )
     )
+    .addSubcommand(sub => sub.setName("call-meeting").setDescription("Call an early Commission vote (Commission gang leaders only, 3-day cooldown per gang)"))
+    .addSubcommand(sub => sub.setName("accept-meeting").setDescription("Agree to an in-session Commission meeting (Commission gang leaders only)"))
+    .addSubcommand(sub => sub.setName("force-vote").setDescription("Instantly resolve the current cycle's vote and payout (Don Clint only)"))
     .toJSON(),
 ];
 
@@ -9520,6 +9523,51 @@ async function init() {
             }
             const label = commission.TAX_CHOICES[res.taxKey].label;
             await interaction.reply({ content: `🕴️ **${res.gangName}** voted for **${label}**.`, ephemeral: true }).catch(() => {});
+            return;
+          }
+          if (sub === "call-meeting") {
+            const res = await commission.callMeeting(interaction.user.id);
+            if (!res.success) {
+              await interaction.reply({ content: "❌ " + res.reason, ephemeral: true }).catch(() => {});
+              return;
+            }
+            if (res.resolved) {
+              await interaction.reply({ content: `🕴️ **${res.gangName}** called an emergency Commission meeting — majority agreed instantly!` }).catch(() => {});
+              const text = commission.formatPayoutSummary(res.summary);
+              if (text) await interaction.followUp({ content: text }).catch(() => {});
+            } else {
+              await interaction.reply({ content: `🕴️ **${res.gangName}** called a Commission meeting (**${res.acceptedCount}/${res.neededTotal}** needed). Other Commission leaders can agree with **/commission accept-meeting** — closes in 1 hour if majority isn't reached.` }).catch(() => {});
+            }
+            return;
+          }
+          if (sub === "accept-meeting") {
+            const res = await commission.acceptMeeting(interaction.user.id);
+            if (!res.success) {
+              await interaction.reply({ content: "❌ " + res.reason, ephemeral: true }).catch(() => {});
+              return;
+            }
+            if (res.resolved) {
+              await interaction.reply({ content: `🕴️ **${res.gangName}** agreed — majority reached! The Commission's vote resolves now.` }).catch(() => {});
+              const text = commission.formatPayoutSummary(res.summary);
+              if (text) await interaction.followUp({ content: text }).catch(() => {});
+            } else {
+              await interaction.reply({ content: `🕴️ **${res.gangName}** agreed to the meeting (**${res.acceptedCount}/${res.neededTotal}** needed so far).` }).catch(() => {});
+            }
+            return;
+          }
+          if (sub === "force-vote") {
+            if (interaction.user.id !== MASTER_ID) {
+              await interaction.reply({ content: "🔫 Only Don Clint can force a Commission vote.", ephemeral: true }).catch(() => {});
+              return;
+            }
+            const summary = await commission.endCycleAndPayout();
+            if (!summary) {
+              await interaction.reply({ content: "📊 The Commission hasn't convened yet — nothing to resolve.", ephemeral: true }).catch(() => {});
+              return;
+            }
+            await interaction.reply({ content: "🤵 Forced the Commission's vote to resolve now." , ephemeral: true }).catch(() => {});
+            const text = commission.formatPayoutSummary(summary);
+            if (text) await interaction.followUp({ content: text }).catch(() => {});
             return;
           }
         } catch (e) {
