@@ -1253,8 +1253,8 @@ const SHOP_ITEMS = {
   noble_pass: {
     id: "noble_pass",
     name: "🪪 Made Pass",
-    desc: "Skip a gambling cooldown once",
-    price: 5000,         // 5,000 Cash
+    desc: "Skip a gambling cooldown once. Usable at most once every 5 minutes, no matter how many you own — stockpiling doesn't let you chain-skip.",
+    price: 20000,        // 20,000 Cash (up from 5,000)
     duration: null,
     rarity: "common",
   },
@@ -1317,10 +1317,10 @@ const SHOP_ITEMS = {
   house_favor: {
     id: "house_favor",
     name: "🎰 House Favor",
-    desc: "Guarantees no total-loss (💀/wipeout) result on your very next slots or wheel spin — whichever you play first. Doesn't boost payouts, just removes the floor once.",
-    price: 800000,       // 800,000 Cash
+    desc: "Guarantees no total-loss (💀/wipeout) result on your very next slots or wheel spin — whichever you play first. Doesn't boost payouts, just removes the floor once. Usable at most once per hour, no matter how many you own.",
+    price: 3000000,      // 3,000,000 Cash (up from 800,000)
     duration: null,
-    rarity: "rare",
+    rarity: "epic",
   },
   second_wind: {
     id: "second_wind",
@@ -1343,6 +1343,29 @@ const RARITY_LABEL  = {
   epic:      "🟣 Epic",
   legendary: "🟠 Legendary",
 };
+
+// ── Per-item real-time use cooldowns ──────────────────────────────────────────
+// Separate from inventory "uses" — owning 50 copies of an item no longer lets
+// you burn them back-to-back. You can only actually USE one every N ms, no
+// matter how many are sitting in inventory. Currently guards the two items
+// that were previously fully stackable/spammable: Made Pass (noble_pass) and
+// House Favor (house_favor).
+const ITEM_USE_COOLDOWNS = {
+  noble_pass: 5 * 60 * 1000,   // 5 minutes
+  house_favor: 60 * 60 * 1000, // 1 hour
+};
+const itemLastUsed = new Map(); // `${userId}:${itemId}` -> timestamp
+
+function getItemCooldownRemaining(userId, itemId) {
+  const cd = ITEM_USE_COOLDOWNS[itemId];
+  if (!cd) return 0;
+  const last = itemLastUsed.get(`${userId}:${itemId}`) || 0;
+  return Math.max(0, cd - (Date.now() - last));
+}
+
+function markItemUsed(userId, itemId) {
+  if (ITEM_USE_COOLDOWNS[itemId]) itemLastUsed.set(`${userId}:${itemId}`, Date.now());
+}
 
 const userInventories = new Map();
 const activeEffects = new Map();
@@ -1603,6 +1626,14 @@ function consumeItem(userId, itemId) {
     inv[itemId].uses = Math.max(0, inv[itemId].uses - 1);
     saveInventory(userId, inv).catch(() => {});
   }
+  markItemUsed(userId, itemId);
+}
+
+// ── Admin: wipe a user's entire shop inventory (Don Clint only, enforced by caller) ─
+async function resetInventory(userId) {
+  userInventories.set(userId, {});
+  await saveInventory(userId, {});
+  return true;
 }
 
 // Read-only peek at every shop item currently active/usable for a user
@@ -1759,4 +1790,5 @@ module.exports = {
   getActiveEffectsSummary,
   getShopDisplay, getInventoryDisplay, loadInventories,
   grantItem, grantRandomQuestItem, RARITY_LABEL,
+  getItemCooldownRemaining, resetInventory,
 };
