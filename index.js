@@ -161,6 +161,41 @@ function addToTreasuryFees(amount, type) {
   }
 }
 // robCooldowns, coinflipCooldowns: per-guild, see guildDataStore below.
+
+// Posts a rendered Bounty Poster image straight into the guild's configured
+// audit log channel — called automatically whenever a bounty is placed.
+// Silently no-ops if there's no audit channel set or the target's Discord
+// user can't be resolved (e.g. they've left the server).
+async function postBountyPosterToAudit(guildId, targetId, bounty) {
+  if (!guildId) return;
+  try {
+    const channelId = await auditlog.getAuditChannel(guildId);
+    if (!channelId) return;
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+    const targetUser = await client.users.fetch(targetId).catch(() => null);
+    if (!targetUser) return;
+
+    const contributors = (bounty.placed_by || []).length;
+    const msLeft = Math.max(0, new Date(bounty.expires_at).getTime() - Date.now());
+    const daysLeft = (msLeft / 86400000).toFixed(1);
+    const avatarUrl = targetUser.displayAvatarURL({ extension: "png", size: 256 });
+
+    const buf = await poster.renderPoster({
+      headerText: "BOUNTY",
+      avatarUrl,
+      name: targetUser.username,
+      subtitle: "Dead or Alive",
+      highlightValue: eco.fmt(bounty.total_amount),
+      lines: [`${contributors} contributor(s)`, `Expires in ${daysLeft}d`],
+      footerText: "Cosa Family",
+    });
+    const attachment = new AttachmentBuilder(buf, { name: "bounty.png" });
+    await channel.send({ files: [attachment] }).catch(() => {});
+  } catch (e) {
+    console.error("[BOUNTY POSTER AUDIT]", e.message);
+  }
+}
 const ROB_COOLDOWN_MS = 30 * 60 * 1000;
 const COINFLIP_COOLDOWN_MS = 5 * 60 * 1000;
 const loanCooldowns = new Map();
@@ -6026,6 +6061,7 @@ async function executePublicCommand(message, cmd, channelId) {
       const res = await bounties.placeBounty(message.author.id, cmd.targetId, cmd.amount, eco.deductCopper, eco.addCopper, MASTER_ID);
       if (!res.success) return "❌ " + res.reason;
       auditlog.logBountyPlaced(message.guild?.id, message.author.id, cmd.targetId, res.bounty.total_amount).catch(() => {});
+      postBountyPosterToAudit(message.guild?.id, cmd.targetId, res.bounty).catch(() => {});
       return `🎯 Bounty placed on <@${cmd.targetId}> — pool now **${eco.fmt(res.bounty.total_amount)} Cash**. Whoever robs them successfully collects it.`;
     }
     case "bounty_board": {
@@ -9637,7 +9673,6 @@ async function init() {
             `Rank: ${rankTitle}`,
             `Notoriety: ${tier.emoji} ${tier.name}`,
             `Gang: ${ug ? ug.gang.name : "None"}`,
-            `Lifetime earned: 💵 ${eco.fmt(wallet.total_earned || 0)}`,
           ];
           if (activeBounty && activeBounty.total_amount > 0) lines.push(`⚠️ Active bounty: 💵 ${eco.fmt(activeBounty.total_amount)}`);
 
@@ -9646,11 +9681,10 @@ async function init() {
             headerText: "WANTED",
             avatarUrl,
             name: targetUser.username,
-            subtitle: "— of the Family —",
-            highlightLabel: "On Hand",
-            highlightValue: `💵 ${eco.fmt(balance)}`,
+            subtitle: "Dead or Alive",
+            highlightValue: eco.fmt(balance),
             lines,
-            footerText: "By order of Don Clint",
+            footerText: "Cosa Family",
           });
           const attachment = new AttachmentBuilder(buf, { name: "wanted.png" });
           await interaction.editReply({ files: [attachment] }).catch(() => {});
@@ -9681,13 +9715,12 @@ async function init() {
             avatarUrl,
             name: targetUser.username,
             subtitle: "Dead or Alive",
-            highlightLabel: "Reward",
-            highlightValue: `💵 ${eco.fmt(bounty.total_amount)}`,
+            highlightValue: eco.fmt(bounty.total_amount),
             lines: [
               `${contributors} contributor(s)`,
               `Expires in ${daysLeft}d`,
             ],
-            footerText: "Collect it with a successful rob",
+            footerText: "Cosa Family",
           });
           const attachment = new AttachmentBuilder(buf, { name: "bounty.png" });
           await interaction.editReply({ files: [attachment] }).catch(() => {});
