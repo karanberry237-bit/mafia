@@ -4572,6 +4572,10 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+scavenge\b/.test(lower)) return { action: "scavenge" };
   if (/\bcosa\s+smuggle\b/.test(lower)) return { action: "smuggle" };
   if (/\bcosa\s+(quest|bount(?:y|ies))\s+claim\b/.test(lower)) return { action: "quest_claim" };
+  if (/\bcosa\s+bounty\s+place\b/.test(lower) && targetId) {
+    const amt = parseShortAmount(text.replace(/.*\bbounty\s+place\b/i, "").replace(/<@!?\d+>/g, ""));
+    return { action: "bounty_place", targetId, amount: amt };
+  }
   if (/\bcosa\s+(quests?|bount(?:y|ies))\b/.test(lower)) return { action: "quests" };
   if (/\bcosa\s+(jobs|hustles?)\b/.test(lower)) return { action: "jobs_help" };
   if (/\bcosa\s+(cooldowns|cds?|timers)\b/.test(lower)) return { action: "cooldowns" };
@@ -5193,7 +5197,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   }
 
   // Route eco commands to public handler
-  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","cooldowns","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","notoriety","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb"];
+  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","cooldowns","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","notoriety","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb","bounty_place"];
   if (ecoActions.includes(action)) {
     return await executePublicCommand(message, cmd, channelId);
   }
