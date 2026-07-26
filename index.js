@@ -3677,6 +3677,37 @@ async function handleGodModeSentence(text, message, guild, adminCh) {
 // State for the "Expand" button so a click can list every targeted member.
 // Keyed by a short random token embedded in the button's customId.
 const pendingMassBans = new Map(); // token -> { guildId, targets, skipped, requestedBy, createdAt }
+
+// ── Generic button pagination (used by /inventory-hoarders, /business-owners) ─
+const paginationStore = new Map(); // token -> { pages: string[], index, ownerId }
+let _paginationTokenSeq = 0;
+function newPaginationToken() { return `pg${Date.now()}_${_paginationTokenSeq++}`; }
+
+function buildPaginationRow(token, index, totalPages) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`page_nav:${token}:prev`).setLabel("◀ Prev").setStyle(ButtonStyle.Secondary).setDisabled(index <= 0),
+    new ButtonBuilder().setCustomId(`page_nav:${token}:next`).setLabel("Next ▶").setStyle(ButtonStyle.Secondary).setDisabled(index >= totalPages - 1),
+  );
+}
+
+async function sendPaginatedReply(interaction, pages, emptyMessage) {
+  if (!pages || pages.length === 0) {
+    await interaction.reply({ content: emptyMessage, ephemeral: true }).catch(() => {});
+    return;
+  }
+  if (pages.length === 1) {
+    await interaction.reply({ content: pages[0], ephemeral: true }).catch(() => {});
+    return;
+  }
+  const token = newPaginationToken();
+  paginationStore.set(token, { pages, index: 0, ownerId: interaction.user.id });
+  setTimeout(() => paginationStore.delete(token), 10 * 60000); // expire after 10 min
+  await interaction.reply({
+    content: `${pages[0]}\n\n*Page 1/${pages.length}*`,
+    components: [buildPaginationRow(token, 0, pages.length)],
+    ephemeral: true,
+  }).catch(() => {});
+}
 const MASSBAN_STATE_TTL = 5 * 60 * 1000;
 
 // Backing state for the "cosa remove channel <type>" select menu.
@@ -7944,6 +7975,14 @@ const commands = [
     .setDescription("Wipe a player's entire shop inventory (Don Clint only)")
     .addUserOption(opt => opt.setName("user").setDescription("Whose inventory to wipe").setRequired(true))
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("inventory-hoarders")
+    .setDescription("List everyone holding 50+ total shop items (Don Clint only)")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("business-owners")
+    .setDescription("Show a one-line summary of who owns which businesses (Don Clint only)")
+    .toJSON(),
 ];
 
 const LOYALTY_HELP_TEXT =
@@ -9030,6 +9069,25 @@ async function init() {
     }
 
     // ── Mass-ban "Expand full list" button ────────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith("page_nav:")) {
+      const [, token, dir] = interaction.customId.split(":");
+      const state = paginationStore.get(token);
+      if (!state) {
+        await interaction.reply({ content: "🔫 This list has expired.", ephemeral: true }).catch(() => {});
+        return;
+      }
+      if (interaction.user.id !== state.ownerId) {
+        await interaction.reply({ content: "🔫 This isn't yours to page through.", ephemeral: true }).catch(() => {});
+        return;
+      }
+      state.index = dir === "next" ? Math.min(state.pages.length - 1, state.index + 1) : Math.max(0, state.index - 1);
+      await interaction.update({
+        content: `${state.pages[state.index]}\n\n*Page ${state.index + 1}/${state.pages.length}*`,
+        components: [buildPaginationRow(token, state.index, state.pages.length)],
+      }).catch(() => {});
+      return;
+    }
+
     if (interaction.isButton() && interaction.customId.startsWith("massban_expand:")) {
       const token = interaction.customId.split(":")[1];
       const state = pendingMassBans.get(token);
@@ -9169,6 +9227,81 @@ async function init() {
         try {
           await features.resetInventory(targetUser.id);
           await interaction.reply({ content: `🎒 Wiped <@${targetUser.id}>'s entire shop inventory.`, ephemeral: true }).catch(() => {});
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "inventory-hoarders") {
+        if (interaction.user.id !== MASTER_ID) {
+          await interaction.reply({ content: "🔫 Only Don Clint can audit inventories.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        try {
+          const { data: invRows } = await supabase.from("inventories").select("*");
+          const totals = (invRows || []).map(row => {
+            let total = 0;
+            try {
+              const inv = JSON.parse(row.inventory);
+              for (const val of Object.values(inv)) {
+                if (val.uses !== undefined) total += val.uses;
+                else if (val.expiresAt && val.expiresAt > Date.now()) total += 1;
+              }
+            } catch {}
+            return { id: row.user_id, total };
+          }).filter(r => r.total >= 50).sort((a, b) => b.total - a.total);
+
+          const lines = totals.map((r, i) => `**#${i + 1}** <@${r.id}> — 🎒 ${r.total} item(s)`);
+          const PER_PAGE = 10;
+          const pages = [];
+          for (let i = 0; i < lines.length; i += PER_PAGE) {
+            pages.push(`🎒 **INVENTORY HOARDERS** *(50+ total items)*\n${lines.slice(i, i + PER_PAGE).join("\n")}`);
+          }
+          await sendPaginatedReply(interaction, pages, "📊 Nobody currently holds 50+ total shop items.");
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "business-owners") {
+        if (interaction.user.id !== MASTER_ID) {
+          await interaction.reply({ content: "🔫 Only Don Clint can audit businesses.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        try {
+          const { data: bizRows } = await supabase.from("businesses").select("owner_id, type, tier");
+          const TYPE_LABELS = { laundromat: "Laundromat", nightclub: "Nightclub", casino: "Casino", shipping: "Shipping Front" };
+          const byOwner = new Map();
+          for (const b of bizRows || []) {
+            if (!byOwner.has(b.owner_id)) byOwner.set(b.owner_id, new Map());
+            const typeMap = byOwner.get(b.owner_id);
+            if (!typeMap.has(b.type)) typeMap.set(b.type, []);
+            typeMap.get(b.type).push(b.tier);
+          }
+
+          function formatTiers(tiers) {
+            const sorted = [...tiers].sort((a, b) => a - b).map(t => `Lvl ${t}`);
+            return sorted.length === 2 ? sorted.join(" and ") : sorted.join(", ");
+          }
+
+          const lines = [];
+          for (const [ownerId, typeMap] of byOwner) {
+            const parts = [];
+            for (const [type, tiers] of typeMap) {
+              const label = TYPE_LABELS[type] || type;
+              parts.push(`${tiers.length} ${label}(s), ${formatTiers(tiers)}`);
+            }
+            lines.push(`<@${ownerId}> owns: ${parts.join(" || ")}`);
+          }
+
+          const PER_PAGE = 8;
+          const pages = [];
+          for (let i = 0; i < lines.length; i += PER_PAGE) {
+            pages.push(`🏢 **BUSINESS OWNERS**\n${lines.slice(i, i + PER_PAGE).join("\n")}`);
+          }
+          await sendPaginatedReply(interaction, pages, "📊 Nobody owns a business yet.");
         } catch (e) {
           await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
         }
