@@ -2,6 +2,7 @@ const { createClient } = require("@supabase/supabase-js");
 const eco = require("./economy.js");
 const bank = require("./bank.js");
 const ws = require("ws");
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 
 let MASTER_ID;
 let client;
@@ -334,94 +335,162 @@ async function endTriviaTournament(channelId, guild, tournament) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ── HEIST SYSTEM ───────────────────────────────────────────────
+// ── LIVE VAULT HEIST ─────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════
-const activeHeists = new Map();
+// Replaces the old text-join heist. Two live moments instead of one static
+// window: (1) a 60s join phase with a real button and a countdown message
+// that live-edits every 10s, and (2) after the crew assembles, an 8-second
+// "grab the cash" button window — everyone in the crew has to actually be
+// there and click in time to be counted in the payout. Miss the click,
+// you're still on the hook for your entry fee but get nothing back either
+// way. This is what makes it "live" instead of "set it and forget it."
+const activeHeists = new Map(); // channelId -> heist state
+const JOIN_WINDOW_MS = 60000;
+const GRAB_WINDOW_MS = 8000;
+const MAX_CREW = 10;
+
+function heistJoinRow(channelId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`heist_join:${channelId}`).setLabel("🦹 Join Heist").setStyle(ButtonStyle.Primary).setDisabled(disabled)
+  );
+}
+
+function heistGrabRow(channelId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`heist_grab:${channelId}`).setLabel("💰 GRAB IT").setStyle(ButtonStyle.Success).setDisabled(disabled)
+  );
+}
+
+function buildHeistJoinText(heist) {
+  const secondsLeft = Math.max(0, Math.ceil((heist.joinDeadline - Date.now()) / 1000));
+  const crewMentions = [...heist.participants.keys()].map(id => `<@${id}>`).join(", ");
+  return (
+    `🦹 **LIVE VAULT HEIST FORMING** 🦹\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `🏦 **Target vault:** ${eco.formatWallet(eco.fromCopper(heist.vaultCopper))}\n` +
+    `💸 **Entry fee:** ${eco.formatWallet(eco.fromCopper(heist.entryFee))}\n` +
+    `👥 **Crew (${heist.participants.size}/${MAX_CREW}):** ${crewMentions}\n\n` +
+    `Click **🦹 Join Heist** below to jump in!\n` +
+    `**Launching in ${secondsLeft}s...**\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `*More members = higher success chance. When it launches, you'll need to click again FAST to actually grab your cut — miss it, get nothing.*`
+  );
+}
 
 async function startHeist(channel, initiatorId, vaultCopper) {
   if (activeHeists.has(channel.id)) return "🔫 A heist is already being planned in this channel.";
 
   const entryFee = Math.max(100, Math.floor(vaultCopper * 0.05));
+  const deducted = await eco.deductCopper(initiatorId, entryFee).catch(() => null);
+  if (!deducted) return `🔫 You need **${eco.formatWallet(eco.fromCopper(entryFee))}** entry fee to start the heist.`;
+
   const heist = {
     channelId: channel.id,
     vaultCopper,
     entryFee,
-    participants: new Map(),
+    participants: new Map([[initiatorId, true]]),
     startedAt: Date.now(),
+    joinDeadline: Date.now() + JOIN_WINDOW_MS,
     launched: false,
+    messageId: null,
+    grabbers: null,
+    grabDeadline: null,
   };
-
-  const deducted = await eco.deductCopper(initiatorId, entryFee).catch(() => null);
-  if (!deducted) return `🔫 You need **${eco.formatWallet(eco.fromCopper(entryFee))}** entry fee to start the heist.`;
-
-  heist.participants.set(initiatorId, true);
   activeHeists.set(channel.id, heist);
 
-  await channel.send(
-    `🦹 **FAMILY HEIST FORMING** 🦹\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🏦 **Target vault:** ${eco.formatWallet(eco.fromCopper(vaultCopper))}\n` +
-    `💸 **Entry fee:** ${eco.formatWallet(eco.fromCopper(entryFee))}\n` +
-    `👥 **Crew so far:** 1 member\n\n` +
-    `Say **Cosa heist join** to join the crew!\n` +
-    `**Launching in 60 seconds...**\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `*More members = higher success chance (max 10).*\n` +
-    `*Win: split the vault. Fail: lose entry fee.*`
-  ).catch(() => null);
+  const msg = await channel.send({ content: buildHeistJoinText(heist), components: [heistJoinRow(channel.id)] }).catch(() => null);
+  if (msg) heist.messageId = msg.id;
 
-  setTimeout(() => executeHeist(channel.id, channel.guild), 60000);
+  const tickInterval = setInterval(async () => {
+    const h = activeHeists.get(channel.id);
+    if (!h || h.launched) { clearInterval(tickInterval); return; }
+    if (!h.messageId) return;
+    const message = await channel.messages.fetch(h.messageId).catch(() => null);
+    if (message) await message.edit({ content: buildHeistJoinText(h), components: [heistJoinRow(channel.id)] }).catch(() => {});
+  }, 10000);
+
+  setTimeout(() => executeHeist(channel.id, channel.guild).catch(e => console.error("[HEIST EXECUTE]", e.message)), JOIN_WINDOW_MS);
   return null;
 }
 
-async function joinHeist(channelId, userId, guild) {
+// Called from the heist_join button interaction.
+async function joinHeistButton(channelId, userId) {
   const heist = activeHeists.get(channelId);
-  if (!heist) return "🔫 No heist forming here. Start one with **Cosa heist [amount]**.";
-  if (heist.launched) return "🔫 The heist already launched — too late.";
-  if (heist.participants.has(userId)) return "🔫 You're already in the crew.";
-  if (heist.participants.size >= 10) return "🔫 Crew is full (10 max).";
+  if (!heist) return { success: false, reason: "No heist forming here anymore." };
+  if (heist.launched) return { success: false, reason: "The heist already launched — too late." };
+  if (heist.participants.has(userId)) return { success: false, reason: "You're already in the crew." };
+  if (heist.participants.size >= MAX_CREW) return { success: false, reason: `Crew is full (${MAX_CREW} max).` };
 
   const deducted = await eco.deductCopper(userId, heist.entryFee).catch(() => null);
-  if (!deducted) return `🔫 You need **${eco.formatWallet(eco.fromCopper(heist.entryFee))}** to join.`;
+  if (!deducted) return { success: false, reason: `You need ${eco.formatWallet(eco.fromCopper(heist.entryFee))} to join.` };
 
   heist.participants.set(userId, true);
-  const channel = guild.channels.cache.get(channelId);
-  if (channel) await channel.send(`🦹 <@${userId}> joined the crew! **(${heist.participants.size}/10 members)**`).catch(() => {});
-  return null;
+  return { success: true, heist };
+}
+
+// Called from the heist_grab button interaction, during the live grab window.
+async function grabHeistCash(channelId, userId) {
+  const heist = activeHeists.get(channelId);
+  if (!heist || !heist.launched || !heist.grabDeadline) return { success: false, reason: "No grab window active right now." };
+  if (Date.now() > heist.grabDeadline) return { success: false, reason: "Too slow — the window already closed." };
+  if (!heist.participants.has(userId)) return { success: false, reason: "You're not part of this heist's crew." };
+  if (heist.grabbers.has(userId)) return { success: false, reason: "You already grabbed it." };
+  heist.grabbers.add(userId);
+  return { success: true, grabbedCount: heist.grabbers.size };
 }
 
 async function executeHeist(channelId, guild) {
   const heist = activeHeists.get(channelId);
   if (!heist || heist.launched) return;
   heist.launched = true;
-  activeHeists.delete(channelId);
 
   const channel = guild.channels.cache.get(channelId);
-  if (!channel) return;
+  if (!channel) { activeHeists.delete(channelId); return; }
 
-  const crewSize = heist.participants.size;
-  const successChance = Math.min(0.80, 0.20 + (crewSize - 1) * 0.10);
-  const roll = Math.random();
-  const totalPot = heist.entryFee * crewSize;
-  const crewMentions = [...heist.participants.keys()].map(id => `<@${id}>`).join(", ");
+  const crewIds = [...heist.participants.keys()];
+  const totalPot = heist.entryFee * crewIds.length;
 
-  // Dramatic countdown
-  await channel.send(`🚨 **HEIST LAUNCHING** 🚨\n*${crewSize} crew member(s) assembled. Success chance: **${Math.round(successChance * 100)}%**\nBreaching the vault...*`).catch(() => {});
+  await channel.send(`🚨 **BREACHING THE VAULT** 🚨\n*${crewIds.length} crew member(s) assembled. Get ready...*`).catch(() => {});
   await new Promise(r => setTimeout(r, 3000));
+
+  // ── The live moment — everyone has to actually click to grab their cut ──
+  heist.grabbers = new Set();
+  heist.grabDeadline = Date.now() + GRAB_WINDOW_MS;
+  const crewMentions = crewIds.map(id => `<@${id}>`).join(", ");
+  const grabMsg = await channel.send({
+    content: `💰 **GRAB THE CASH — ${Math.round(GRAB_WINDOW_MS / 1000)} SECONDS!** 💰\n${crewMentions}\nClick below NOW or you get nothing, no matter how this goes.`,
+    components: [heistGrabRow(channelId)],
+  }).catch(() => null);
+
+  await new Promise(r => setTimeout(r, GRAB_WINDOW_MS));
+  if (grabMsg) await grabMsg.edit({ components: [heistGrabRow(channelId, true)] }).catch(() => {});
+
+  const grabbedIds = [...heist.grabbers].filter(id => heist.participants.has(id));
+  activeHeists.delete(channelId);
+
+  if (grabbedIds.length === 0) {
+    await eco.addCopper(MASTER_ID, totalPot).catch(() => {});
+    await channel.send(`😬 **Nobody grabbed the cash in time.** The whole crew's entry fees are gone — the vault stays locked.`).catch(() => {});
+    return;
+  }
+
+  const successChance = Math.min(0.80, 0.20 + (grabbedIds.length - 1) * 0.10);
+  const roll = Math.random();
+  const grabbedMentions = grabbedIds.map(id => `<@${id}>`).join(", ");
+  const missedCount = crewIds.length - grabbedIds.length;
+  const missedLine = missedCount > 0 ? `😬 *${missedCount} crew member(s) were too slow and get nothing.*\n` : "";
 
   if (roll < successChance) {
     const totalPrize = heist.vaultCopper + totalPot;
-    const perPerson = Math.floor(totalPrize / crewSize);
-    for (const [uid] of heist.participants) {
-      await eco.addCopper(uid, perPerson).catch(() => {});
-    }
+    const perPerson = Math.floor(totalPrize / grabbedIds.length);
+    for (const uid of grabbedIds) await eco.addCopper(uid, perPerson).catch(() => {});
     await eco.deductCopper(MASTER_ID, heist.vaultCopper).catch(() => {});
     await channel.send(
       `💰 **HEIST SUCCESSFUL!** 💰\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `🦹 **Crew:** ${crewMentions}\n` +
+      `🦹 **Grabbed in time:** ${grabbedMentions}\n${missedLine}` +
       `🏦 **Vault cracked:** ${eco.formatWallet(eco.fromCopper(heist.vaultCopper))}\n` +
-      `💸 **Each member gets:** ${eco.formatWallet(eco.fromCopper(perPerson))}\n` +
+      `💸 **Each grabber gets:** ${eco.formatWallet(eco.fromCopper(perPerson))}\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
       `*The Family's vault has been hit. Don Clint is NOT pleased. 😤*`
     ).catch(() => {});
@@ -430,9 +499,9 @@ async function executeHeist(channelId, guild) {
     await channel.send(
       `🚨 **HEIST FAILED!** 🚨\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `🦹 **Crew:** ${crewMentions}\n` +
+      `🦹 **In the vault:** ${grabbedMentions}\n${missedLine}` +
       `💀 **Guards caught you all!**\n` +
-      `💸 **Entry fees seized:** ${eco.formatWallet(eco.fromCopper(totalPot))} → the Vig\n` +
+      `💸 **Every crew member's entry fee seized:** ${eco.formatWallet(eco.fromCopper(totalPot))} → the Vig\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
       `*${Math.round(successChance * 100)}% chance and you still blew it. Disgraceful.*`
     ).catch(() => {});
@@ -1767,7 +1836,7 @@ module.exports = {
   // Trivia
   activeTournaments, startTriviaRound, getScoreBoard, endTriviaTournament, TRIVIA_QUESTIONS,
   // Heist
-  activeHeists, startHeist, joinHeist, executeHeist,
+  activeHeists, startHeist, joinHeistButton, grabHeistCash, executeHeist,
   // Stocks
   STOCKS, stockPrices,
   get stockCandles() { return stockCandles; },
