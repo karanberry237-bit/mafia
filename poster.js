@@ -13,7 +13,13 @@ try {
 const WIDTH = 620;
 const HEIGHT = 878;
 const MARGIN = 30;
-const PHOTO_SIZE = WIDTH - MARGIN * 2 - 16;
+
+// Photo box is now a fixed, smaller square (instead of "fill the whole
+// width"), and gets centered horizontally. This is the actual fix for the
+// overlap bug: the old PHOTO_SIZE (WIDTH - MARGIN*2 - 16 ≈ 544px) left almost
+// no vertical room between the photo and the bounty number, so
+// "DEAD OR ALIVE" / the name / the bounty all got crushed into the same band.
+const PHOTO_SIZE = 420;
 
 // Full digit amount, no compact k/m/b shorthand and no comma separators —
 // e.g. 1_000_000 -> "1000000". This is what goes after the "$" on the poster.
@@ -54,6 +60,21 @@ function drawFlourish(ctx, x, y, flip) {
   ctx.restore();
 }
 
+// Picks the largest font size (down from maxSize, in 2px steps) at which
+// `text` still fits within `maxWidth` using `weight`/`family`. This is what
+// keeps a long Discord display name from overflowing the poster width or,
+// worse, from being shrunk so unpredictably that it collides with neighboring
+// text — every size step still respects the same baseline.
+function fitFontSize(ctx, text, family, weight, maxSize, minSize, maxWidth) {
+  let size = maxSize;
+  while (size > minSize) {
+    ctx.font = `${weight} ${size}px ${family}, sans-serif`;
+    if (ctx.measureText(text).width <= maxWidth) break;
+    size -= 2;
+  }
+  return size;
+}
+
 // One Piece style wanted/bounty poster, matching the reference template:
 //   headerText     — "WANTED" or "BOUNTY"
 //   avatarUrl      — Discord avatar URL, placed in the big photo box as-is
@@ -84,13 +105,28 @@ async function renderPoster({ headerText, avatarUrl, name, subtitle, highlightVa
   ctx.textAlign = "center";
   ctx.fillStyle = "#3a2a18";
 
+  // ----- Fixed zones, top and bottom, laid out first -----
+  // Header sits in a fixed band at the top.
+  const headerY = 108;
+
+  // Footer (fine print + bold family name) is a fixed band at the bottom.
+  const footerLine1Y = HEIGHT - 42;
+  const footerLine2Y = HEIGHT - 30;
+  const footerBoldY = HEIGHT - 34;
+
+  // The bounty number sits just above the footer, with a fixed gap.
+  const bountyY = footerLine1Y - 46;
+
+  // ----- Everything else derives from what came before it, so it can never -----
+  // ----- overlap the fixed zones above or the fixed bounty number below.   -----
+
   // Big bold "WANTED"/"BOUNTY" headline
   ctx.font = "bold 84px PosterFont, sans-serif";
-  ctx.fillText(headerText, WIDTH / 2, 108);
+  ctx.fillText(headerText, WIDTH / 2, headerY);
 
-  // White photo box
-  const photoX = MARGIN + 8;
-  const photoY = 138;
+  // White photo box, fixed size, centered horizontally
+  const photoX = (WIDTH - PHOTO_SIZE) / 2;
+  const photoY = headerY + 40;
   ctx.fillStyle = "#3a2a18";
   ctx.fillRect(photoX - 4, photoY - 4, PHOTO_SIZE + 8, PHOTO_SIZE + 8);
   ctx.fillStyle = "#ffffff";
@@ -105,37 +141,46 @@ async function renderPoster({ headerText, avatarUrl, name, subtitle, highlightVa
   ctx.lineWidth = 2;
   ctx.strokeRect(photoX, photoY, PHOTO_SIZE, PHOTO_SIZE);
 
-  let y = photoY + PHOTO_SIZE + 58;
+  const photoBottom = photoY + PHOTO_SIZE;
 
   // "DEAD OR ALIVE" with flourishes on either side
+  const subtitleY = photoBottom + 50;
   ctx.fillStyle = "#3a2a18";
   ctx.font = "32px PosterFont, sans-serif";
-  drawSpacedText(ctx, subtitle || "DEAD OR ALIVE", WIDTH / 2, y, 6);
-  drawFlourish(ctx, MARGIN + 30, y - 10, false);
-  drawFlourish(ctx, WIDTH - MARGIN - 30, y - 10, true);
+  drawSpacedText(ctx, subtitle || "DEAD OR ALIVE", WIDTH / 2, subtitleY, 6);
+  drawFlourish(ctx, MARGIN + 30, subtitleY - 10, false);
+  drawFlourish(ctx, WIDTH - MARGIN - 30, subtitleY - 10, true);
 
-  y += 52;
+  // Name — auto-shrinks to fit the available width so long names never
+  // spill past the border or crowd the bounty number below.
+  const nameY = subtitleY + 52;
+  const nameMaxWidth = WIDTH - MARGIN * 2 - 40;
+  const nameText = (name || "").toUpperCase();
+  const nameSize = fitFontSize(ctx, nameText, "PosterFont", "bold", 40, 22, nameMaxWidth);
+  ctx.font = `bold ${nameSize}px PosterFont, sans-serif`;
+  ctx.fillText(nameText, WIDTH / 2, nameY);
 
-  // Name
-  ctx.font = "bold 40px PosterFont, sans-serif";
-  ctx.fillText((name || "").toUpperCase(), WIDTH / 2, y);
+  // Safety net: if a very tall stack of content above ever pushed the name
+  // past where the bounty number starts, clamp the bounty number down so it
+  // never renders on top of the name. In the normal (fixed layout) case this
+  // is a no-op since bountyY already sits comfortably below nameY.
+  const bountyYSafe = Math.max(bountyY, nameY + 60);
 
   // Big bounty number — the focal point, full digits, no shorthand
-  y = HEIGHT - 110;
   ctx.font = "bold 56px PosterFont, sans-serif";
-  ctx.fillText(`$${highlightValue}`, WIDTH / 2, y);
+  ctx.fillText(`$${highlightValue}`, WIDTH / 2, bountyYSafe);
 
   // Bottom row — tiny fine print bottom-left, bold word bottom-right
   ctx.textAlign = "left";
   ctx.font = "10px PosterFont, sans-serif";
   ctx.fillStyle = "#4a3520";
-  ctx.fillText("THIS POSTER IS PROPERTY OF THE COSA FAMILY.", MARGIN + 10, HEIGHT - 42);
-  ctx.fillText("UNAUTHORIZED REMOVAL WILL BE MET WITH CONSEQUENCE.", MARGIN + 10, HEIGHT - 30);
+  ctx.fillText("THIS POSTER IS PROPERTY OF THE COSA FAMILY.", MARGIN + 10, footerLine1Y);
+  ctx.fillText("UNAUTHORIZED REMOVAL WILL BE MET WITH CONSEQUENCE.", MARGIN + 10, footerLine2Y);
 
   ctx.textAlign = "right";
   ctx.font = "bold 28px PosterFont, sans-serif";
   ctx.fillStyle = "#3a2a18";
-  ctx.fillText((footerText || "COSA FAMILY").toUpperCase(), WIDTH - MARGIN - 10, HEIGHT - 34);
+  ctx.fillText((footerText || "COSA FAMILY").toUpperCase(), WIDTH - MARGIN - 10, footerBoldY);
 
   return canvas.toBuffer("image/png");
 }
