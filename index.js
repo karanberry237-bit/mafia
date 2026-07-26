@@ -185,9 +185,8 @@ async function postBountyPosterToAudit(guildId, targetId, bounty) {
       headerText: "BOUNTY",
       avatarUrl,
       name: targetUser.username,
-      subtitle: "Dead or Alive",
-      highlightValue: eco.fmt(bounty.total_amount),
-      lines: [`${contributors} contributor(s)`, `Expires in ${daysLeft}d`],
+      subtitle: "DEAD OR ALIVE",
+      highlightValue: poster.formatFullAmount(bounty.total_amount),
       footerText: "Cosa Family",
     });
     const attachment = new AttachmentBuilder(buf, { name: "bounty.png" });
@@ -9669,21 +9668,13 @@ async function init() {
           const ug = await gangs.getUserGang(targetUser.id);
           const activeBounty = await bounties.getBounty(targetUser.id);
 
-          const lines = [
-            `Rank: ${rankTitle}`,
-            `Notoriety: ${tier.emoji} ${tier.name}`,
-            `Gang: ${ug ? ug.gang.name : "None"}`,
-          ];
-          if (activeBounty && activeBounty.total_amount > 0) lines.push(`⚠️ Active bounty: 💵 ${eco.fmt(activeBounty.total_amount)}`);
-
           const avatarUrl = targetUser.displayAvatarURL({ extension: "png", size: 256 });
           const buf = await poster.renderPoster({
             headerText: "WANTED",
             avatarUrl,
             name: targetUser.username,
-            subtitle: "Dead or Alive",
-            highlightValue: eco.fmt(balance),
-            lines,
+            subtitle: "DEAD OR ALIVE",
+            highlightValue: poster.formatFullAmount(balance),
             footerText: "Cosa Family",
           });
           const attachment = new AttachmentBuilder(buf, { name: "wanted.png" });
@@ -9714,12 +9705,8 @@ async function init() {
             headerText: "BOUNTY",
             avatarUrl,
             name: targetUser.username,
-            subtitle: "Dead or Alive",
-            highlightValue: eco.fmt(bounty.total_amount),
-            lines: [
-              `${contributors} contributor(s)`,
-              `Expires in ${daysLeft}d`,
-            ],
+            subtitle: "DEAD OR ALIVE",
+            highlightValue: poster.formatFullAmount(bounty.total_amount),
             footerText: "Cosa Family",
           });
           const attachment = new AttachmentBuilder(buf, { name: "bounty.png" });
