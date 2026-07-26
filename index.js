@@ -8117,8 +8117,13 @@ async function init() {
     }
     try {
       const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
-      await rest.put(Routes.applicationCommands(readyClient.user.id), { body: commands });
-      console.log("✅ Slash commands registered.");
+      // Per-guild registration — applies instantly (global registration can take
+      // up to an hour to propagate to clients). Registers the same command set
+      // in every guild the bot is currently in.
+      for (const guildInLoop of readyClient.guilds.cache.values()) {
+        await rest.put(Routes.applicationGuildCommands(readyClient.user.id, guildInLoop.id), { body: commands });
+      }
+      console.log(`✅ Slash commands registered instantly in ${readyClient.guilds.cache.size} guild(s).`);
     } catch (err) { console.error("Slash command registration failed:", err); }
   });
 
