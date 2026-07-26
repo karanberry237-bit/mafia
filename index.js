@@ -154,7 +154,7 @@ const loanCooldowns = new Map();
 const activeLoanData = new Map(); // userId -> { amount, dueDate, rankKey }
 
 // ── Anti-spam: 3 messages in 5s = warning, 3 warnings = 30 min mute ──────────
-const SPAM_WINDOW_MS = 5000;
+const SPAM_WINDOW_MS = 2000;
 const SPAM_MSG_THRESHOLD = 3;
 const SPAM_WARNS_TO_MUTE = 3;
 const SPAM_MUTE_MS = 30 * 60 * 1000;
@@ -599,7 +599,7 @@ const guildEventQueuePriority = [];
 let guildEventProcessing = false;
 
 function runGuildEvent(guildId, handler, opts = {}) {
-  const task = { guildId, handler };
+  const task = { guildId, handler, authorId: opts.authorId || null };
   if (opts.priority) guildEventQueuePriority.push(task);
   else guildEventQueueNormal.push(task);
   processGuildEventQueue();
@@ -618,6 +618,21 @@ async function processGuildEventQueue() {
     }
   }
   guildEventProcessing = false;
+}
+
+// Drops every still-queued (not-yet-started) message from this user — used
+// when someone gets muted for spamming, so the rest of their burst doesn't
+// still get replied to one by one after the mute lands. Can't touch a message
+// that's already mid-processing (no safe way to cancel that), only ones still
+// waiting in line.
+function purgeQueuedMessagesFrom(userId) {
+  let removed = 0;
+  for (const q of [guildEventQueuePriority, guildEventQueueNormal]) {
+    for (let i = q.length - 1; i >= 0; i--) {
+      if (q[i].authorId === userId) { q.splice(i, 1); removed++; }
+    }
+  }
+  return removed;
 }
 
 const SETUP_CONFIG_KEY = "cosa_setup_ids";
@@ -8310,7 +8325,7 @@ async function init() {
     const channelId = message.channelId;
     const isMaster = message.author.id === MASTER_ID;
 
-    // ── Anti-spam: 3 messages in 5s = warning, 3 warnings = 30 min mute ──────
+    // ── Anti-spam: 3 messages in 2s = warning, 3 warnings = 30 min mute ──────
     if (!isDM && !isMaster) {
       const now = Date.now();
       const hist = (spamTimestamps.get(message.author.id) || []).filter(t => now - t < SPAM_WINDOW_MS);
@@ -8325,6 +8340,10 @@ async function init() {
           const member = await message.guild.members.fetch(message.author.id).catch(() => null);
           if (member) {
             await member.timeout(SPAM_MUTE_MS, "Anti-spam: 3 spam warnings").catch(() => {});
+            // Drop the rest of their burst still sitting in the queue — no
+            // point replying to messages 4, 5, 6... from the same spam burst
+            // after they've already been muted for it.
+            purgeQueuedMessagesFrom(message.author.id);
             await message.channel.send(`🔇 <@${message.author.id}> hit **3 spam warnings** — muted for **30 minutes**.`).catch(() => {});
           }
         } else {
@@ -9099,7 +9118,7 @@ async function init() {
       if (e.includes("rate limit") || e.includes("429")) await message.reply("give me a sec 🔫").catch(()=>{});
       else await message.reply(`🔫 Something went wrong on my end. Try again.`).catch(()=>{});
     }
-    }, { priority: isDonCommandShaped });
+    }, { priority: isDonCommandShaped, authorId: message.author.id });
   });
 
   // ── Slash Command Handler ───────────────────────────────────────────────────
