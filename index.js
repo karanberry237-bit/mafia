@@ -153,6 +153,14 @@ const COINFLIP_COOLDOWN_MS = 5 * 60 * 1000;
 const loanCooldowns = new Map();
 const activeLoanData = new Map(); // userId -> { amount, dueDate, rankKey }
 
+// ── Anti-spam: 3 messages in 5s = warning, 3 warnings = 30 min mute ──────────
+const SPAM_WINDOW_MS = 5000;
+const SPAM_MSG_THRESHOLD = 3;
+const SPAM_WARNS_TO_MUTE = 3;
+const SPAM_MUTE_MS = 30 * 60 * 1000;
+const spamTimestamps = new Map(); // userId -> [timestamps]
+const spamWarnings = new Map();   // userId -> count
+
 async function checkGambleCooldown(userId) {
   if (userId === MASTER_ID) return null;
   if (gamblingBlacklist.has(userId)) return "⛔ You are blacklisted from gambling by Don Clint.";
@@ -580,17 +588,36 @@ function captureGuildConfig(guildId) {
 // each event's activateGuildConfig() call and everything it does with the
 // globals afterward complete atomically before the next event is allowed to
 // activate a (possibly different) guild's config.
-let guildEventQueue = Promise.resolve();
-function runGuildEvent(guildId, handler) {
-  guildEventQueue = guildEventQueue.then(async () => {
-    activateGuildConfig(guildId); // guildId undefined (DMs) resolves to the shared "__dm__" bucket
+// Two FIFO lanes + a single processing loop — only one event handler ever runs
+// at a time (preserving the original atomicity guarantee), but priority-tagged
+// tasks are always pulled before normal ones. This can't interrupt a handler
+// that's already mid-await (no safe way to cancel an in-flight async fn), but
+// it guarantees a priority task never waits behind a backlog of ones that
+// haven't started yet — which is the visible effect we actually want.
+const guildEventQueueNormal = [];
+const guildEventQueuePriority = [];
+let guildEventProcessing = false;
+
+function runGuildEvent(guildId, handler, opts = {}) {
+  const task = { guildId, handler };
+  if (opts.priority) guildEventQueuePriority.push(task);
+  else guildEventQueueNormal.push(task);
+  processGuildEventQueue();
+}
+
+async function processGuildEventQueue() {
+  if (guildEventProcessing) return;
+  guildEventProcessing = true;
+  while (guildEventQueuePriority.length || guildEventQueueNormal.length) {
+    const task = guildEventQueuePriority.length ? guildEventQueuePriority.shift() : guildEventQueueNormal.shift();
+    activateGuildConfig(task.guildId); // guildId undefined (DMs) resolves to the shared "__dm__" bucket
     try {
-      await handler();
+      await task.handler();
     } catch (e) {
       console.error("[GUILD EVENT]", e.stack || e.message);
     }
-  });
-  return guildEventQueue;
+  }
+  guildEventProcessing = false;
 }
 
 const SETUP_CONFIG_KEY = "cosa_setup_ids";
@@ -5925,9 +5952,8 @@ async function executePublicCommand(message, cmd, channelId) {
       return `💰 Raided <@${cmd.targetId}>'s ${bizLabel} for **${eco.fmt(res.stolen)} Cash**!`;
     }
     case "business_list": {
-      const list = await businesses.getUserBusinesses(cmd.targetId);
-      if (list.length === 0) return "🏢 No businesses owned yet. Try **Cosa business buy laundromat**.";
-      return list.map(b => businesses.formatBusinessCard(b)).join("\n\n");
+      // Don't flood the channel — point them at the private slash command instead.
+      return "Use **/business** instead — it's private, only you'll see it.";
     }
 
     // ── Alliances ────────────────────────────────────────────────────────
@@ -7239,7 +7265,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
     case "stock_buy":
       return await features.buyStock(message.author.id, cmd.ticker, cmd.shares);
     case "stock_portfolio":
-      return await features.getPortfolio(message.author.id);
+      return "Use **/portfolio** instead — it's private, only you'll see it.";
     case "stock_history":
       return await features.getStockHistory(message.author.id);
     case "firm_pump": {
@@ -7353,7 +7379,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       return useResult;
     }
     case "inventory":
-      return features.getInventoryDisplay(message.author.id);
+      return "Use **/inventory** instead — it's private, only you'll see it.";
 
     // ── Firms ─────────────────────────────────────────────────────────────────────
     case "firm_create_help":
@@ -7384,7 +7410,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
     case "firm_list":
       return await firms.listFirms();
     case "firm_portfolio":
-      return await firms.getMyFirmShares(message.author.id);
+      return "Use **/firm-portfolio** instead — it's private, only you'll see it.";
     // ── Don-only firm controls ───────────────────────────────────────────────────
     case "firm_delete": {
       if (message.author.id !== MASTER_ID) return "Don only.";
@@ -7983,6 +8009,23 @@ const commands = [
     .setName("business-owners")
     .setDescription("Show a one-line summary of who owns which businesses (Don Clint only)")
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("business")
+    .setDescription("View your (or someone else's) businesses — visible only to you")
+    .addUserOption(opt => opt.setName("user").setDescription("Whose businesses to view (defaults to you)").setRequired(false))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("inventory")
+    .setDescription("View your shop inventory — visible only to you")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("portfolio")
+    .setDescription("View your stock portfolio — visible only to you")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("firm-portfolio")
+    .setDescription("View your firm shares — visible only to you")
+    .toJSON(),
 ];
 
 const LOYALTY_HELP_TEXT =
@@ -8228,6 +8271,11 @@ async function init() {
 
   // ── Message Handler ─────────────────────────────────────────────────────────
   client.on(Events.MessageCreate, (message) => {
+    // Give the Don's commands priority in the processing queue — a rough,
+    // cheap check (not full command parsing) so it can run before queueing.
+    // Only fires for command-shaped messages, never for casual chat, and only
+    // for the Don himself.
+    const isDonCommandShaped = message.author.id === MASTER_ID && /\bcosa\b/i.test(message.content);
     runGuildEvent(message.guild?.id, async () => {
     if (message.author.bot) {
       // NOTE: automod removed — Cosa no longer inspects or deletes other bots'
@@ -8261,6 +8309,30 @@ async function init() {
     // above, atomically with respect to every other guild's events.
     const channelId = message.channelId;
     const isMaster = message.author.id === MASTER_ID;
+
+    // ── Anti-spam: 3 messages in 5s = warning, 3 warnings = 30 min mute ──────
+    if (!isDM && !isMaster) {
+      const now = Date.now();
+      const hist = (spamTimestamps.get(message.author.id) || []).filter(t => now - t < SPAM_WINDOW_MS);
+      hist.push(now);
+      spamTimestamps.set(message.author.id, hist);
+      if (hist.length >= SPAM_MSG_THRESHOLD) {
+        spamTimestamps.set(message.author.id, []); // reset window once triggered
+        const warns = (spamWarnings.get(message.author.id) || 0) + 1;
+        spamWarnings.set(message.author.id, warns);
+        if (warns >= SPAM_WARNS_TO_MUTE) {
+          spamWarnings.set(message.author.id, 0);
+          const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+          if (member) {
+            await member.timeout(SPAM_MUTE_MS, "Anti-spam: 3 spam warnings").catch(() => {});
+            await message.channel.send(`🔇 <@${message.author.id}> hit **3 spam warnings** — muted for **30 minutes**.`).catch(() => {});
+          }
+        } else {
+          await message.channel.send(`⚠️ <@${message.author.id}> slow down — that's spam. Warning **${warns}/${SPAM_WARNS_TO_MUTE}** (3 warnings = 30 min mute).`).catch(() => {});
+        }
+        return;
+      }
+    }
     const isMadeMan = familyRoster.has(message.author.id);
     const isModUserBool = isModUser(message.author.id);
     const isMentioned = message.mentions.has(client.user);
@@ -9027,11 +9099,12 @@ async function init() {
       if (e.includes("rate limit") || e.includes("429")) await message.reply("give me a sec 🔫").catch(()=>{});
       else await message.reply(`🔫 Something went wrong on my end. Try again.`).catch(()=>{});
     }
-    });
+    }, { priority: isDonCommandShaped });
   });
 
   // ── Slash Command Handler ───────────────────────────────────────────────────
   client.on(Events.InteractionCreate, (interaction) => {
+    const isDonInteraction = interaction.user?.id === MASTER_ID;
     runGuildEvent(interaction.guild?.id, async () => {
 
     // ── "cosa remove channel" select menu ─────────────────────────────────────
@@ -9293,7 +9366,7 @@ async function init() {
               const label = TYPE_LABELS[type] || type;
               parts.push(`${tiers.length} ${label}(s), ${formatTiers(tiers)}`);
             }
-            lines.push(`<@${ownerId}> owns: ${parts.join(" || ")}`);
+            lines.push(`<@${ownerId}> owns: ${parts.join(" • ")}`);
           }
 
           const PER_PAGE = 8;
@@ -9302,6 +9375,52 @@ async function init() {
             pages.push(`🏢 **BUSINESS OWNERS**\n${lines.slice(i, i + PER_PAGE).join("\n")}`);
           }
           await sendPaginatedReply(interaction, pages, "📊 Nobody owns a business yet.");
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "business") {
+        const targetUser = interaction.options.getUser("user") || interaction.user;
+        try {
+          const list = await businesses.getUserBusinesses(targetUser.id);
+          if (list.length === 0) {
+            await interaction.reply({ content: `🏢 ${targetUser.id === interaction.user.id ? "You don't" : "They don't"} own any businesses yet.`, ephemeral: true }).catch(() => {});
+            return;
+          }
+          const text = list.map(b => businesses.formatBusinessCard(b)).join("\n\n");
+          await interaction.reply({ content: text.slice(0, 1990), ephemeral: true }).catch(() => {});
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "inventory") {
+        try {
+          const text = features.getInventoryDisplay(interaction.user.id);
+          await interaction.reply({ content: text.slice(0, 1990), ephemeral: true }).catch(() => {});
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "portfolio") {
+        try {
+          const text = await features.getPortfolio(interaction.user.id);
+          await interaction.reply({ content: text.slice(0, 1990), ephemeral: true }).catch(() => {});
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "firm-portfolio") {
+        try {
+          const text = await firms.getMyFirmShares(interaction.user.id);
+          await interaction.reply({ content: text.slice(0, 1990), ephemeral: true }).catch(() => {});
         } catch (e) {
           await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
         }
@@ -9504,7 +9623,7 @@ async function init() {
         return;
       }
     }
-    });
+    }, { priority: isDonInteraction });
   });
 
   client.login(process.env.DISCORD_TOKEN);
