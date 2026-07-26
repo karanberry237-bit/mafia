@@ -6025,6 +6025,7 @@ async function executePublicCommand(message, cmd, channelId) {
       if (!cmd.amount) return "Invalid amount. Try **Cosa bounty place @user 100k**.";
       const res = await bounties.placeBounty(message.author.id, cmd.targetId, cmd.amount, eco.deductCopper, eco.addCopper, MASTER_ID);
       if (!res.success) return "❌ " + res.reason;
+      auditlog.logBountyPlaced(message.guild?.id, message.author.id, cmd.targetId, res.bounty.total_amount).catch(() => {});
       return `🎯 Bounty placed on <@${cmd.targetId}> — pool now **${eco.fmt(res.bounty.total_amount)} Cash**. Whoever robs them successfully collects it.`;
     }
     case "bounty_board": {
