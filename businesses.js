@@ -1,6 +1,7 @@
 const { createClient } = require("@supabase/supabase-js");
 const ws = require("ws");
 const { fmt } = require("./economy");
+const commission = require("./commission");
 
 // ── Businesses / Fronts ────────────────────────────────────────────────────
 // Buyable income-generating assets. Each TYPE has its own 5-tier ladder
@@ -165,16 +166,23 @@ async function upgradeSecurity(userId, type, deductFromWallet) {
   return { success: true, business: data, level: SECURITY_LEVELS[nextLevel] };
 }
 
-// Collects pending income into the user's wallet, clearing it to 0.
+// Collects pending income into the user's wallet (minus Commission tax, if
+// any is currently active), clearing pending to 0. The tax cut flows into the
+// Commission's shared pot, not to the Don.
 async function collectBusiness(userId, type, addCopper) {
   const biz = await getBusiness(userId, type);
   if (!biz) return { success: false, reason: "You don't own that business." };
   if (biz.pending <= 0) return { success: false, reason: "Nothing to collect yet." };
 
-  await addCopper(userId, biz.pending);
-  const collected = biz.pending;
+  const grossCollected = biz.pending;
+  const taxRate = commission.getActiveTaxRate();
+  const taxCut = Math.floor(grossCollected * taxRate);
+  const net = grossCollected - taxCut;
+
+  await addCopper(userId, net);
+  if (taxCut > 0) await commission.addToPot(taxCut).catch(() => {});
   await supabase.from("businesses").update({ pending: 0 }).eq("id", biz.id);
-  return { success: true, collected };
+  return { success: true, collected: net, taxed: taxCut, grossCollected };
 }
 
 async function payUpkeep(userId, type, deductFromWallet) {
