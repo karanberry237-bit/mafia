@@ -165,7 +165,7 @@ const DAILY_REWARDS = {
   underboss:   200000,
   consigliere: 1000000,
   boss:        5000000,
-  donclint:    999999999,
+  donclint:    999_000_000_000_000, // 999 Trillion — the Don doesn't do dailies, he does GDPs
 };
 
 function getDailyAmount(rankKey) {
