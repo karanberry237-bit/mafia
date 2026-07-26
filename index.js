@@ -21,6 +21,8 @@ const alliances = require("./alliances.js");
 const bounties = require("./bounties.js");
 const auditlog = require("./auditlog.js");
 const commission = require("./commission.js");
+const poster = require("./poster.js");
+const rivalnpc = require("./rivalnpc.js");
 // chessCooldowns, gambleCooldowns: per-guild, see the guildDataStore accessor
 // block below (defined once activateGuildConfig exists). gamblingBlacklist
 // stays a single shared Set — it's tied to the loan/debt system (loans.js),
@@ -213,6 +215,7 @@ businesses.initBusinesses(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 alliances.initAlliances(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 bounties.initBounties(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 commission.initCommission(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+rivalnpc.initRivalNpc(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // ── Loan Persistence ──────────────────────────────────────────────────────────
 async function saveLoan(userId, loanData) {
@@ -7248,8 +7251,7 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       return hResult || null;
     }
     case "heist_join": {
-      const hjResult = await features.joinHeist(message.channelId, message.author.id, message.guild);
-      return hjResult || null;
+      return "🔫 Heists are joined with the **🦹 Join Heist** button on the live heist message now — click that instead.";
     }
 
     // ── Stocks ───────────────────────────────────────────────────────────────────
@@ -7706,8 +7708,7 @@ function buildEcoHelpText() {
     "  Cosa stock firm                       ← live charts for all Family firms",
     "",
     "🦹  HEIST",
-    "  Cosa heist [amount]  ← start a heist",
-    "  Cosa heist join      ← join active heist",
+    "  Cosa heist [amount]  ← start a LIVE heist (click to join, click again to grab your cut)",
     "",
     "🎉  EVENTS",
     "  Cosa giveaway [amt] [duration]  ← Don only",
@@ -8086,6 +8087,16 @@ const commands = [
     .addSubcommand(sub => sub.setName("accept-meeting").setDescription("Agree to an in-session Commission meeting (Commission gang leaders only)"))
     .addSubcommand(sub => sub.setName("force-vote").setDescription("Instantly resolve the current cycle's vote and payout (Don Clint only)"))
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("wanted")
+    .setDescription("Generate a Family rap-sheet Wanted Poster")
+    .addUserOption(opt => opt.setName("user").setDescription("Whose poster to generate (defaults to you)").setRequired(false))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("bounty-poster")
+    .setDescription("Generate a Bounty Poster for an active bounty")
+    .addUserOption(opt => opt.setName("user").setDescription("Whose bounty to generate a poster for").setRequired(true))
+    .toJSON(),
 ];
 
 const LOYALTY_HELP_TEXT =
@@ -8198,6 +8209,7 @@ async function init() {
       });
       auditlog.initAuditLog(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, client);
       await turf.ensureZonesSeeded().catch(e => console.error("[TURF SEED]", e.message));
+      await rivalnpc.ensureBarzinisExist().catch(e => console.error("[BARZINI SEED]", e.message));
       await firms.loadAllFirms();
       console.log("🏢 Firms loaded");
       setInterval(tickFirmCandles, 60_000);
@@ -8226,6 +8238,10 @@ async function init() {
       // Start daily turf processing (gang treasury income + inactivity release)
       const runTurfDaily = async () => {
         await turf.runDailyTurfProcessing().catch(e => console.error("[TURF DAILY]", e.message));
+        await rivalnpc.runRivalRaids(async (text) => {
+          const genCh = readyClient.guilds.cache.first()?.channels.cache.get(GENERAL_CHANNEL_ID);
+          if (genCh) await genCh.send(`🗺️ **TURF REPORT**\n${text}`).catch(() => {});
+        }).catch(e => console.error("[BARZINI RAID]", e.message));
         setTimeout(runTurfDaily, 24 * 60 * 60 * 1000);
       };
       // Refund expired bounties every hour
@@ -9240,6 +9256,28 @@ async function init() {
       return;
     }
 
+    if (interaction.isButton() && interaction.customId.startsWith("heist_join:")) {
+      const channelId = interaction.customId.split(":")[1];
+      const res = await features.joinHeistButton(channelId, interaction.user.id);
+      if (!res.success) {
+        await interaction.reply({ content: "🔫 " + res.reason, ephemeral: true }).catch(() => {});
+        return;
+      }
+      await interaction.reply({ content: `🦹 You're in the crew! (${res.heist.participants.size}/10)`, ephemeral: true }).catch(() => {});
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("heist_grab:")) {
+      const channelId = interaction.customId.split(":")[1];
+      const res = await features.grabHeistCash(channelId, interaction.user.id);
+      if (!res.success) {
+        await interaction.reply({ content: "🔫 " + res.reason, ephemeral: true }).catch(() => {});
+        return;
+      }
+      await interaction.reply({ content: `💰 Grabbed it! (${res.grabbedCount} crew member(s) so far)`, ephemeral: true }).catch(() => {});
+      return;
+    }
+
     if (interaction.isButton() && interaction.customId.startsWith("massban_expand:")) {
       const token = interaction.customId.split(":")[1];
       const state = pendingMassBans.get(token);
@@ -9572,6 +9610,86 @@ async function init() {
           }
         } catch (e) {
           await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "wanted") {
+        const targetUser = interaction.options.getUser("user") || interaction.user;
+        try {
+          await interaction.deferReply().catch(() => {});
+          const isDon = targetUser.id === MASTER_ID;
+          const rankKey = getFamilyRank(targetUser.id);
+          const rankTitle = isDon ? "Don Clint" : (rankKey ? RANKS[rankKey].title : "Nobody");
+          const xp = eco.getXP(targetUser.id);
+          const tier = eco.getNotorietyTier(xp);
+          const wallet = await eco.getWallet(targetUser.id);
+          const balance = eco.walletToCopper(wallet);
+          const ug = await gangs.getUserGang(targetUser.id);
+          const activeBounty = await bounties.getBounty(targetUser.id);
+
+          const lines = [
+            `Rank: ${rankTitle}`,
+            `Notoriety: ${tier.emoji} ${tier.name}`,
+            `Gang: ${ug ? ug.gang.name : "None"}`,
+            `Lifetime earned: 💵 ${eco.fmt(wallet.total_earned || 0)}`,
+          ];
+          if (activeBounty && activeBounty.total_amount > 0) lines.push(`⚠️ Active bounty: 💵 ${eco.fmt(activeBounty.total_amount)}`);
+
+          const avatarUrl = targetUser.displayAvatarURL({ extension: "png", size: 256 });
+          const buf = await poster.renderPoster({
+            headerText: "WANTED",
+            avatarUrl,
+            name: targetUser.username,
+            subtitle: "— of the Family —",
+            highlightLabel: "On Hand",
+            highlightValue: `💵 ${eco.fmt(balance)}`,
+            lines,
+            footerText: "By order of Don Clint",
+          });
+          const attachment = new AttachmentBuilder(buf, { name: "wanted.png" });
+          await interaction.editReply({ files: [attachment] }).catch(() => {});
+        } catch (e) {
+          await interaction.editReply({ content: `Failed: ${e.message}` }).catch(async () => {
+            await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+          });
+        }
+        return;
+      }
+
+      if (interaction.commandName === "bounty-poster") {
+        const targetUser = interaction.options.getUser("user");
+        try {
+          await interaction.deferReply().catch(() => {});
+          const bounty = await bounties.getBounty(targetUser.id);
+          if (!bounty || bounty.total_amount <= 0) {
+            await interaction.editReply({ content: `📊 <@${targetUser.id}> doesn't have an active bounty right now.` }).catch(() => {});
+            return;
+          }
+          const contributors = (bounty.placed_by || []).length;
+          const msLeft = Math.max(0, new Date(bounty.expires_at).getTime() - Date.now());
+          const daysLeft = (msLeft / 86400000).toFixed(1);
+
+          const avatarUrl = targetUser.displayAvatarURL({ extension: "png", size: 256 });
+          const buf = await poster.renderPoster({
+            headerText: "BOUNTY",
+            avatarUrl,
+            name: targetUser.username,
+            subtitle: "Dead or Alive",
+            highlightLabel: "Reward",
+            highlightValue: `💵 ${eco.fmt(bounty.total_amount)}`,
+            lines: [
+              `${contributors} contributor(s)`,
+              `Expires in ${daysLeft}d`,
+            ],
+            footerText: "Collect it with a successful rob",
+          });
+          const attachment = new AttachmentBuilder(buf, { name: "bounty.png" });
+          await interaction.editReply({ files: [attachment] }).catch(() => {});
+        } catch (e) {
+          await interaction.editReply({ content: `Failed: ${e.message}` }).catch(async () => {
+            await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+          });
         }
         return;
       }
