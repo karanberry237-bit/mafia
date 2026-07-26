@@ -20,6 +20,7 @@ const businesses = require("./businesses.js");
 const alliances = require("./alliances.js");
 const bounties = require("./bounties.js");
 const auditlog = require("./auditlog.js");
+const commission = require("./commission.js");
 // chessCooldowns, gambleCooldowns: per-guild, see the guildDataStore accessor
 // block below (defined once activateGuildConfig exists). gamblingBlacklist
 // stays a single shared Set — it's tied to the loan/debt system (loans.js),
@@ -146,6 +147,16 @@ function addToTreasuryFees(amount, type) {
   if (type === "bank") treasuryStats.bankFees += amount;
   else treasuryStats.gamblingLosses += amount;
   saveTreasuryStats().catch(() => {});
+  // Commission tax on gambling — a cut of what would otherwise be the Don's
+  // full take gets redirected into the Commission's shared pot instead. This
+  // doesn't change what the player loses, only where the house's cut ends up.
+  if (type === "gambling") {
+    const taxCut = Math.floor(amount * commission.getActiveTaxRate());
+    if (taxCut > 0) {
+      eco.deductCopper(MASTER_ID, taxCut).catch(() => {});
+      commission.addToPot(taxCut).catch(() => {});
+    }
+  }
 }
 // robCooldowns, coinflipCooldowns: per-guild, see guildDataStore below.
 const ROB_COOLDOWN_MS = 30 * 60 * 1000;
@@ -201,6 +212,7 @@ turf.initTurf(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 businesses.initBusinesses(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 alliances.initAlliances(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 bounties.initBounties(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+commission.initCommission(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // ── Loan Persistence ──────────────────────────────────────────────────────────
 async function saveLoan(userId, loanData) {
@@ -4709,6 +4721,10 @@ function detectPublicCommand(text, message) {
     const amt = parseShortAmount(text.replace(/.*\bgang\s+deposit\b/i, ""));
     return { action: "gang_deposit", amount: amt };
   }
+  if (/\bcosa\s+gang\s+withdraw\b/.test(lower)) {
+    const amt = parseShortAmount(text.replace(/.*\bgang\s+withdraw\b/i, ""));
+    return { action: "gang_withdraw", amount: amt };
+  }
   if (/\bcosa\s+gang\s+info\b/.test(lower)) {
     const name = text.replace(/.*\bgang\s+info\b/i, "").trim();
     return { action: "gang_info", gangName: name, targetId };
@@ -5886,6 +5902,12 @@ async function executePublicCommand(message, cmd, channelId) {
       if (!res.success) return "❌ " + res.reason;
       return `💰 Deposited **${eco.fmt(cmd.amount)} Cash** into **${res.gang.name}**'s treasury. New total: **${eco.fmt(res.gang.treasury)}**.`;
     }
+    case "gang_withdraw": {
+      if (!cmd.amount) return "Invalid amount. Try **Cosa gang withdraw 50k**. (Leader only, once every 3 days.)";
+      const res = await gangs.withdrawFromTreasury(message.author.id, cmd.amount, eco.addCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `💰 Withdrew **${eco.fmt(res.amount)} Cash** from **${res.gang.name}**'s treasury into your wallet. Remaining: **${eco.fmt(res.gang.treasury)}**.`;
+    }
     case "gang_info": {
       let target = cmd.gangName ? await gangs.getGangByName(cmd.gangName) : null;
       if (!target) {
@@ -5945,7 +5967,8 @@ async function executePublicCommand(message, cmd, channelId) {
       if (!cmd.bizType) return "Which type? Choose: laundromat, nightclub, shipping, casino.";
       const res = await businesses.collectBusiness(message.author.id, cmd.bizType, eco.addCopper);
       if (!res.success) return "❌ " + res.reason;
-      return `💰 Collected **${eco.fmt(res.collected)} Cash** from your business.`;
+      const taxLine = res.taxed > 0 ? ` *(Commission tax: 💵 ${eco.fmt(res.taxed)} Cash)*` : "";
+      return `💰 Collected **${eco.fmt(res.collected)} Cash** from your business.${taxLine}`;
     }
     case "business_pay": {
       if (!cmd.bizType) return "Which type? Choose: laundromat, nightclub, shipping, casino.";
@@ -8041,6 +8064,25 @@ const commands = [
     .setName("firm-portfolio")
     .setDescription("View your firm shares — visible only to you")
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("commission")
+    .setDescription("The Commission — top gangs vote on server-wide tax policy")
+    .addSubcommand(sub => sub.setName("status").setDescription("See the current Commission members, active tax rate, and pot"))
+    .addSubcommand(sub =>
+      sub.setName("vote")
+        .setDescription("Vote on this cycle's tax rate (Commission gang leaders only)")
+        .addStringOption(opt =>
+          opt.setName("choice")
+            .setDescription("The tax rate to vote for")
+            .setRequired(true)
+            .addChoices(
+              { name: "5% — Light Touch", value: "low" },
+              { name: "10% — Standard Cut", value: "medium" },
+              { name: "15% — Heavy Skim", value: "high" },
+            )
+        )
+    )
+    .toJSON(),
 ];
 
 const LOYALTY_HELP_TEXT =
@@ -8188,9 +8230,24 @@ async function init() {
         await bounties.refundExpiredBounties(eco.addCopper).catch(e => console.error("[BOUNTY EXPIRE]", e.message));
         setTimeout(runBountyExpiry, 60 * 60 * 1000);
       };
+      // Check the Commission's weekly cycle every hour — cheap no-op unless
+      // the cycle has actually expired, in which case it resolves the vote,
+      // pays out the pot, and starts a fresh cycle.
+      const runCommissionCheck = async () => {
+        try {
+          const summary = await commission.checkCycleRollover();
+          if (summary) {
+            const genCh = readyClient.guilds.cache.first()?.channels.cache.get(GENERAL_CHANNEL_ID);
+            const text = commission.formatPayoutSummary(summary);
+            if (genCh && text) await genCh.send(text).catch(() => {});
+          }
+        } catch (e) { console.error("[COMMISSION CHECK]", e.message); }
+        setTimeout(runCommissionCheck, 60 * 60 * 1000);
+      };
       setTimeout(runBusinessDaily, 6 * 60 * 60 * 1000);
       setTimeout(runTurfDaily, 24 * 60 * 60 * 1000);
       setTimeout(runBountyExpiry, 60 * 60 * 1000);
+      setTimeout(runCommissionCheck, 60 * 60 * 1000);
       setTimeout(runBank, 24 * 60 * 60 * 1000);
       console.log("🏦 Bank daily processing scheduled");
     }
@@ -9440,6 +9497,31 @@ async function init() {
         try {
           const text = await firms.getMyFirmShares(interaction.user.id);
           await interaction.reply({ content: text.slice(0, 1990), ephemeral: true }).catch(() => {});
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "commission") {
+        const sub = interaction.options.getSubcommand();
+        try {
+          if (sub === "status") {
+            const state = await commission.getState();
+            await interaction.reply({ content: commission.formatCommissionStatus(state), ephemeral: true }).catch(() => {});
+            return;
+          }
+          if (sub === "vote") {
+            const choice = interaction.options.getString("choice");
+            const res = await commission.castVote(interaction.user.id, choice);
+            if (!res.success) {
+              await interaction.reply({ content: "❌ " + res.reason, ephemeral: true }).catch(() => {});
+              return;
+            }
+            const label = commission.TAX_CHOICES[res.taxKey].label;
+            await interaction.reply({ content: `🕴️ **${res.gangName}** voted for **${label}**.`, ephemeral: true }).catch(() => {});
+            return;
+          }
         } catch (e) {
           await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
         }
