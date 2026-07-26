@@ -105,8 +105,12 @@ async function logBigGift(guildId, fromId, toId, amount) {
   return logEvent({ guildId, type: "big_gift", title: "🎁 Big Gift", description: `<@${fromId}> gifted <@${toId}> **${fmt(amount)} Cash**.` });
 }
 
+async function logBountyPlaced(guildId, placerId, targetId, poolTotal) {
+  return logEvent({ guildId, type: "bounty_collected", title: "🎯 Bounty Placed", description: `<@${placerId}> placed a bounty on <@${targetId}> — pool now **${fmt(poolTotal)} Cash**.` });
+}
+
 module.exports = {
   initAuditLog, setAuditChannel, getAuditChannel, logEvent,
-  logVaultUpgrade, logGambleWin, logHeistPayout, logTurfFight, logBusinessRaid, logBountyCollected, logBigGift,
+  logVaultUpgrade, logGambleWin, logHeistPayout, logTurfFight, logBusinessRaid, logBountyCollected, logBountyPlaced, logBigGift,
   MIN_GAMBLE_LOG_AMOUNT,
 };
