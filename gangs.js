@@ -203,6 +203,43 @@ async function depositToGang(userId, amount, deductFromWallet) {
   return { success: true, gang: updated };
 }
 
+// ── Leader treasury withdrawal — once every 3 days per gang ────────────────
+const WITHDRAW_COOLDOWN_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+const withdrawCooldowns = new Map(); // gangId -> timestamp of last withdrawal
+
+function getWithdrawCooldownRemaining(gangId) {
+  const last = withdrawCooldowns.get(gangId) || 0;
+  return Math.max(0, WITHDRAW_COOLDOWN_MS - (Date.now() - last));
+}
+
+async function withdrawFromTreasury(userId, amount, addCopper) {
+  const ug = await getUserGang(userId);
+  if (!ug) return { success: false, reason: "You're not in a gang." };
+  if (ug.membership.role !== "leader") return { success: false, reason: "Only the gang leader can withdraw from the treasury." };
+  if (!amount || amount <= 0) return { success: false, reason: "Withdrawal amount must be positive." };
+
+  const remaining = getWithdrawCooldownRemaining(ug.gang.id);
+  if (remaining > 0) {
+    const hrs = Math.floor(remaining / 3600000);
+    const mins = Math.floor((remaining % 3600000) / 60000);
+    return { success: false, reason: `The treasury was already tapped recently — try again in **${hrs}h ${mins}m**.` };
+  }
+
+  const updated = await deductFromGangTreasury(ug.gang.id, amount);
+  if (!updated) return { success: false, reason: "The treasury doesn't have that much Cash." };
+
+  withdrawCooldowns.set(ug.gang.id, Date.now());
+  if (addCopper) await addCopper(userId, amount);
+  return { success: true, gang: updated, amount };
+}
+
+// Returns every gang row — used by the Commission system to rank gangs.
+async function getAllGangs() {
+  const { data, error } = await supabase.from("gangs").select("*");
+  if (error) { console.error("[GANG LIST ALL]", error.message); return []; }
+  return data || [];
+}
+
 function formatGangCard(gang, members) {
   const leader = members.find(m => m.role === "leader");
   const officers = members.filter(m => m.role === "officer");
@@ -219,4 +256,5 @@ module.exports = {
   initGangs, createGang, disbandGang, getUserGang, getGangById, getGangByName, getMembers,
   inviteMember, acceptInvite, getInvite, deleteInvite, leaveGang, kickMember, promoteMember, transferLeadership,
   addToGangTreasury, deductFromGangTreasury, depositToGang, formatGangCard,
+  withdrawFromTreasury, getWithdrawCooldownRemaining, WITHDRAW_COOLDOWN_MS, getAllGangs,
 };
