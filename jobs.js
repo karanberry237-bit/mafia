@@ -67,6 +67,28 @@ function rankMultiplier(rankLevel) {
 function rint(min, max) { return Math.floor(min + Math.random() * (max - min + 1)); }
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
+// ── The Feds — rare bonus fine ON TOP OF an existing bust ───────────────────
+// Independent roll from the normal "caught" fine above — most busts are just
+// the normal fine, but occasionally the Feds were specifically watching that
+// one and tack on an extra cut. Only rolled when a job already went bad.
+const FEDS_CHANCE = 0.08; // 8% — rare
+const FEDS_FINE_MIN_PCT = 0.15;
+const FEDS_FINE_MAX_PCT = 0.30;
+
+async function maybeApplyFedsBonus(userId, isDon, deps) {
+  if (isDon) return "";
+  if (Math.random() >= FEDS_CHANCE) return "";
+  const wallet = await eco.getWallet(userId);
+  const have = eco.walletToCopper(wallet);
+  if (have <= 0) return "";
+  const pct = FEDS_FINE_MIN_PCT + Math.random() * (FEDS_FINE_MAX_PCT - FEDS_FINE_MIN_PCT);
+  const bonusFine = Math.floor(have * pct);
+  if (bonusFine <= 0) return "";
+  const { debtAdded } = await applyLoss(userId, bonusFine, deps, isDon);
+  const debtLine = debtAdded > 0 ? ` (an extra **💵 ${eco.fmt(debtAdded)} Cash** added to your debt)` : "";
+  return `\n🚨 **THE FEDS WERE WATCHING THAT ONE.** On top of the bust, they hit you with a bonus **💵 ${eco.fmt(bonusFine)} Cash** fine.${debtLine}`;
+}
+
 // ── Loss handling ────────────────────────────────────────────────────────────
 // A failed job costs the FULL loss amount — it is never capped at the wallet.
 // The wallet pays what it can; any shortfall becomes debt to the Family (no
@@ -196,10 +218,11 @@ async function doCrime(userId, rankLevel, isDon, deps = {}) {
       ? `\n🔴 You couldn't cover it — **💵 ${eco.fmt(debtAdded)} Cash** added to your debt to the Family.`
       : "";
     const crewLine = crewBackupUsed ? `\n👥 **Crew Backup** cut your losses in half!` : "";
+    const fedsLine = await maybeApplyFedsBonus(userId, isDon, deps);
     return (
       `🚔 **Busted.**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `You tried to pull a job but ${pick(CRIME_CAUGHT)}. It cost you **💵 ${eco.fmt(fine)} Cash**.${debtLine}${crewLine}\n` +
+      `You tried to pull a job but ${pick(CRIME_CAUGHT)}. It cost you **💵 ${eco.fmt(fine)} Cash**.${debtLine}${crewLine}${fedsLine}\n` +
       `New balance: ${eco.formatWallet(newW)}${fastHandsLine}`
     );
   } else {
@@ -271,10 +294,11 @@ async function doSmuggle(userId, rankLevel, isDon, deps = {}) {
       ? `\n🔴 You couldn't cover it — **💵 ${eco.fmt(debtAdded)} Cash** added to your debt to the Family.`
       : "";
     const crewLine = crewBackupUsed ? `\n👥 **Crew Backup** cut your losses in half!` : "";
+    const fedsLine = await maybeApplyFedsBonus(userId, isDon, deps);
     return (
       `💥 **Run went bad.**\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `You ${pick(SMUGGLE_BUST)}. The bill came to **💵 ${eco.fmt(loss)} Cash** covering your tracks.${debtLine}${crewLine}\n` +
+      `You ${pick(SMUGGLE_BUST)}. The bill came to **💵 ${eco.fmt(loss)} Cash** covering your tracks.${debtLine}${crewLine}${fedsLine}\n` +
       `New balance: ${eco.formatWallet(newW)}${fastHandsLine}`
     );
   }
