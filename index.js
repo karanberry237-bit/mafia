@@ -161,8 +161,14 @@ async function checkGambleCooldown(userId) {
   const last = gambleCooldowns.get(userId) || 0;
   const left = GAMBLE_COOLDOWN_MS - (Date.now() - last);
   if (left > 0) {
-    // Check if user has noble_pass — skip cooldown once
+    // Check if user has noble_pass — skip cooldown once. Rate-limited to once
+    // every 5 min (features.ITEM_USE_COOLDOWNS) regardless of how many are
+    // stockpiled, so it can't be used to chain-skip the gamble cooldown.
     if (features.hasEffect(userId, "noble_pass")) {
+      const passCooldown = features.getItemCooldownRemaining(userId, "noble_pass");
+      if (passCooldown > 0) {
+        return "⏰ Slow down. You can gamble again in **" + Math.ceil(left/1000) + "s** (your Made Pass is on cooldown for another **" + Math.ceil(passCooldown/60000) + "m**).";
+      }
       features.consumeItem(userId, "noble_pass");
       gambleCooldowns.set(userId, Date.now());
       return null; // cooldown skipped
@@ -6876,7 +6882,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         if (!deducted) return "Insufficient funds. Check your balance with **Cosa balance**.";
       }
       const slotsCharmActive = features.hasEffect(message.author.id, "lucky_charm");
-      const slotsHouseFavorActive = features.hasEffect(message.author.id, "house_favor");
+      const slotsHouseFavorActive = features.hasEffect(message.author.id, "house_favor") && features.getItemCooldownRemaining(message.author.id, "house_favor") === 0;
       const result = eco.playSlots(bet, slotsCharmActive, slotsHouseFavorActive);
       if (slotsHouseFavorActive) features.consumeItem(message.author.id, "house_favor");
       let msg = "🎰 **FAMILY SLOTS**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[ " + result.display + " ]\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
@@ -6931,7 +6937,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         if (!deducted) return "Insufficient funds.";
       }
       const wheelCharmActive = features.hasEffect(message.author.id, "lucky_charm");
-      const wheelHouseFavorActive = features.hasEffect(message.author.id, "house_favor");
+      const wheelHouseFavorActive = features.hasEffect(message.author.id, "house_favor") && features.getItemCooldownRemaining(message.author.id, "house_favor") === 0;
       let seg = eco.spinWheel(wheelHouseFavorActive);
       // Lucky charm: reroll once if bankrupt or 0.5x (both count as losses)
       if (wheelCharmActive && seg.multiplier <= 0.5) {
@@ -7887,6 +7893,57 @@ const commands = [
     )
     .addSubcommand(sub => sub.setName("editors").setDescription("List everyone with leaderboard permissions (Don only)"))
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("wipe-econ")
+    .setDescription("Wipe bank+balance for players above a net worth threshold (Don Clint only)")
+    .addIntegerOption(opt =>
+      opt.setName("threshold")
+        .setDescription("Wipe anyone with bank+balance at or above this amount")
+        .setRequired(true)
+        .addChoices(
+          { name: "1,000,000+", value: 1_000_000 },
+          { name: "10,000,000+", value: 10_000_000 },
+          { name: "50,000,000+", value: 50_000_000 },
+          { name: "100,000,000+", value: 100_000_000 },
+          { name: "500,000,000+", value: 500_000_000 },
+          { name: "1,000,000,000+", value: 1_000_000_000 },
+        )
+    )
+    .addIntegerOption(opt =>
+      opt.setName("reset-to")
+        .setDescription("Amount to set their wallet to (bank is cleared to 0)")
+        .setRequired(true)
+        .addChoices(
+          { name: "0", value: 0 },
+          { name: "1,000", value: 1_000 },
+          { name: "10,000", value: 10_000 },
+          { name: "100,000", value: 100_000 },
+          { name: "1,000,000", value: 1_000_000 },
+        )
+    )
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("delete-business")
+    .setDescription("Delete a player's business (Don Clint only)")
+    .addUserOption(opt => opt.setName("user").setDescription("The business owner").setRequired(true))
+    .addStringOption(opt =>
+      opt.setName("type")
+        .setDescription("Which business to delete")
+        .setRequired(true)
+        .addChoices(
+          { name: "🧺 Laundromat", value: "laundromat" },
+          { name: "🎷 Nightclub", value: "nightclub" },
+          { name: "🎰 Casino", value: "casino" },
+          { name: "🚢 Shipping Front", value: "shipping" },
+          { name: "🗑️ All of their businesses", value: "all" },
+        )
+    )
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("reset-inventory")
+    .setDescription("Wipe a player's entire shop inventory (Don Clint only)")
+    .addUserOption(opt => opt.setName("user").setDescription("Whose inventory to wipe").setRequired(true))
+    .toJSON(),
 ];
 
 const LOYALTY_HELP_TEXT =
@@ -8165,6 +8222,28 @@ async function init() {
     const isMentioned = message.mentions.has(client.user);
     const repliedToBot = await isReplyToBot(message);
     const lower = message.content.toLowerCase().trim();
+
+    if (isMaster && (lower === "cosa networth" || lower === "cosa net worth")) {
+      try {
+        const { data: wallets } = await supabase.from("wallets").select("*");
+        const { data: banksData } = await supabase.from("banks").select("*");
+        const { data: bizRows } = await supabase.from("businesses").select("owner_id, pending");
+        const bankMap = new Map((banksData || []).map(b => [b.user_id, b.balance || 0]));
+        const pendingMap = new Map();
+        for (const b of bizRows || []) pendingMap.set(b.owner_id, (pendingMap.get(b.owner_id) || 0) + (b.pending || 0));
+
+        const rows = (wallets || []).map(w => ({
+          id: w.user_id,
+          total: eco.walletToCopper(w) + (bankMap.get(w.user_id) || 0) + (pendingMap.get(w.user_id) || 0),
+        })).sort((a, b) => b.total - a.total);
+
+        const lines = rows.slice(0, 25).map((r, i) => `**#${i + 1}** <@${r.id}> — 💵 ${eco.fmt(r.total)} Cash`);
+        await message.channel.send(`🤵 **FAMILY NET WORTH** *(bank + balance + unclaimed business income)*\n${lines.join("\n") || "Nobody has a wallet yet."}`).catch(() => {});
+      } catch (e) {
+        await message.channel.send(`Failed to load net worth: ${e.message}`).catch(() => {});
+      }
+      return;
+    }
 
     // ── Set Channel — Boss rank (or Don) designates the current channel as a
     // given type. Replaces "cosa setup"'s auto-provisioning: no channels are
@@ -9018,6 +9097,79 @@ async function init() {
         }
         return;
       }
+      if (interaction.commandName === "wipe-econ") {
+        if (interaction.user.id !== MASTER_ID) {
+          await interaction.reply({ content: "🔫 Only Don Clint can order a wipe.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        await interaction.deferReply({ ephemeral: true }).catch(() => {});
+        const threshold = interaction.options.getInteger("threshold");
+        const resetTo = interaction.options.getInteger("reset-to");
+        try {
+          const { data: wallets } = await supabase.from("wallets").select("*");
+          const { data: banks } = await supabase.from("banks").select("*");
+          const bankMap = new Map((banks || []).map(b => [b.user_id, b.balance || 0]));
+          let wiped = 0;
+          for (const w of wallets || []) {
+            if (w.user_id === MASTER_ID) continue; // never wipe Don Clint
+            const total = eco.walletToCopper(w) + (bankMap.get(w.user_id) || 0);
+            if (total < threshold) continue;
+            await supabase.from("wallets").update({ copper: resetTo, silver: 0, gold: 0, stellar: 0 }).eq("user_id", w.user_id);
+            if (bankMap.has(w.user_id)) await supabase.from("banks").update({ balance: 0 }).eq("user_id", w.user_id);
+            wiped++;
+          }
+          await interaction.editReply({ content: `💥 **${wiped} player(s)** with 💵 ${eco.fmt(threshold)}+ Cash (bank+balance) reset to 💵 ${eco.fmt(resetTo)}. 🤵` }).catch(() => {});
+        } catch (e) {
+          await interaction.editReply({ content: `Failed: ${e.message}` }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "delete-business") {
+        if (interaction.user.id !== MASTER_ID) {
+          await interaction.reply({ content: "🔫 Only Don Clint can shut down a business.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        const targetUser = interaction.options.getUser("user");
+        const type = interaction.options.getString("type");
+        try {
+          if (type === "all") {
+            const owned = await businesses.getUserBusinesses(targetUser.id);
+            if (owned.length === 0) {
+              await interaction.reply({ content: `<@${targetUser.id}> doesn't own any businesses.`, ephemeral: true }).catch(() => {});
+              return;
+            }
+            for (const biz of owned) await businesses.sellBusiness(targetUser.id, biz.type);
+            await interaction.reply({ content: `🗑️ Deleted **${owned.length}** business(es) owned by <@${targetUser.id}>.`, ephemeral: true }).catch(() => {});
+          } else {
+            const result = await businesses.sellBusiness(targetUser.id, type);
+            if (!result.success) {
+              await interaction.reply({ content: result.reason, ephemeral: true }).catch(() => {});
+              return;
+            }
+            await interaction.reply({ content: `🗑️ Deleted <@${targetUser.id}>'s **${businesses.BUSINESS_TYPES[type].label}**.`, ephemeral: true }).catch(() => {});
+          }
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "reset-inventory") {
+        if (interaction.user.id !== MASTER_ID) {
+          await interaction.reply({ content: "🔫 Only Don Clint can strip a player's inventory.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        const targetUser = interaction.options.getUser("user");
+        try {
+          await features.resetInventory(targetUser.id);
+          await interaction.reply({ content: `🎒 Wiped <@${targetUser.id}>'s entire shop inventory.`, ephemeral: true }).catch(() => {});
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
       if (interaction.commandName === "confess") {
         const confession = interaction.options.getString("message");
         await interaction.reply({ content: "✅ Your confession has been delivered to the Family. They will never know it was you. 👁️", ephemeral: true }).catch(()=>{});
