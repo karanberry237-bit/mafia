@@ -25,10 +25,19 @@ const eco = require("./economy");
 // no replacement is pulled in, and its share of the pot at payout time is
 // simply forfeited (not redistributed to the remaining members).
 
-const CYCLE_MS = 7 * 24 * 60 * 60 * 1000; // weekly
+const CYCLE_MS = 3 * 24 * 60 * 60 * 1000; // every 3 days
 const TARGET_SIZE = 3;                    // normal Commission size
 const MAX_SIZE = 5;                       // hard cap even if TARGET_SIZE is raised later
-const SPLIT_RATIOS = [0.5, 0.3, 0.2];     // by Commission rank #1/#2/#3 — only as many as exist
+// Payout split by Commission rank, keyed by how many members are actually
+// seated that cycle (fewer gangs on the server = fewer seats = a different
+// split table, not just truncating the 5-seat one).
+const SPLIT_TABLES = {
+  1: [1],
+  2: [0.60, 0.40],
+  3: [0.50, 0.30, 0.20],
+  4: [0.40, 0.28, 0.20, 0.12],
+  5: [0.35, 0.25, 0.18, 0.13, 0.09],
+};
 
 const TAX_CHOICES = {
   low:    { key: "low",    label: "5% — Light Touch",   rate: 0.05 },
@@ -104,6 +113,7 @@ async function startNewCycle() {
 async function endCycleAndPayout() {
   const state = await getState();
   if (!state) return null;
+  pendingMeeting = null; // any in-flight meeting is moot once the cycle actually resolves
 
   // Resolve vote: majority among CAST votes wins; a tie (or nobody voted)
   // means abstain — the tax rate carries over unchanged.
@@ -119,15 +129,17 @@ async function endCycleAndPayout() {
     // else: genuine tie among the top choices -> abstain, keep previous rate
   }
 
-  // Payout — 50/30/20 by Commission rank. A gang that disbanded mid-cycle
-  // (getGangById returns null) simply forfeits its share.
+  // Payout — split table matches however many seats were actually filled
+  // this cycle. A gang that disbanded mid-cycle (getGangById returns null)
+  // simply forfeits its share.
   const payouts = [];
   if (state.pot > 0) {
-    for (let i = 0; i < state.members.length && i < SPLIT_RATIOS.length; i++) {
+    const ratios = SPLIT_TABLES[state.members.length] || SPLIT_TABLES[MAX_SIZE];
+    for (let i = 0; i < state.members.length && i < ratios.length; i++) {
       const member = state.members[i];
       const gang = await gangs.getGangById(member.gangId);
       if (!gang) { payouts.push({ ...member, amount: 0, forfeited: true }); continue; }
-      const share = Math.floor(state.pot * SPLIT_RATIOS[i]);
+      const share = Math.floor(state.pot * ratios[i]);
       if (share > 0) await gangs.addToGangTreasury(member.gangId, share);
       payouts.push({ ...member, amount: share, forfeited: false });
     }
@@ -231,9 +243,101 @@ function formatPayoutSummary(summary) {
   );
 }
 
+// ── Call a meeting ───────────────────────────────────────────────────────────
+// Any current Commission leader can call an early vote instead of waiting out
+// the full cycle. Calling it counts as an automatic "yes" from their own
+// gang. If a majority of the CURRENT Commission's members agree within the
+// window, the cycle resolves immediately (same resolution path as a normal
+// timer rollover or the Don's force-vote). If majority never arrives before
+// the window closes, it just fizzles — the normal timer keeps running
+// untouched. 3-day cooldown per gang (not per person), so a leadership
+// change doesn't reset it.
+const MEETING_WINDOW_MS = 60 * 60 * 1000;   // 1 hour to reach majority
+const MEETING_COOLDOWN_MS = 3 * 24 * 60 * 60 * 1000; // 3 days per gang
+const meetingCooldowns = new Map(); // gangId -> timestamp of last call
+let pendingMeeting = null; // { calledByGangId, calledByGangName, acceptedGangIds: Set, expiresAt }
+
+function majorityNeeded(memberCount) {
+  return Math.floor(memberCount / 2) + 1;
+}
+
+function getMeetingCooldownRemaining(gangId) {
+  const last = meetingCooldowns.get(gangId) || 0;
+  return Math.max(0, MEETING_COOLDOWN_MS - (Date.now() - last));
+}
+
+function clearExpiredMeeting() {
+  if (pendingMeeting && Date.now() > pendingMeeting.expiresAt) pendingMeeting = null;
+}
+
+function getMeetingStatus() {
+  clearExpiredMeeting();
+  return pendingMeeting;
+}
+
+async function callMeeting(userId) {
+  clearExpiredMeeting();
+  const state = await getState();
+  if (!state) return { success: false, reason: "The Commission hasn't convened yet." };
+  const ug = await gangs.getUserGang(userId);
+  if (!ug || ug.membership.role !== "leader") return { success: false, reason: "Only a gang leader can call a Commission meeting." };
+  const isMember = state.members.some(m => m.gangId === ug.gang.id);
+  if (!isMember) return { success: false, reason: "Your gang isn't on the Commission this cycle." };
+  if (pendingMeeting) return { success: false, reason: "A meeting is already in session — other Commission leaders can still accept it with **/commission accept-meeting**." };
+
+  const remaining = getMeetingCooldownRemaining(ug.gang.id);
+  if (remaining > 0) {
+    const hrs = Math.floor(remaining / 3600000);
+    const mins = Math.floor((remaining % 3600000) / 60000);
+    return { success: false, reason: `**${ug.gang.name}** already called a meeting recently — try again in **${hrs}h ${mins}m**.` };
+  }
+
+  meetingCooldowns.set(ug.gang.id, Date.now());
+  pendingMeeting = {
+    calledByGangId: ug.gang.id,
+    calledByGangName: ug.gang.name,
+    acceptedGangIds: new Set([ug.gang.id]),
+    expiresAt: Date.now() + MEETING_WINDOW_MS,
+  };
+
+  const needed = majorityNeeded(state.members.length);
+  if (pendingMeeting.acceptedGangIds.size >= needed) {
+    const summary = await endCycleAndPayout();
+    return { success: true, resolved: true, summary, gangName: ug.gang.name };
+  }
+  return { success: true, resolved: false, gangName: ug.gang.name, acceptedCount: pendingMeeting.acceptedGangIds.size, neededTotal: needed };
+}
+
+async function acceptMeeting(userId) {
+  clearExpiredMeeting();
+  if (!pendingMeeting) return { success: false, reason: "No Commission meeting is currently in session." };
+  const state = await getState();
+  if (!state) return { success: false, reason: "The Commission hasn't convened yet." };
+  const ug = await gangs.getUserGang(userId);
+  if (!ug || ug.membership.role !== "leader") return { success: false, reason: "Only a gang leader can respond to a Commission meeting." };
+  const isMember = state.members.some(m => m.gangId === ug.gang.id);
+  if (!isMember) return { success: false, reason: "Your gang isn't on the Commission this cycle." };
+
+  pendingMeeting.acceptedGangIds.add(ug.gang.id);
+  const needed = majorityNeeded(state.members.length);
+  if (pendingMeeting.acceptedGangIds.size >= needed) {
+    const summary = await endCycleAndPayout();
+    return { success: true, resolved: true, summary, gangName: ug.gang.name };
+  }
+  return { success: true, resolved: false, gangName: ug.gang.name, acceptedCount: pendingMeeting.acceptedGangIds.size, neededTotal: needed };
+}
+
+function formatMeetingStatus() {
+  const m = getMeetingStatus();
+  if (!m) return "🕴️ No Commission meeting is currently in session.";
+  const minsLeft = Math.max(0, Math.ceil((m.expiresAt - Date.now()) / 60000));
+  return `🕴️ **${m.calledByGangName}** called a Commission meeting — **${m.acceptedGangIds.size}** gang(s) agreed so far. Closes in **${minsLeft}m** if majority isn't reached.`;
+}
+
 module.exports = {
   initCommission, TAX_CHOICES, DEFAULT_TAX_KEY, CYCLE_MS,
   getState, startNewCycle, checkCycleRollover, endCycleAndPayout,
   castVote, addToPot, getActiveTaxRate, refreshCachedTaxRate,
   formatCommissionStatus, formatPayoutSummary, rankGangs,
+  callMeeting, acceptMeeting, getMeetingStatus, formatMeetingStatus, getMeetingCooldownRemaining,
 };
