@@ -189,9 +189,43 @@ async function markVaultSkipUsed(userId) {
   }
 }
 
+// ── Admin: bulk reset by tier ────────────────────────────────────────────────
+// Resets everyone at or above `fromTierKey` down to `toTierKey`. If their
+// current balance exceeds the new tier's storage cap, it's clipped down to
+// that cap (not wiped) — this is specifically for "too much Cash piled up in
+// a vault tier that's getting rebalanced/nerfed" situations, not a punitive
+// wipe.
+async function resetBanksByTier(fromTierKey, toTierKey) {
+  const fromIdx = TIER_ORDER.indexOf(fromTierKey);
+  const toIdx = TIER_ORDER.indexOf(toTierKey);
+  if (fromIdx === -1 || toIdx === -1) return { success: false, reason: "Invalid tier." };
+
+  const { data, error } = await supabase.from("banks").select("*");
+  if (error) { console.error("[BANK TIER RESET]", error.message); return { success: false, reason: error.message }; }
+
+  const targetTierDef = VAULT_TIERS[toTierKey];
+  let affected = 0;
+  for (const account of data || []) {
+    const idx = TIER_ORDER.indexOf(account.vault_tier);
+    if (idx === -1 || idx < fromIdx) continue; // below the threshold, untouched
+    const cappedBalance = Math.min(account.balance, targetTierDef.maxStorage);
+    const { error: updateError } = await supabase.from("banks").update({ vault_tier: toTierKey, balance: cappedBalance }).eq("user_id", account.user_id);
+    if (updateError) { console.error("[BANK TIER RESET ROW]", updateError.message); continue; }
+    affected++;
+  }
+  return { success: true, affected };
+}
+
+// ── Admin: reset a single account's bank entirely ────────────────────────────
+async function resetSingleBank(userId) {
+  const { error } = await supabase.from("banks").update({ balance: 0, vault_tier: "shoebox" }).eq("user_id", userId);
+  if (error) { console.error("[BANK SINGLE RESET]", error.message); return { success: false, reason: error.message }; }
+  return { success: true };
+}
+
 module.exports = {
   initBank, getBankAccount, saveBankAccount, deposit, withdraw,
   upgradeTier, getBankBalance, deductFromBank, formatCopper,
   runDailyBankProcessing, wipeAllBanks, VAULT_TIERS, TIER_ORDER, getNextTier, processBank,
-  isVaultSkipUsed, markVaultSkipUsed,
+  isVaultSkipUsed, markVaultSkipUsed, resetBanksByTier, resetSingleBank,
 };
