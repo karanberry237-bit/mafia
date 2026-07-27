@@ -9,12 +9,33 @@ try {
   console.error("Poster font registration failed:", e.message);
 }
 
-const WIDTH = 620;
-const HEIGHT = 878;
-const MARGIN = 24;
-const INK = "#3a2a18";
+// ── Real template compositing ───────────────────────────────────────────────
+// Instead of hand-drawing the border/headline/"DEAD OR ALIVE"/flourishes with
+// canvas primitives (which never quite matched a real design), this loads the
+// actual reference template image and only draws THREE things on top of it:
+//   1. the avatar, into the template's transparent photo-box cutout
+//   2. the name
+//   3. the bounty amount
+// Geometry below was measured directly from the template file's own pixels
+// (the transparent cutout's exact bounding box, and the ink color sampled
+// from its "WANTED" headline) rather than guessed.
+const TEMPLATE_PATH = path.join(__dirname, "assets", "wanted_template.png");
+const INK = "rgb(83, 63, 36)";
 
-const PHOTO_SIZE = WIDTH - MARGIN * 2 - 20;
+// Fractions of the template's own width/height — these stay correct no
+// matter what pixel size we ultimately render at.
+const PHOTO_BOX = { left: 0.0926, right: 0.9071, top: 0.2143, bottom: 0.6307 };
+const BOUNTY_Y_FRAC = 0.79; // centered in the blank gap between "DEAD OR ALIVE" and the fine print
+const TEXT_SAFE_LEFT_FRAC = 0.15;   // stays clear of the flourish curls on both
+const TEXT_SAFE_RIGHT_FRAC = 0.85;  // sides of "DEAD OR ALIVE"
+
+const RENDER_WIDTH = 700;
+
+let cachedTemplate = null;
+async function getTemplate() {
+  if (!cachedTemplate) cachedTemplate = await loadImage(TEMPLATE_PATH);
+  return cachedTemplate;
+}
 
 // Full digit amount WITH comma separators — e.g. 9_500_000 -> "9,500,000".
 function formatFullAmount(n) {
@@ -22,47 +43,9 @@ function formatFullAmount(n) {
   return num.toLocaleString("en-US");
 }
 
-// Draws text with manual letter-spacing (canvas has no native letter-spacing
-// support). Returns the total rendered width so callers can position things
-// (like flourishes) relative to the actual text edges instead of guessing.
-function drawSpacedText(ctx, text, centerX, y, spacing) {
-  const widths = [...text].map(ch => ctx.measureText(ch).width);
-  const totalWidth = widths.reduce((a, b) => a + b, 0) + spacing * (text.length - 1);
-  let x = centerX - totalWidth / 2;
-  const prevAlign = ctx.textAlign;
-  ctx.textAlign = "left";
-  for (let i = 0; i < text.length; i++) {
-    ctx.fillText(text[i], x, y);
-    x += widths[i] + spacing;
-  }
-  ctx.textAlign = prevAlign;
-  return totalWidth;
-}
-
-// Ornamental "S"-curve flourish flanking "DEAD OR ALIVE", matching the small
-// filigree marks in the reference. Bigger and bolder than before so it
-// actually reads at this size, and positioned by the caller relative to the
-// real text width instead of a fixed guess.
-function drawFlourish(ctx, x, y, flip) {
-  ctx.save();
-  ctx.translate(x, y);
-  if (flip) ctx.scale(-1, 1);
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 3;
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  ctx.moveTo(0, -16);
-  ctx.bezierCurveTo(12, -16, 12, 0, 0, 0);
-  ctx.bezierCurveTo(-12, 0, -12, 16, 0, 16);
-  ctx.stroke();
-  ctx.restore();
-}
-
 // Hand-drawn "Beli" mark (One Piece's currency symbol) — a "P" with a double
-// horizontal strike through the stem. Drawn with paths rather than relying on
-// the bundled font having that glyph (font.ttf is a narrow display font meant
-// for chess coordinate labels, and can't be assumed to cover it). Returns the
-// total width consumed so callers can lay out what comes after it.
+// horizontal strike through the stem, drawn with paths rather than relying on
+// the bundled display font having that glyph. Returns its rendered width.
 function drawBeliMark(ctx, x, y, fontSizePx) {
   const prevAlign = ctx.textAlign;
   ctx.textAlign = "left";
@@ -86,20 +69,8 @@ function drawBeliMark(ctx, x, y, fontSizePx) {
   return pWidth;
 }
 
-// Picks the largest font size (down from maxSize, in 2px steps) at which
-// `text` still fits within `maxWidth`.
-function fitFontSize(ctx, text, family, weight, maxSize, minSize, maxWidth) {
-  let size = maxSize;
-  while (size > minSize) {
-    ctx.font = `${weight} ${size}px ${family}, sans-serif`;
-    if (ctx.measureText(text).width <= maxWidth) break;
-    size -= 2;
-  }
-  return size;
-}
-
 // Draws the Beli mark + comma-formatted number as one centered group,
-// auto-shrinking together so a huge bounty never overflows the poster.
+// auto-shrinking together so a huge bounty never overflows.
 function drawBountyLine(ctx, centerX, y, numberStr, maxWidth, maxSize, minSize) {
   let size = maxSize;
   let pWidth = 0, numWidth = 0, gap = 0, totalWidth = 0;
@@ -121,87 +92,54 @@ function drawBountyLine(ctx, centerX, y, numberStr, maxWidth, maxSize, minSize) 
   ctx.textAlign = prevAlign;
 }
 
-// One Piece style wanted/bounty poster:
-//   headerText     — "WANTED" or "BOUNTY"
-//   avatarUrl      — Discord avatar URL, placed in the big photo box as-is
-//   name           — printed right under "DEAD OR ALIVE" (spaces become "•")
-//   subtitle       — defaults to "DEAD OR ALIVE" if omitted
+// One Piece style wanted poster, composited onto the real template:
+//   avatarUrl      — Discord avatar URL, placed into the template's photo box
 //   highlightValue — the comma-formatted Cash number (use formatFullAmount())
-async function renderPoster({ headerText, avatarUrl, name, subtitle, highlightValue }) {
-  const canvas = createCanvas(WIDTH, HEIGHT);
+async function renderPoster({ avatarUrl, highlightValue }) {
+  const template = await getTemplate();
+  const W = RENDER_WIDTH;
+  const H = Math.round(RENDER_WIDTH * (template.height / template.width));
+
+  const canvas = createCanvas(W, H);
   const ctx = canvas.getContext("2d");
 
-  // Flat aged-paper tan background
-  ctx.fillStyle = "#c9b78f";
-  ctx.fillRect(0, 0, WIDTH, HEIGHT);
-  for (let i = 0; i < 40; i++) {
-    ctx.fillStyle = `rgba(120, 95, 55, ${0.02 + (i % 5) * 0.008})`;
-    ctx.fillRect(0, (i / 40) * HEIGHT, WIDTH, HEIGHT / 40 + 2);
+  // Photo goes in FIRST, underneath the template, so the template's cutout
+  // border sits cleanly on top of it with no seams.
+  const boxX = PHOTO_BOX.left * W;
+  const boxY = PHOTO_BOX.top * H;
+  const boxW = (PHOTO_BOX.right - PHOTO_BOX.left) * W;
+  const boxH = (PHOTO_BOX.bottom - PHOTO_BOX.top) * H;
+  try {
+    const avatar = await loadImage(avatarUrl);
+    // Cover-fit: scale to fill the box without distorting, cropping overflow.
+    const scale = Math.max(boxW / avatar.width, boxH / avatar.height);
+    const drawW = avatar.width * scale;
+    const drawH = avatar.height * scale;
+    const drawX = boxX + (boxW - drawW) / 2;
+    const drawY = boxY + (boxH - drawH) / 2;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(boxX, boxY, boxW, boxH);
+    ctx.clip();
+    ctx.drawImage(avatar, drawX, drawY, drawW, drawH);
+    ctx.restore();
+  } catch (e) {
+    ctx.fillStyle = "#e5e0d5";
+    ctx.fillRect(boxX, boxY, boxW, boxH);
   }
 
-  // Clean double-line border, close to the edge
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 5;
-  ctx.strokeRect(12, 12, WIDTH - 24, HEIGHT - 24);
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(19, 19, WIDTH - 38, HEIGHT - 38);
+  // Template on top — its transparent cutout now shows the avatar underneath.
+  ctx.drawImage(template, 0, 0, W, H);
 
+  // Text overlay — just the bounty amount, centered in the blank space.
   ctx.textAlign = "center";
   ctx.fillStyle = INK;
+  const safeLeft = TEXT_SAFE_LEFT_FRAC * W;
+  const safeRight = TEXT_SAFE_RIGHT_FRAC * W;
+  const safeWidth = safeRight - safeLeft;
+  const centerX = W / 2;
 
-  // Big bold "WANTED"/"BOUNTY" headline, tight to the top
-  const headerY = 92;
-  ctx.font = "bold 82px PosterFont, sans-serif";
-  ctx.fillText(headerText, WIDTH / 2, headerY);
-
-  // White photo box — starts right under the headline, minimal gap
-  const photoX = (WIDTH - PHOTO_SIZE) / 2;
-  const photoY = headerY + 26;
-  ctx.fillStyle = INK;
-  ctx.fillRect(photoX - 4, photoY - 4, PHOTO_SIZE + 8, PHOTO_SIZE + 8);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(photoX, photoY, PHOTO_SIZE, PHOTO_SIZE);
-  try {
-    const img = await loadImage(avatarUrl);
-    ctx.drawImage(img, photoX, photoY, PHOTO_SIZE, PHOTO_SIZE);
-  } catch (e) {
-    // leave it blank white on failure, matching the template's own placeholder look
-  }
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 2;
-  ctx.strokeRect(photoX, photoY, PHOTO_SIZE, PHOTO_SIZE);
-
-  // IMPORTANT: fillStyle was set to white for the photo box above — every
-  // fillText call from here on MUST explicitly reset it first, or the text
-  // silently renders invisible-on-tan (the exact bug that shipped last time).
-  ctx.fillStyle = INK;
-
-  const photoBottom = photoY + PHOTO_SIZE;
-
-  // "DEAD OR ALIVE" — tight against the photo's bottom edge. Flourishes are
-  // positioned relative to the ACTUAL rendered text width, so they bracket
-  // the words directly instead of floating at a fixed guessed offset.
-  const subtitleY = photoBottom + 40;
-  ctx.font = "30px PosterFont, sans-serif";
-  const subtitleText = (subtitle || "DEAD OR ALIVE").toUpperCase();
-  const subtitleWidth = drawSpacedText(ctx, subtitleText, WIDTH / 2, subtitleY, 5);
-  drawFlourish(ctx, WIDTH / 2 - subtitleWidth / 2 - 26, subtitleY - 9, false);
-  drawFlourish(ctx, WIDTH / 2 + subtitleWidth / 2 + 26, subtitleY - 9, true);
-
-  // Name — dots between words like "MONKEY•D•LUFFY", auto-shrinks to fit.
-  const nameY = subtitleY + 46;
-  const nameMaxWidth = WIDTH - MARGIN * 2 - 30;
-  const nameText = (name || "").toUpperCase().trim().split(/\s+/).join("•");
-  const nameSize = fitFontSize(ctx, nameText, "PosterFont", "bold", 42, 22, nameMaxWidth);
-  ctx.fillStyle = INK;
-  ctx.font = `bold ${nameSize}px PosterFont, sans-serif`;
-  ctx.fillText(nameText, WIDTH / 2, nameY);
-
-  // Big bounty number — Beli mark + comma-formatted digits, near the bottom.
-  ctx.fillStyle = INK;
-  const bountyY = Math.max(HEIGHT - 46, nameY + 64);
-  const bountyMaxWidth = WIDTH - MARGIN * 2 - 30;
-  drawBountyLine(ctx, WIDTH / 2, bountyY, highlightValue, bountyMaxWidth, 58, 28);
+  drawBountyLine(ctx, centerX, BOUNTY_Y_FRAC * H, highlightValue, safeWidth, 52, 22);
 
   return canvas.toBuffer("image/png");
 }
