@@ -8502,7 +8502,11 @@ async function init() {
     const isMaster = message.author.id === MASTER_ID;
 
     // ── Anti-spam: 3 messages in 2s = warning, 3 warnings = 30 min mute ──────
-    if (!isDM && !isMaster) {
+    // Only counts messages actually directed at Cosa (mentions it, replies to
+    // it, or says its name/triggers it) — general chatter between users that
+    // never involves the bot shouldn't get anyone warned or muted by it.
+    const directedAtCosa = !isDM && (isTriggered(message) || await isReplyToBot(message));
+    if (!isDM && !isMaster && directedAtCosa) {
       const now = Date.now();
       const hist = (spamTimestamps.get(message.author.id) || []).filter(t => now - t < SPAM_WINDOW_MS);
       hist.push(now);
