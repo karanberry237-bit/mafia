@@ -173,15 +173,20 @@ async function endCycleAndPayout() {
   await saveState(newState);
   await refreshCachedTaxRate();
 
+  summary.newState = newState; // lets callers announce the freshly-convened seats too
   return summary;
 }
 
 // Call this periodically (e.g. hourly) — a cheap no-op if the cycle isn't
-// over yet. Returns a payout summary only on the tick where a cycle actually
-// rolled over (for announcing), otherwise null.
+// over yet. Returns { previousMembers, payouts, resolvedTaxKey, pot, newState }
+// on a normal rollover, { newState } only on the very first cycle ever
+// (nothing to resolve yet), or null if nothing happened this tick.
 async function checkCycleRollover() {
   let state = await getState();
-  if (!state) { await startNewCycle(); return null; }
+  if (!state) {
+    const newState = await startNewCycle();
+    return { newState };
+  }
   if (Date.now() < state.cycleEndAt) return null;
   return await endCycleAndPayout();
 }
@@ -257,8 +262,34 @@ function formatPayoutSummary(summary) {
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `Pot collected: **💵 ${eco.fmt(summary.pot)} Cash**\n` +
     `Resolved tax rate going forward: **${taxLabel}**\n\n` +
-    (lines.length ? lines.join("\n") : "*No gangs held a seat this cycle.*") +
-    `\n\n*A new Commission has convened based on current standings.*`
+    (lines.length ? lines.join("\n") : "*No gangs held a seat this cycle.*")
+  );
+}
+
+// Announces a freshly-seated Commission and actually pings each seated
+// gang's current leader (fetched live, not from any stored snapshot, so a
+// mid-cycle leadership change is still reflected correctly here). The
+// Barzinis never get a ping — there's no real Discord account behind their
+// "leader" — and their auto-cast vote is noted instead.
+async function formatConvenedAnnouncement(state) {
+  if (!state) return null;
+  const lines = [];
+  for (const m of state.members) {
+    if (m.gangName === rivalnpc.BARZINI_NAME) {
+      lines.push(`**${m.gangName}** — a rival family with no leader to summon (already cast their vote).`);
+      continue;
+    }
+    const gang = await gangs.getGangById(m.gangId);
+    const leaderMention = gang?.leader_id ? `<@${gang.leader_id}>` : "*(unknown leader)*";
+    lines.push(`**${m.gangName}** — ${leaderMention}`);
+  }
+  const daysLeft = Math.max(0, (state.cycleEndAt - Date.now()) / 86400000).toFixed(1);
+  return (
+    `🕴️ **THE COMMISSION HAS CONVENED**\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    (lines.length ? lines.join("\n") : "*No gangs currently qualify for a seat.*") +
+    `\n\nDiscuss it out, then vote with **/commission vote** — majority wins. Cycle closes in **${daysLeft}d** ` +
+    `(or sooner via **/commission call-meeting**, or the Don's **/commission force-vote**).`
   );
 }
 
@@ -357,6 +388,6 @@ module.exports = {
   initCommission, TAX_CHOICES, DEFAULT_TAX_KEY, CYCLE_MS,
   getState, startNewCycle, checkCycleRollover, endCycleAndPayout,
   castVote, addToPot, getActiveTaxRate, refreshCachedTaxRate,
-  formatCommissionStatus, formatPayoutSummary, rankGangs,
+  formatCommissionStatus, formatPayoutSummary, formatConvenedAnnouncement, rankGangs,
   callMeeting, acceptMeeting, getMeetingStatus, formatMeetingStatus, getMeetingCooldownRemaining,
 };
