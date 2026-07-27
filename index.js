@@ -6792,12 +6792,16 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const last = w.last_daily ? new Date(w.last_daily).getTime() : 0;
       const cooldown = 20 * 60 * 60 * 1000; // 20 hours
       const dailyCooldownActive = (now - last) < cooldown;
-      const secondWindActive = features.hasEffect(message.author.id, "second_wind");
+      const secondWindActive = features.hasEffect(message.author.id, "second_wind") && features.getItemCooldownRemaining(message.author.id, "second_wind") === 0;
       if (dailyCooldownActive && !secondWindActive) {
         const remaining = cooldown - (now - last);
         const hrs = Math.floor(remaining / 3600000);
         const mins = Math.floor((remaining % 3600000) / 60000);
-        return `⏰ You already claimed your daily. Come back in **${hrs}h ${mins}m**.`;
+        const swRemaining = features.getItemCooldownRemaining(message.author.id, "second_wind");
+        const swLine = (features.hasEffect(message.author.id, "second_wind") && swRemaining > 0)
+          ? ` Your Second Wind is still on cooldown for another **${Math.ceil(swRemaining / 3600000)}h**.`
+          : "";
+        return `⏰ You already claimed your daily. Come back in **${hrs}h ${mins}m**.${swLine}`;
       }
       const secondWindUsed = dailyCooldownActive && secondWindActive;
       if (secondWindUsed) features.consumeItem(message.author.id, "second_wind");
@@ -8173,6 +8177,45 @@ const commands = [
   new SlashCommandBuilder()
     .setName("gang-leaderboard")
     .setDescription("Rank every gang by treasury")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("wipe-banks-by-tier")
+    .setDescription("Reset everyone at/above a vault tier down to a chosen tier (Don Clint only)")
+    .addStringOption(opt =>
+      opt.setName("from_tier")
+        .setDescription("Reset anyone at this tier or above")
+        .setRequired(true)
+        .addChoices(
+          { name: "🔑 Safety Deposit Box+", value: "deposit" },
+          { name: "🔒 The Safe+", value: "safe" },
+          { name: "🏦 Bank Vault+", value: "vault" },
+          { name: "🛳️ Offshore Account+", value: "offshore" },
+          { name: "🏢 Shell Company+", value: "shell" },
+          { name: "🇨🇭 Swiss Account+", value: "swiss" },
+          { name: "🏝️ Cayman Account+", value: "cayman" },
+          { name: "💼 Family Trust+", value: "trust" },
+        )
+    )
+    .addStringOption(opt =>
+      opt.setName("reset_to_tier")
+        .setDescription("Reset them down to this tier (balance clipped to this tier's storage cap, not wiped)")
+        .setRequired(true)
+        .addChoices(
+          { name: "📦 Shoebox", value: "shoebox" },
+          { name: "🔑 Safety Deposit Box", value: "deposit" },
+          { name: "🔒 The Safe", value: "safe" },
+          { name: "🏦 Bank Vault", value: "vault" },
+          { name: "🛳️ Offshore Account", value: "offshore" },
+          { name: "🏢 Shell Company", value: "shell" },
+          { name: "🇨🇭 Swiss Account", value: "swiss" },
+          { name: "🏝️ Cayman Account", value: "cayman" },
+        )
+    )
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("reset-bank")
+    .setDescription("Reset one player's bank account entirely — balance to 0, vault tier back to Shoebox (Don Clint only)")
+    .addUserOption(opt => opt.setName("user").setDescription("Whose bank to reset").setRequired(true))
     .toJSON(),
 ];
 
@@ -9798,6 +9841,47 @@ async function init() {
           const list = await gangs.getGangLeaderboard();
           const text = gangs.formatGangLeaderboard(list);
           await interaction.reply({ content: `🏴 **GANG LEADERBOARD**\n\n${text}` }).catch(() => {});
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "wipe-banks-by-tier") {
+        if (interaction.user.id !== MASTER_ID) {
+          await interaction.reply({ content: "🔫 Only Don Clint can do a bulk bank reset.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        const fromTier = interaction.options.getString("from_tier");
+        const toTier = interaction.options.getString("reset_to_tier");
+        try {
+          const res = await bank.resetBanksByTier(fromTier, toTier);
+          if (!res.success) {
+            await interaction.reply({ content: "❌ " + res.reason, ephemeral: true }).catch(() => {});
+            return;
+          }
+          const fromLabel = bank.VAULT_TIERS[fromTier].label;
+          const toLabel = bank.VAULT_TIERS[toTier].label;
+          await interaction.reply({ content: `🏦 Reset **${res.affected}** account(s) at **${fromLabel}+** down to **${toLabel}** (balances clipped to that tier's storage cap, not wiped).`, ephemeral: true }).catch(() => {});
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
+      if (interaction.commandName === "reset-bank") {
+        if (interaction.user.id !== MASTER_ID) {
+          await interaction.reply({ content: "🔫 Only Don Clint can reset someone's bank.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        const targetUser = interaction.options.getUser("user");
+        try {
+          const res = await bank.resetSingleBank(targetUser.id);
+          if (!res.success) {
+            await interaction.reply({ content: "❌ " + res.reason, ephemeral: true }).catch(() => {});
+            return;
+          }
+          await interaction.reply({ content: `🏦 Reset <@${targetUser.id}>'s bank — balance to 0, vault tier back to 📦 Shoebox.`, ephemeral: true }).catch(() => {});
         } catch (e) {
           await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
         }
