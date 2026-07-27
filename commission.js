@@ -227,7 +227,16 @@ async function castVote(userId, taxKey) {
 
   state.votes[ug.gang.id] = taxKey;
   await saveState(state);
-  return { success: true, gangName: ug.gang.name, taxKey };
+
+  // If every seated member has now voted (including any Barzini auto-vote),
+  // there's nothing left to wait for — resolve immediately instead of
+  // sitting idle until the timer, a forced vote, or a called meeting.
+  if (Object.keys(state.votes).length >= state.members.length) {
+    const summary = await endCycleAndPayout();
+    return { success: true, gangName: ug.gang.name, taxKey, autoResolved: true, summary };
+  }
+
+  return { success: true, gangName: ug.gang.name, taxKey, autoResolved: false };
 }
 
 function formatCommissionStatus(state) {
