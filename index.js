@@ -4829,7 +4829,7 @@ function detectPublicCommand(text, message) {
     return { action: "gang_info", gangName: name, targetId };
   }
   if (/\bcosa\s+gang\s+bribe\b/.test(lower) && targetId) {
-    const amt = parseShortAmount(text.replace(/.*\bgang\s+bribe\b/i, ""));
+    const amt = parseShortAmount(text.replace(/.*\bgang\s+bribe\b/i, "").replace(/<@!?\d+>/g, ""));
     return { action: "gang_bribe", targetId, amount: amt };
   }
   if (/\bcosa\s+gang\s+accept[\s-]?bribe\b/.test(lower)) return { action: "gang_accept_bribe" };
