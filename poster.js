@@ -1,5 +1,6 @@
 const { createCanvas, GlobalFonts, loadImage } = require("@napi-rs/canvas");
 const path = require("path");
+const fs = require("fs");
 
 // Reuses the same bundled font chess.js registers — safe to call again even
 // if it's already registered (both wrap it in try/catch).
@@ -33,7 +34,20 @@ const RENDER_WIDTH = 700;
 
 let cachedTemplate = null;
 async function getTemplate() {
-  if (!cachedTemplate) cachedTemplate = await loadImage(TEMPLATE_PATH);
+  // Read the file into memory and hand loadImage() the raw bytes rather than
+  // the path string — passing a bare filesystem path can make loadImage()
+  // attempt to parse it as a URL internally and throw "Invalid URL", since a
+  // plain path has no scheme (file://, https://, etc). A Buffer sidesteps
+  // that entirely.
+  if (!cachedTemplate) {
+    let fileBuffer;
+    try {
+      fileBuffer = fs.readFileSync(TEMPLATE_PATH);
+    } catch (e) {
+      throw new Error(`Wanted poster template not found at ${TEMPLATE_PATH} — make sure assets/wanted_template.png was deployed alongside poster.js.`);
+    }
+    cachedTemplate = await loadImage(fileBuffer);
+  }
   return cachedTemplate;
 }
 
