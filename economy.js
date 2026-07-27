@@ -524,12 +524,17 @@ function newBjHand() { return [dealCard(), dealCard()]; }
 
 // ── Shakedown (Rob) ────────────────────────────────────────────────────────────
 // 40% success, 30% caught (fine = 50% of attempted take), 30% they got away clean
-function attemptRob(targetCopperBalance, robberCopperBalance, robberDebt = 0) {
+// targetMarked (from bounties.isMarked) bumps success chance — a target
+// who just had a big bounty collected on them is exposed and easy pickings
+// for the next hour.
+const MARKED_ROB_BONUS = 0.25;
+function attemptRob(targetCopperBalance, robberCopperBalance, robberDebt = 0, targetMarked = false) {
   const r = Math.random();
   const steal = Math.floor(targetCopperBalance * (0.2 + Math.random() * 0.2));
   const finePercent = 0.5 + Math.random() * 0.2;
   // In debt to the Family = lower success rate (20% instead of 40%)
-  const successThreshold = robberDebt > 0 ? 0.25 : 0.50;
+  let successThreshold = robberDebt > 0 ? 0.25 : 0.50;
+  if (targetMarked) successThreshold = Math.min(0.9, successThreshold + MARKED_ROB_BONUS);
   if (r < successThreshold) return { result: "success", amount: steal };
   if (r < 0.7) return { result: "caught", fine: Math.floor(steal * finePercent) };
   return { result: "escaped" };
@@ -592,7 +597,7 @@ module.exports = {
   getDailyAmount, DAILY_REWARDS,
   playSlots, spinWheel, WHEEL_SEGMENTS,
   bjHandValue, dealCard, newBjHand, bjGames,
-  attemptRob, shouldRewardChat,
+  attemptRob, MARKED_ROB_BONUS, shouldRewardChat,
   getDebt, addDebt, payDebt, formatDebt,
   // Notoriety leveling
   NOTORIETY_TIERS, loadNotoriety, saveNotoriety,
