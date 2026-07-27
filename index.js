@@ -4828,6 +4828,12 @@ function detectPublicCommand(text, message) {
     const name = text.replace(/.*\bgang\s+info\b/i, "").trim();
     return { action: "gang_info", gangName: name, targetId };
   }
+  if (/\bcosa\s+gang\s+bribe\b/.test(lower) && targetId) {
+    const amt = parseShortAmount(text.replace(/.*\bgang\s+bribe\b/i, ""));
+    return { action: "gang_bribe", targetId, amount: amt };
+  }
+  if (/\bcosa\s+gang\s+accept[\s-]?bribe\b/.test(lower)) return { action: "gang_accept_bribe" };
+  if (/\bcosa\s+gang\s+decline[\s-]?bribe\b/.test(lower)) return { action: "gang_decline_bribe" };
   if (/\bcosa\s+gang\b/.test(lower)) return { action: "gang_info", gangName: "", targetId };
 
   // ── Turf Wars ────────────────────────────────────────────────────────────
@@ -6017,6 +6023,23 @@ async function executePublicCommand(message, cmd, channelId) {
       }
       const members = await gangs.getMembers(target.id);
       return gangs.formatGangCard(target, members);
+    }
+    case "gang_bribe": {
+      if (!cmd.targetId) return "Who are you trying to poach? Try **Cosa gang bribe @user 200k**.";
+      if (!cmd.amount) return "Invalid amount. Try **Cosa gang bribe @user 200k**.";
+      const res = await gangs.offerBribe(message.author.id, cmd.targetId, cmd.amount, eco.deductCopper, eco.addCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `💵 Offered <@${cmd.targetId}> **${eco.fmt(cmd.amount)} Cash** to leave **${res.targetGang.name}** and join **${res.actorGang.name}**. They have 15 minutes to **Cosa gang accept-bribe** or **Cosa gang decline-bribe** (refunded to you either way if they decline or ignore it).`;
+    }
+    case "gang_accept_bribe": {
+      const res = await gangs.acceptBribe(message.author.id, eco.addCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `🤝 You took the **${eco.fmt(res.amount)} Cash** and left **${res.oldGangName}** for **${res.newGangName}**.`;
+    }
+    case "gang_decline_bribe": {
+      const res = await gangs.declineBribe(message.author.id, eco.addCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `🚫 You turned down **${res.fromGangName}**'s **${eco.fmt(res.amount)} Cash** bribe. Loyalty noted.`;
     }
 
     // ── Turf Wars ────────────────────────────────────────────────────────
