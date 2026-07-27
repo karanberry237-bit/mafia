@@ -39,14 +39,21 @@ async function ensureBarzinisExist() {
 // Call this on the same daily cadence as turf.runDailyTurfProcessing(). Rolls
 // a chance per unclaimed zone for the Barzinis to quietly move in, and a
 // smaller chance per player-held zone that's seen no claim/attack activity
-// in a while to get muscled in on instead. Returns the list of flavor-text
-// events (also handed to announceFn if provided) so callers can log/inspect.
+// in a while to get muscled in on instead. Covers every guild's zones in one
+// pass (each row carries its own guild_id) and groups the flavor-text events
+// by guild, calling announceFn(guildId, text) once per guild that had any
+// activity — so each server's raid report goes to that server's own channel
+// instead of one combined message landing in just one place.
 async function runRivalRaids(announceFn) {
   const barzinis = await ensureBarzinisExist();
-  if (!barzinis) return [];
+  if (!barzinis) return {};
 
   const zones = await turf.getAllZones();
-  const events = [];
+  const eventsByGuild = {};
+  const addEvent = (guildId, text) => {
+    if (!eventsByGuild[guildId]) eventsByGuild[guildId] = [];
+    eventsByGuild[guildId].push(text);
+  };
 
   for (const zone of zones) {
     if (zone.controller_gang_id === barzinis.id) continue; // already theirs
@@ -57,8 +64,8 @@ async function runRivalRaids(announceFn) {
           controller_gang_id: barzinis.id,
           claimed_at: new Date().toISOString(),
           last_income_at: new Date().toISOString(),
-        }).eq("name", zone.name);
-        events.push(`🕶️ **The Barzinis** quietly moved into unclaimed **${zone.name}**.`);
+        }).eq("guild_id", zone.guild_id).eq("name", zone.name);
+        addEvent(zone.guild_id, `🕶️ **The Barzinis** quietly moved into unclaimed **${zone.name}**.`);
       }
       continue;
     }
@@ -75,13 +82,17 @@ async function runRivalRaids(announceFn) {
         claimed_at: new Date().toISOString(),
         last_income_at: new Date().toISOString(),
         last_attacked_at: new Date().toISOString(),
-      }).eq("name", zone.name);
-      events.push(`🕶️ **The Barzinis** moved on **${zone.name}** while ${previousGang ? `**${previousGang.name}**` : "its owners"} weren't watching.`);
+      }).eq("guild_id", zone.guild_id).eq("name", zone.name);
+      addEvent(zone.guild_id, `🕶️ **The Barzinis** moved on **${zone.name}** while ${previousGang ? `**${previousGang.name}**` : "its owners"} weren't watching.`);
     }
   }
 
-  if (events.length && typeof announceFn === "function") await announceFn(events.join("\n")).catch(() => {});
-  return events;
+  if (typeof announceFn === "function") {
+    for (const [guildId, events] of Object.entries(eventsByGuild)) {
+      if (events.length) await announceFn(guildId, events.join("\n")).catch(() => {});
+    }
+  }
+  return eventsByGuild;
 }
 
 module.exports = { initRivalNpc, ensureBarzinisExist, runRivalRaids, BARZINI_NAME, BARZINI_LEADER_ID };
