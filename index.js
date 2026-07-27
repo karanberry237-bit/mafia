@@ -230,6 +230,15 @@ async function announceCommissionResolution(guild, result) {
   }
 }
 const ROB_COOLDOWN_MS = 30 * 60 * 1000;
+// Flat bonus success chance when the Don personally leads a turf attack for
+// whichever gang he's in — a personal edge on top of the normal odds.
+const DON_ATTACK_BONUS = 0.25;
+function formatTurfAttackResult(res) {
+  const defenderName = res.defenderGang ? res.defenderGang.name : "the defenders";
+  return res.won
+    ? `⚔️ **${res.attackerGang.name}** stormed **${res.zone.name}** and took it from **${defenderName}**!`
+    : `⚔️ **${res.attackerGang.name}**'s attack on **${res.zone.name}** was repelled by **${defenderName}**.`;
+}
 const COINFLIP_COOLDOWN_MS = 5 * 60 * 1000;
 const loanCooldowns = new Map();
 const activeLoanData = new Map(); // userId -> { amount, dueDate, rankKey }
@@ -6010,13 +6019,30 @@ async function executePublicCommand(message, cmd, channelId) {
     }
     case "turf_attack": {
       if (!cmd.zoneName) return "Which zone? Use **Cosa turf list** to see names.";
-      const res = await turf.attackZone(message.author.id, message.guild?.id, cmd.zoneName);
+      const isDonAttacking = message.author.id === MASTER_ID;
+
+      if (isDonAttacking) {
+        const attackerGang = await gangs.getUserGang(message.author.id);
+        const zoneDef = turf.getZoneDef(cmd.zoneName);
+        if (attackerGang && zoneDef) {
+          const remaining = turf.getAttackCooldownRemaining(attackerGang.gang.id, message.guild.id, zoneDef.name);
+          if (remaining > 0) {
+            const row = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`turf_skip_cd:${message.guild.id}:${zoneDef.name}`)
+                .setLabel(`⏩ Skip Cooldown (${remaining.toFixed(1)}h left)`)
+                .setStyle(ButtonStyle.Danger)
+            );
+            await message.reply({ content: `🔫 **${zoneDef.name}** is still on cooldown for your gang (**${remaining.toFixed(1)}h** left). Skip it, Don?`, components: [row] }).catch(() => {});
+            return null;
+          }
+        }
+      }
+
+      const res = await turf.attackZone(message.author.id, message.guild?.id, cmd.zoneName, isDonAttacking ? DON_ATTACK_BONUS : 0);
       if (!res.success) return "❌ " + res.reason;
-      const defenderName = res.defenderGang ? res.defenderGang.name : "the defenders";
       auditlog.logTurfFight(message.guild?.id, message.author.id, message.author.id, res.zone.name, res.won).catch(() => {});
-      return res.won
-        ? `⚔️ **${res.attackerGang.name}** stormed **${res.zone.name}** and took it from **${defenderName}**!`
-        : `⚔️ **${res.attackerGang.name}**'s attack on **${res.zone.name}** was repelled by **${defenderName}**.`;
+      return formatTurfAttackResult(res);
     }
 
     // ── Businesses ───────────────────────────────────────────────────────
@@ -9434,6 +9460,32 @@ async function init() {
         return;
       }
       await interaction.reply({ content: `💰 Grabbed it! (${res.grabbedCount} crew member(s) so far)`, ephemeral: true }).catch(() => {});
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("turf_skip_cd:")) {
+      if (interaction.user.id !== MASTER_ID) {
+        await interaction.reply({ content: "🔫 Only Don Clint can skip this.", ephemeral: true }).catch(() => {});
+        return;
+      }
+      const [, guildId, zoneName] = interaction.customId.split(":");
+      try {
+        const attackerGang = await gangs.getUserGang(interaction.user.id);
+        if (!attackerGang) {
+          await interaction.reply({ content: "❌ You're not in a gang.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        turf.clearAttackCooldown(attackerGang.gang.id, guildId, zoneName);
+        const res = await turf.attackZone(interaction.user.id, guildId, zoneName, DON_ATTACK_BONUS);
+        if (!res.success) {
+          await interaction.update({ content: "❌ " + res.reason, components: [] }).catch(() => {});
+          return;
+        }
+        auditlog.logTurfFight(guildId, interaction.user.id, interaction.user.id, res.zone.name, res.won).catch(() => {});
+        await interaction.update({ content: formatTurfAttackResult(res), components: [] }).catch(() => {});
+      } catch (e) {
+        await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
+      }
       return;
     }
 
