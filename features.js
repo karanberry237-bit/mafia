@@ -1386,7 +1386,7 @@ const SHOP_ITEMS = {
   house_favor: {
     id: "house_favor",
     name: "🎰 House Favor",
-    desc: "Guarantees no total-loss (💀/wipeout) result on your very next slots or wheel spin — whichever you play first. Doesn't boost payouts, just removes the floor once. Usable at most once per hour, no matter how many you own.",
+    desc: "Guarantees no total-loss (💀/wipeout) on your next slots or wheel spin. Does NOT apply automatically — you must activate it first with **Cosa use house_favor** before you gamble, then it protects whichever spin you play within 30 minutes. Usable at most once per hour, no matter how many you own.",
     price: 3000000,      // 3,000,000 Cash (up from 800,000)
     duration: null,
     rarity: "epic",
@@ -1438,6 +1438,20 @@ function markItemUsed(userId, itemId) {
 
 const userInventories = new Map();
 const activeEffects = new Map();
+// House Favor — armed userId -> expiresAt. Activating the item (Cosa use
+// house_favor) is what actually starts the cooldown and consumes the use now,
+// instead of silently deciding pass/fail at gambling time with zero feedback
+// when the cooldown blocks it (that silence is exactly what was confusing
+// people into thinking it always applies). Once armed, it's guaranteed to
+// protect the very next slots/wheel spin, or it expires unused after 30 min.
+const armedHouseFavor = new Map();
+function isHouseFavorArmed(userId) {
+  const expiry = armedHouseFavor.get(userId);
+  return !!expiry && expiry > Date.now();
+}
+function clearHouseFavorArmed(userId) {
+  armedHouseFavor.delete(userId);
+}
 // Daily purchase tracker: userId -> { date: "YYYY-MM-DD", lucky_charm: count }
 const dailyPurchases = new Map();
 
@@ -1642,13 +1656,28 @@ async function useShopItem(userId, itemId, quantity = 1) {
     return `🪪 **Made Pass ready** — you have **${available}** use(s). Next time you hit a gambling cooldown it will be skipped automatically.`;
   }
 
+  // house_favor: now a real "activate it" item instead of a silent passive
+  // check at gambling time — that silence was exactly why people thought it
+  // always applied even when the 1-hour cooldown should've blocked it.
+  if (itemId === "house_favor") {
+    const remaining = getItemCooldownRemaining(userId, "house_favor");
+    if (remaining > 0) {
+      const mins = Math.ceil(remaining / 60000);
+      return `🔫 **House Favor** is on cooldown for another **${mins}m**. Your use was **NOT** consumed — try again once it's off cooldown.`;
+    }
+    const available = owned.uses || 0;
+    if (available <= 0) return `🔫 You have no **House Favor** uses left.`;
+    consumeItem(userId, "house_favor"); // spends the use AND starts the 1h cooldown right now
+    armedHouseFavor.set(userId, Date.now() + 30 * 60000);
+    return `🎰 **House Favor activated!** Your very next slots or wheel spin is guaranteed to avoid a total wipeout. Armed for the next **30 minutes** — go spin before it expires.`;
+  }
+
   // Passive items — these apply automatically to the next relevant action
-  // (jobs.js / slots-wheel / daily handlers check hasEffect + consume them
-  // directly) rather than being manually "activated" via Cosa use.
+  // (jobs.js handlers check hasEffect + consume them directly) rather than
+  // being manually "activated" via Cosa use.
   const PASSIVE_AUTO_ITEMS = {
     crew_backup: "It automatically halves your next crime/smuggle bust — no need to activate it, just go do the job.",
     fast_hands:  "It automatically halves the cooldown from your next work/crime/scavenge/smuggle run — no need to activate it, just go do the job.",
-    house_favor: "It automatically guarantees no total-loss result on your next slots or wheel spin — no need to activate it, just go spin.",
     second_wind: "It automatically lets your next **Cosa daily** ignore the cooldown — no need to activate it, just claim your daily.",
   };
   if (PASSIVE_AUTO_ITEMS[itemId]) {
@@ -1859,5 +1888,5 @@ module.exports = {
   getActiveEffectsSummary,
   getShopDisplay, getInventoryDisplay, loadInventories,
   grantItem, grantRandomQuestItem, RARITY_LABEL,
-  getItemCooldownRemaining, resetInventory,
+  getItemCooldownRemaining, resetInventory, isHouseFavorArmed, clearHouseFavorArmed,
 };
