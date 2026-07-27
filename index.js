@@ -196,6 +196,39 @@ async function postBountyPosterToAudit(guildId, targetId, bounty) {
     console.error("[BOUNTY POSTER AUDIT]", e.message);
   }
 }
+
+// Shared by every path that can resolve a Commission cycle (the hourly timer,
+// /commission force-vote, and an early meeting reaching majority) — posts the
+// payout wrap-up (if there was a previous cycle to resolve) and the new
+// cycle's convene announcement (with real @pings for each seated leader) to
+// general chat, and logs both to the audit channel. Centralized so all three
+// trigger paths behave identically instead of each hand-rolling its own copy.
+async function announceCommissionResolution(guild, result) {
+  if (!result || !guild) return;
+  const genCh = guild.channels.cache.get(GENERAL_CHANNEL_ID);
+
+  if (result.previousMembers) {
+    const payoutText = commission.formatPayoutSummary(result);
+    if (payoutText && genCh) await genCh.send(payoutText).catch(() => {});
+    auditlog.logEvent({
+      guildId: guild.id,
+      type: "gang_event",
+      title: "🕴️ Commission Cycle Resolved",
+      description: `Tax resolved to **${commission.TAX_CHOICES[result.resolvedTaxKey].label}**. Pot collected: 💵 ${eco.fmt(result.pot)} Cash.`,
+    }).catch(() => {});
+  }
+
+  if (result.newState) {
+    const convenedText = await commission.formatConvenedAnnouncement(result.newState);
+    if (convenedText && genCh) await genCh.send(convenedText).catch(() => {});
+    auditlog.logEvent({
+      guildId: guild.id,
+      type: "gang_event",
+      title: "🕴️ Commission Convened",
+      description: `New seats: ${result.newState.members.map(m => m.gangName).join(", ") || "none"}.`,
+    }).catch(() => {});
+  }
+}
 const ROB_COOLDOWN_MS = 30 * 60 * 1000;
 const COINFLIP_COOLDOWN_MS = 5 * 60 * 1000;
 const loanCooldowns = new Map();
@@ -8294,12 +8327,9 @@ async function init() {
       // pays out the pot, and starts a fresh cycle.
       const runCommissionCheck = async () => {
         try {
-          const summary = await commission.checkCycleRollover();
-          if (summary) {
-            const genCh = readyClient.guilds.cache.first()?.channels.cache.get(GENERAL_CHANNEL_ID);
-            const text = commission.formatPayoutSummary(summary);
-            if (genCh && text) await genCh.send(text).catch(() => {});
-          }
+          const result = await commission.checkCycleRollover();
+          const guild = readyClient.guilds.cache.first();
+          if (result && guild) await announceCommissionResolution(guild, result);
         } catch (e) { console.error("[COMMISSION CHECK]", e.message); }
         setTimeout(runCommissionCheck, 60 * 60 * 1000);
       };
@@ -9610,9 +9640,8 @@ async function init() {
               return;
             }
             if (res.resolved) {
-              await interaction.reply({ content: `🕴️ **${res.gangName}** called an emergency Commission meeting — majority agreed instantly!` }).catch(() => {});
-              const text = commission.formatPayoutSummary(res.summary);
-              if (text) await interaction.followUp({ content: text }).catch(() => {});
+              await interaction.reply({ content: `🕴️ **${res.gangName}** called an emergency Commission meeting — majority agreed instantly! Results going out in general.` }).catch(() => {});
+              await announceCommissionResolution(interaction.guild, res.summary);
             } else {
               await interaction.reply({ content: `🕴️ **${res.gangName}** called a Commission meeting (**${res.acceptedCount}/${res.neededTotal}** needed). Other Commission leaders can agree with **/commission accept-meeting** — closes in 1 hour if majority isn't reached.` }).catch(() => {});
             }
@@ -9625,9 +9654,8 @@ async function init() {
               return;
             }
             if (res.resolved) {
-              await interaction.reply({ content: `🕴️ **${res.gangName}** agreed — majority reached! The Commission's vote resolves now.` }).catch(() => {});
-              const text = commission.formatPayoutSummary(res.summary);
-              if (text) await interaction.followUp({ content: text }).catch(() => {});
+              await interaction.reply({ content: `🕴️ **${res.gangName}** agreed — majority reached! Results going out in general.` }).catch(() => {});
+              await announceCommissionResolution(interaction.guild, res.summary);
             } else {
               await interaction.reply({ content: `🕴️ **${res.gangName}** agreed to the meeting (**${res.acceptedCount}/${res.neededTotal}** needed so far).` }).catch(() => {});
             }
@@ -9643,9 +9671,8 @@ async function init() {
               await interaction.reply({ content: "📊 The Commission hasn't convened yet — nothing to resolve.", ephemeral: true }).catch(() => {});
               return;
             }
-            await interaction.reply({ content: "🤵 Forced the Commission's vote to resolve now." , ephemeral: true }).catch(() => {});
-            const text = commission.formatPayoutSummary(summary);
-            if (text) await interaction.followUp({ content: text }).catch(() => {});
+            await interaction.reply({ content: "🤵 Forced the Commission's vote to resolve now. Results going out in general.", ephemeral: true }).catch(() => {});
+            await announceCommissionResolution(interaction.guild, summary);
             return;
           }
         } catch (e) {
