@@ -26,7 +26,8 @@ const INK = "rgb(83, 63, 36)";
 // Fractions of the template's own width/height — these stay correct no
 // matter what pixel size we ultimately render at.
 const PHOTO_BOX = { left: 0.0926, right: 0.9071, top: 0.2143, bottom: 0.6307 };
-const BOUNTY_Y_FRAC = 0.79; // centered in the blank gap between "DEAD OR ALIVE" and the fine print
+const NAME_Y_FRAC = 0.745;
+const BOUNTY_Y_FRAC = 0.825;
 const TEXT_SAFE_LEFT_FRAC = 0.15;   // stays clear of the flourish curls on both
 const TEXT_SAFE_RIGHT_FRAC = 0.85;  // sides of "DEAD OR ALIVE"
 
@@ -57,59 +58,23 @@ function formatFullAmount(n) {
   return num.toLocaleString("en-US");
 }
 
-// Hand-drawn "Beli" mark (One Piece's currency symbol) — a "P" with a double
-// horizontal strike through the stem, drawn with paths rather than relying on
-// the bundled display font having that glyph. Returns its rendered width.
-function drawBeliMark(ctx, x, y, fontSizePx) {
-  const prevAlign = ctx.textAlign;
-  ctx.textAlign = "left";
-  ctx.fillText("P", x, y);
-  const pWidth = ctx.measureText("P").width;
-
-  const stemX = x + pWidth * 0.12;
-  const strikeW = pWidth * 0.62;
-  ctx.strokeStyle = ctx.fillStyle;
-  ctx.lineWidth = Math.max(2, fontSizePx * 0.055);
-  ctx.beginPath();
-  ctx.moveTo(stemX, y - fontSizePx * 0.52);
-  ctx.lineTo(stemX + strikeW, y - fontSizePx * 0.52);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(stemX, y - fontSizePx * 0.34);
-  ctx.lineTo(stemX + strikeW, y - fontSizePx * 0.34);
-  ctx.stroke();
-
-  ctx.textAlign = prevAlign;
-  return pWidth;
-}
-
-// Draws the Beli mark + comma-formatted number as one centered group,
-// auto-shrinking together so a huge bounty never overflows.
-function drawBountyLine(ctx, centerX, y, numberStr, maxWidth, maxSize, minSize) {
+// Picks the largest font size (down from maxSize, in 2px steps) at which
+// `text` still fits within `maxWidth`.
+function fitFontSize(ctx, text, weight, maxSize, minSize, maxWidth) {
   let size = maxSize;
-  let pWidth = 0, numWidth = 0, gap = 0, totalWidth = 0;
   while (size > minSize) {
-    ctx.font = `bold ${size}px PosterFont, sans-serif`;
-    pWidth = ctx.measureText("P").width;
-    numWidth = ctx.measureText(numberStr).width;
-    gap = size * 0.14;
-    totalWidth = pWidth + gap + numWidth;
-    if (totalWidth <= maxWidth) break;
+    ctx.font = `${weight} ${size}px PosterFont, sans-serif`;
+    if (ctx.measureText(text).width <= maxWidth) break;
     size -= 2;
   }
-  ctx.font = `bold ${size}px PosterFont, sans-serif`;
-  const startX = centerX - totalWidth / 2;
-  drawBeliMark(ctx, startX, y, size);
-  const prevAlign = ctx.textAlign;
-  ctx.textAlign = "left";
-  ctx.fillText(numberStr, startX + pWidth + gap, y);
-  ctx.textAlign = prevAlign;
+  return size;
 }
 
 // One Piece style wanted poster, composited onto the real template:
 //   avatarUrl      — Discord avatar URL, placed into the template's photo box
+//   name           — printed under "DEAD OR ALIVE" (spaces become "•")
 //   highlightValue — the comma-formatted Cash number (use formatFullAmount())
-async function renderPoster({ avatarUrl, highlightValue }) {
+async function renderPoster({ avatarUrl, name, highlightValue }) {
   const template = await getTemplate();
   const W = RENDER_WIDTH;
   const H = Math.round(RENDER_WIDTH * (template.height / template.width));
@@ -145,7 +110,8 @@ async function renderPoster({ avatarUrl, highlightValue }) {
   // Template on top — its transparent cutout now shows the avatar underneath.
   ctx.drawImage(template, 0, 0, W, H);
 
-  // Text overlay — just the bounty amount, centered in the blank space.
+  // Text overlay — name, then the bounty amount below it (no currency mark,
+  // just the plain comma-formatted number).
   ctx.textAlign = "center";
   ctx.fillStyle = INK;
   const safeLeft = TEXT_SAFE_LEFT_FRAC * W;
@@ -153,7 +119,16 @@ async function renderPoster({ avatarUrl, highlightValue }) {
   const safeWidth = safeRight - safeLeft;
   const centerX = W / 2;
 
-  drawBountyLine(ctx, centerX, BOUNTY_Y_FRAC * H, highlightValue, safeWidth, 52, 22);
+  const nameText = (name || "").toUpperCase().trim().split(/\s+/).join("•");
+  const nameSize = fitFontSize(ctx, nameText, "bold", 34, 16, safeWidth);
+  ctx.font = `bold ${nameSize}px PosterFont, sans-serif`;
+  ctx.fillStyle = INK;
+  ctx.fillText(nameText, centerX, NAME_Y_FRAC * H);
+
+  const bountySize = fitFontSize(ctx, highlightValue, "bold", 52, 22, safeWidth);
+  ctx.font = `bold ${bountySize}px PosterFont, sans-serif`;
+  ctx.fillStyle = INK;
+  ctx.fillText(highlightValue, centerX, BOUNTY_Y_FRAC * H);
 
   return canvas.toBuffer("image/png");
 }
