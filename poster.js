@@ -11,30 +11,32 @@ try {
 }
 
 // ── Real template compositing ───────────────────────────────────────────────
-// Instead of hand-drawing the border/headline/"DEAD OR ALIVE"/flourishes with
-// canvas primitives (which never quite matched a real design), this loads the
-// actual reference template image and only draws THREE things on top of it:
-//   1. the avatar, into the template's transparent photo-box cutout
-//   2. the name
-//   3. the bounty amount
-// Geometry below was measured directly from the template file's own pixels
-// (the transparent cutout's exact bounding box, and the ink color sampled
-// from its "WANTED" headline) rather than guessed.
+// Loads the actual reference template image and only draws THREE things on
+// top of it: the avatar (into the transparent photo-box cutout), the name,
+// and the bounty amount. All geometry below was measured directly from the
+// template's own pixels (transparent cutout bounds, ink color, the "JB"
+// monogram mark, and the "MARINE" text) rather than guessed.
 const TEMPLATE_PATH = path.join(__dirname, "wanted_template.png");
 const INK = "rgb(83, 63, 36)";
 
-// Fractions of the template's own width/height — these stay correct no
-// matter what pixel size we ultimately render at.
 const PHOTO_BOX = { left: 0.0926, right: 0.9071, top: 0.2143, bottom: 0.6307 };
-// The blank band between "DEAD OR ALIVE" (baked into the template) and the
-// fine-print/MARINE row at the bottom (also baked in) — measured directly
-// from the template's own pixels. Name + bounty share this band, and their
-// font sizes are capped so they can never grow past its edges no matter how
-// short the text is.
+
+// The blank band between "DEAD OR ALIVE" and the monogram/fine-print row —
+// the name gets this whole band to itself now (the bounty number moved down
+// next to the monogram instead of sharing this space), so it can render
+// noticeably bigger.
 const TEXT_BAND_TOP_FRAC = 0.702;
 const TEXT_BAND_BOTTOM_FRAC = 0.856;
-const TEXT_SAFE_LEFT_FRAC = 0.15;   // stays clear of the flourish curls on both
-const TEXT_SAFE_RIGHT_FRAC = 0.85;  // sides of "DEAD OR ALIVE"
+const TEXT_SAFE_LEFT_FRAC = 0.15;
+const TEXT_SAFE_RIGHT_FRAC = 0.85;
+
+// The template's own "JB" monogram mark (measured bounding box, border
+// excluded) — the bounty number is placed immediately to its right, on the
+// same vertical center, instead of a hand-drawn currency symbol.
+const MONOGRAM_BOX = { left: 0.035, right: 0.170, top: 0.819, bottom: 0.909 };
+// "MARINE" (also baked into the template) starts here — the number's
+// available width is capped before this so it can never run into it.
+const MARINE_LEFT_FRAC = 0.665;
 
 const RENDER_WIDTH = 700;
 
@@ -75,6 +77,18 @@ function fitFontSize(ctx, text, weight, maxSize, minSize, maxWidth) {
   return size;
 }
 
+// Curated surnames pulled from across the series, used for the
+// "displayName•D•[surname]" naming gimmick (mirrors how canon characters
+// like Monkey D. Luffy or Portgas D. Ace are named).
+const D_SURNAMES = [
+  "ROGER", "NEWGATE", "TEACH", "DRAGON", "GARP", "KUROHIGE", "SHANKS",
+  "MIHAWK", "KAIDO", "LINLIN", "DOFLAMINGO", "CROCODILE", "MORIA", "KUMA",
+  "HANCOCK", "REVOLUTIONARY", "WHITEBEARD", "BUGGY", "RAYLEIGH", "OARS",
+];
+function randomDSurname() {
+  return D_SURNAMES[Math.floor(Math.random() * D_SURNAMES.length)];
+}
+
 // One Piece style wanted poster, composited onto the real template:
 //   avatarUrl      — Discord avatar URL, placed into the template's photo box
 //   name           — printed under "DEAD OR ALIVE" (spaces become "•")
@@ -95,7 +109,6 @@ async function renderPoster({ avatarUrl, name, highlightValue }) {
   const boxH = (PHOTO_BOX.bottom - PHOTO_BOX.top) * H;
   try {
     const avatar = await loadImage(avatarUrl);
-    // Cover-fit: scale to fill the box without distorting, cropping overflow.
     const scale = Math.max(boxW / avatar.width, boxH / avatar.height);
     const drawW = avatar.width * scale;
     const drawH = avatar.height * scale;
@@ -115,13 +128,10 @@ async function renderPoster({ avatarUrl, name, highlightValue }) {
   // Template on top — its transparent cutout now shows the avatar underneath.
   ctx.drawImage(template, 0, 0, W, H);
 
-  // Text overlay — name, then the bounty amount below it (no currency mark,
-  // just the plain comma-formatted number). Both share the blank band
-  // between "DEAD OR ALIVE" and the fine print — name gets the top ~55%,
-  // bounty the bottom ~45%, each capped so its own line can't grow past its
-  // slice of the band even if the text is short enough to want to.
   ctx.textAlign = "center";
   ctx.fillStyle = INK;
+
+  // ── Name — gets the full band now, so it can render bigger ────────────────
   const safeLeft = TEXT_SAFE_LEFT_FRAC * W;
   const safeRight = TEXT_SAFE_RIGHT_FRAC * W;
   const safeWidth = safeRight - safeLeft;
@@ -129,25 +139,53 @@ async function renderPoster({ avatarUrl, name, highlightValue }) {
 
   const bandTop = TEXT_BAND_TOP_FRAC * H;
   const bandBottom = TEXT_BAND_BOTTOM_FRAC * H;
-  const bandHeight = bandBottom - bandTop;
-  const nameSlotH = bandHeight * 0.55;
-  const bountySlotH = bandHeight * 0.45;
-  // Cap height (the visible glyph height for bold caps/digits) is roughly
-  // 72% of the nominal font size, so divide by that to get a size that
-  // actually fits its slot rather than just guessing a pixel number.
-  const nameMaxByHeight = nameSlotH * 0.72;
-  const bountyMaxByHeight = bountySlotH * 0.72;
+  const bandPadding = (bandBottom - bandTop) * 0.08;
+  const usableTop = bandTop + bandPadding;
+  const usableBottom = bandBottom - bandPadding;
+  const usableHeight = usableBottom - usableTop;
+  const nameMaxByHeight = usableHeight * 0.72;
 
-  const nameText = (name || "").toUpperCase().trim().split(/\s+/).join("•");
-  const nameSize = fitFontSize(ctx, nameText, "bold", Math.min(90, nameMaxByHeight), 18, safeWidth);
+  const rawName = (name || "").toUpperCase().trim();
+  const nameText = `${rawName} D ${randomDSurname()}`.split(/\s+/).join("•");
+  const nameSize = fitFontSize(ctx, nameText, "bold", Math.min(100, nameMaxByHeight), 16, safeWidth);
   ctx.font = `bold ${nameSize}px PosterFont, sans-serif`;
-  ctx.fillStyle = INK;
-  ctx.fillText(nameText, centerX, bandTop + nameSlotH * 0.82);
+  // textBaseline "middle" centers on the true vertical midpoint of the font's
+  // own metrics, so the gap above and below ends up equal — the previous
+  // fixed 0.78 offset was pushing it down, leaving way more space above than
+  // below.
+  ctx.textBaseline = "middle";
+  ctx.fillText(nameText, centerX, usableTop + usableHeight / 2);
+  ctx.textBaseline = "alphabetic"; // reset for what follows
 
-  const bountySize = fitFontSize(ctx, highlightValue, "bold", Math.min(70, bountyMaxByHeight), 22, safeWidth);
-  ctx.font = `bold ${bountySize}px PosterFont, sans-serif`;
+  // ── Bounty number — right next to the template's own monogram mark ────────
+  const monoLeft = MONOGRAM_BOX.left * W;
+  const monoRight = MONOGRAM_BOX.right * W;
+  const monoTop = MONOGRAM_BOX.top * H;
+  const monoBottom = MONOGRAM_BOX.bottom * H;
+  const monoCenterY = (monoTop + monoBottom) / 2;
+  const monoHeight = monoBottom - monoTop;
+
+  // Sits directly next to the monogram, centered within the space it has
+  // between the monogram and "MARINE" — this stays close to the mark (as
+  // asked) rather than centered on the whole page, which pushed it away from
+  // the monogram entirely. Capped so it can never reach "MARINE".
+  const marginPx = W * 0.02;
+  const numberAreaLeft = monoRight + marginPx;
+  const numberAreaRight = MARINE_LEFT_FRAC * W - marginPx;
+  const numberMaxWidth = numberAreaRight - numberAreaLeft;
+  const numberCenterX = (numberAreaLeft + numberAreaRight) / 2;
+  const numberMaxByHeight = monoHeight * 1.4; // a bit bigger than the mark itself, but proportional
+
+  ctx.textAlign = "center";
+  const numberSize = fitFontSize(ctx, highlightValue, "bold", Math.min(64, numberMaxByHeight), 18, numberMaxWidth);
+  ctx.font = `bold ${numberSize}px PosterFont, sans-serif`;
   ctx.fillStyle = INK;
-  ctx.fillText(highlightValue, centerX, bandTop + nameSlotH + bountySlotH * 0.78);
+  ctx.textBaseline = "middle";
+  ctx.fillText(highlightValue, numberCenterX, monoCenterY);
+  ctx.lineWidth = Math.max(1, numberSize * 0.035);
+  ctx.strokeStyle = INK;
+  ctx.strokeText(highlightValue, numberCenterX, monoCenterY);
+  ctx.textBaseline = "alphabetic";
 
   return canvas.toBuffer("image/png");
 }
