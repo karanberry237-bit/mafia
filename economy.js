@@ -54,6 +54,21 @@ function initEconomy(supabaseUrl, supabaseKey) {
   }
 }
 
+// ── Per-user wallet lock ──────────────────────────────────────────────────────
+// addCopper/deductCopper/saveWallet all do a plain read-then-write with no
+// atomicity — if two calls for the SAME user overlap (e.g. a spammed command,
+// or a deliberate "claim daily twice via Second Wind" flow racing against
+// itself), the second write can read a stale balance and silently clobber the
+// first one's money. This serializes every wallet-mutating call per user so
+// that can't happen, without needing any DB-level locking.
+const userWalletLocks = new Map(); // userId -> chained Promise
+function withUserLock(userId, fn) {
+  const prev = userWalletLocks.get(userId) || Promise.resolve();
+  const run = prev.then(fn, fn); // run fn regardless of whether the prior op succeeded
+  userWalletLocks.set(userId, run.catch(() => {})); // keep the chain alive even on error
+  return run;
+}
+
 async function getWallet(userId) {
   const empty = { user_id: userId, copper: 0, silver: 0, gold: 0, stellar: 0, last_daily: null, total_earned: 0, debt: 0 };
   if (!supabase) return empty;
@@ -111,24 +126,50 @@ function formatDebt(debt) {
 }
 
 async function addCopper(userId, copperAmount) {
-  try {
-    const w = await getWallet(userId);
-    const total = walletToCopper(w) + copperAmount;
-    const newW = { ...w, ...fromCopper(total), total_earned: (w.total_earned || 0) + Math.max(0, copperAmount) };
-    await saveWallet(newW);
-    return newW;
-  } catch (e) { console.error("[ADD COPPER]", e.message); return null; }
+  return withUserLock(userId, async () => {
+    try {
+      const w = await getWallet(userId);
+      const total = walletToCopper(w) + copperAmount;
+      const newW = { ...w, ...fromCopper(total), total_earned: (w.total_earned || 0) + Math.max(0, copperAmount) };
+      await saveWallet(newW);
+      return newW;
+    } catch (e) { console.error("[ADD COPPER]", e.message); return null; }
+  });
 }
 
 async function deductCopper(userId, copperAmount) {
-  try {
-    const w = await getWallet(userId);
-    const total = walletToCopper(w);
-    if (total < copperAmount) return null;
-    const newW = { ...w, ...fromCopper(total - copperAmount) };
-    await saveWallet(newW);
-    return newW;
-  } catch (e) { console.error("[DEDUCT COPPER]", e.message); return null; }
+  return withUserLock(userId, async () => {
+    try {
+      const w = await getWallet(userId);
+      const total = walletToCopper(w);
+      if (total < copperAmount) return null;
+      const newW = { ...w, ...fromCopper(total - copperAmount) };
+      await saveWallet(newW);
+      return newW;
+    } catch (e) { console.error("[DEDUCT COPPER]", e.message); return null; }
+  });
+}
+
+// Atomically credits the daily reward AND stamps last_daily in ONE locked
+// read-modify-write, instead of calling addCopper() then a separate
+// saveWallet() for last_daily (two unlocked writes with a gap between them —
+// exactly the kind of gap that let a Second-Wind-triggered second claim
+// silently lose its money to a race in testing).
+async function claimDaily(userId, copperAmount) {
+  return withUserLock(userId, async () => {
+    try {
+      const w = await getWallet(userId);
+      const total = walletToCopper(w) + copperAmount;
+      const newW = {
+        ...w,
+        ...fromCopper(total),
+        total_earned: (w.total_earned || 0) + Math.max(0, copperAmount),
+        last_daily: new Date().toISOString(),
+      };
+      await saveWallet(newW);
+      return newW;
+    } catch (e) { console.error("[CLAIM DAILY]", e.message); return null; }
+  });
 }
 
 async function getLeaderboard(limit = 10) {
@@ -456,13 +497,15 @@ function spinWheel(houseFavorActive = false) {
     return WHEEL_SEGMENTS[0];
   }
   let seg = roll();
-  // House Favor: guarantee no true 0x wipeout segment (0.5x still can happen — that's a partial loss, not the floor)
-  if (houseFavorActive) {
-    let tries = 0;
-    while (seg.multiplier === 0 && tries < 8) {
-      seg = roll();
-      tries++;
-    }
+  // House Favor: a would-be wipeout becomes a straight 1x instead of a
+  // reroll. Rerolling from the full table was the actual bug — removing the
+  // 0x segments and renormalizing over what's left proportionally inflates
+  // EVERY other outcome, including 2x/3x/5x, so House Favor was quietly also
+  // boosting jackpot odds (~25% -> ~37%) on top of removing downside risk.
+  // Converting straight to 1x guarantees "no wipeout" without touching the
+  // odds of anything else — 2x+ stays exactly as rare as it normally is.
+  if (houseFavorActive && seg.multiplier === 0) {
+    seg = WHEEL_SEGMENTS.find(s => s.multiplier === 1) || seg;
   }
   return seg;
 }
@@ -545,7 +588,7 @@ async function giftCopper(fromId, toId, amount, addToTreasury, masterId) {
 module.exports = {
   giftCopper, GIFT_TAX_PCT, GIFT_DAILY_CAP,
   fromCopper, formatWallet, walletToCopper, parseBet, fmt,
-  initEconomy, getWallet, saveWallet, addCopper, deductCopper, getLeaderboard,
+  initEconomy, getWallet, saveWallet, addCopper, deductCopper, getLeaderboard, claimDaily,
   getDailyAmount, DAILY_REWARDS,
   playSlots, spinWheel, WHEEL_SEGMENTS,
   bjHandValue, dealCard, newBjHand, bjGames,
