@@ -2,6 +2,7 @@ const { createClient } = require("@supabase/supabase-js");
 const ws = require("ws");
 const { fmt } = require("./economy");
 const commission = require("./commission");
+const gangs = require("./gangs");
 
 // ── Businesses / Fronts ────────────────────────────────────────────────────
 // Buyable income-generating assets. Each TYPE has its own 5-tier ladder
@@ -24,6 +25,21 @@ let supabase;
 function initBusinesses(url, key) {
   supabase = createClient(url, key, { realtime: { transport: ws } });
   console.log("🏢 Businesses system initialized");
+}
+
+// ── Gang debuff ──────────────────────────────────────────────────────────────
+// Set by bounties.collectBounty when a big enough bounty gets collected on a
+// GANG LEADER — knocks payouts down for every member of that gang for the
+// debuff's duration, applied at collection time (not accrual time), so it
+// always actually bites regardless of when the business happened to tick.
+const GANG_BUSINESS_DEBUFF_PCT = 0.5; // -50% collected income while debuffed
+const gangBusinessDebuffs = new Map(); // gangId -> expiresAt
+function applyGangDebuff(gangId, durationMs) {
+  gangBusinessDebuffs.set(gangId, Date.now() + durationMs);
+}
+function isGangDebuffed(gangId) {
+  const exp = gangBusinessDebuffs.get(gangId);
+  return !!exp && exp > Date.now();
 }
 
 // ── Business type ladders (5 tiers each) ──────────────────────────────────
@@ -174,7 +190,17 @@ async function collectBusiness(userId, type, addCopper) {
   if (!biz) return { success: false, reason: "You don't own that business." };
   if (biz.pending <= 0) return { success: false, reason: "Nothing to collect yet." };
 
-  const grossCollected = biz.pending;
+  let grossCollected = biz.pending;
+
+  // If this owner's gang leader recently ate a big enough bounty, the whole
+  // crew's business income takes a hit for the debuff's duration.
+  let debuffed = false;
+  const ug = await gangs.getUserGang(userId);
+  if (ug && isGangDebuffed(ug.gang.id)) {
+    grossCollected = Math.floor(grossCollected * (1 - GANG_BUSINESS_DEBUFF_PCT));
+    debuffed = true;
+  }
+
   const taxRate = commission.getActiveTaxRate();
   const taxCut = Math.floor(grossCollected * taxRate);
   const net = grossCollected - taxCut;
@@ -182,7 +208,7 @@ async function collectBusiness(userId, type, addCopper) {
   await addCopper(userId, net);
   if (taxCut > 0) await commission.addToPot(taxCut).catch(() => {});
   await supabase.from("businesses").update({ pending: 0 }).eq("id", biz.id);
-  return { success: true, collected: net, taxed: taxCut, grossCollected };
+  return { success: true, collected: net, taxed: taxCut, grossCollected, debuffed };
 }
 
 async function payUpkeep(userId, type, deductFromWallet) {
@@ -295,4 +321,5 @@ module.exports = {
   buyBusiness, upgradeBusiness, upgradeSecurity, collectBusiness, payUpkeep, sellBusiness,
   getBusiness, getBusinessById, getUserBusinesses, processBusiness, runDailyBusinessProcessing,
   raidBusiness, getRaidCooldownRemaining, formatBusinessCard, getFlavorName, RAID_COOLDOWN_HOURS,
+  applyGangDebuff, isGangDebuffed,
 };
