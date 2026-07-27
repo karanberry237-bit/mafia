@@ -176,10 +176,18 @@ async function postBountyPosterToAudit(guildId, targetId, bounty) {
     const targetUser = await client.users.fetch(targetId).catch(() => null);
     if (!targetUser) return;
 
+    let displayName = targetUser.username;
+    const guild = await client.guilds.fetch(guildId).catch(() => null);
+    if (guild) {
+      const member = await guild.members.fetch(targetId).catch(() => null);
+      if (member) displayName = member.displayName;
+    }
+
     const avatarUrl = targetUser.displayAvatarURL({ extension: "png", size: 256 });
 
     const buf = await poster.renderPoster({
       avatarUrl,
+      name: displayName,
       highlightValue: poster.formatFullAmount(bounty.total_amount),
     });
     const attachment = new AttachmentBuilder(buf, { name: "bounty.png" });
@@ -9651,20 +9659,20 @@ async function init() {
         const targetUser = interaction.options.getUser("user") || interaction.user;
         try {
           await interaction.deferReply().catch(() => {});
-          const isDon = targetUser.id === MASTER_ID;
-          const rankKey = getFamilyRank(targetUser.id);
-          const rankTitle = isDon ? "Don Clint" : (rankKey ? RANKS[rankKey].title : "Nobody");
-          const xp = eco.getXP(targetUser.id);
-          const tier = eco.getNotorietyTier(xp);
-          const wallet = await eco.getWallet(targetUser.id);
-          const balance = eco.walletToCopper(wallet);
-          const ug = await gangs.getUserGang(targetUser.id);
           const activeBounty = await bounties.getBounty(targetUser.id);
+          const bountyAmount = activeBounty ? activeBounty.total_amount : 0;
+
+          let displayName = targetUser.username;
+          if (interaction.guild) {
+            const member = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+            if (member) displayName = member.displayName;
+          }
 
           const avatarUrl = targetUser.displayAvatarURL({ extension: "png", size: 256 });
           const buf = await poster.renderPoster({
             avatarUrl,
-            highlightValue: poster.formatFullAmount(balance),
+            name: displayName,
+            highlightValue: poster.formatFullAmount(bountyAmount),
           });
           const attachment = new AttachmentBuilder(buf, { name: "wanted.png" });
           await interaction.editReply({ files: [attachment] }).catch(() => {});
@@ -9685,13 +9693,17 @@ async function init() {
             await interaction.editReply({ content: `📊 <@${targetUser.id}> doesn't have an active bounty right now.` }).catch(() => {});
             return;
           }
-          const contributors = (bounty.placed_by || []).length;
-          const msLeft = Math.max(0, new Date(bounty.expires_at).getTime() - Date.now());
-          const daysLeft = (msLeft / 86400000).toFixed(1);
+
+          let displayName = targetUser.username;
+          if (interaction.guild) {
+            const member = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+            if (member) displayName = member.displayName;
+          }
 
           const avatarUrl = targetUser.displayAvatarURL({ extension: "png", size: 256 });
           const buf = await poster.renderPoster({
             avatarUrl,
+            name: displayName,
             highlightValue: poster.formatFullAmount(bounty.total_amount),
           });
           const attachment = new AttachmentBuilder(buf, { name: "bounty.png" });
