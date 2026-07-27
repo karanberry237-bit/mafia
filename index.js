@@ -5997,20 +5997,20 @@ async function executePublicCommand(message, cmd, channelId) {
 
     // ── Turf Wars ────────────────────────────────────────────────────────
     case "turf_list": {
-      const zones = await turf.getAllZones();
+      const zones = await turf.getAllZones(message.guild?.id);
       if (zones.length === 0) return "🗺️ Turf hasn't been set up yet — ask the Don to restart the bot to seed zones.";
-      return "🗺️ **TURF WAR MAP**\n\n" + turf.formatZoneList(zones);
+      return "🗺️ **TURF WAR MAP**\n\n" + await turf.formatZoneList(zones);
     }
     case "turf_claim": {
       if (!cmd.zoneName) return "Which zone? Use **Cosa turf list** to see names.";
-      const res = await turf.claimZone(message.author.id, cmd.zoneName);
+      const res = await turf.claimZone(message.author.id, message.guild?.id, cmd.zoneName);
       if (!res.success) return "❌ " + res.reason;
       auditlog.logTurfFight(message.guild?.id, message.author.id, message.author.id, res.zone.name, true).catch(() => {});
       return `🏴 **${res.gang.name}** has claimed **${res.zone.name}**!`;
     }
     case "turf_attack": {
       if (!cmd.zoneName) return "Which zone? Use **Cosa turf list** to see names.";
-      const res = await turf.attackZone(message.author.id, cmd.zoneName);
+      const res = await turf.attackZone(message.author.id, message.guild?.id, cmd.zoneName);
       if (!res.success) return "❌ " + res.reason;
       const defenderName = res.defenderGang ? res.defenderGang.name : "the defenders";
       auditlog.logTurfFight(message.guild?.id, message.author.id, message.author.id, res.zone.name, res.won).catch(() => {});
@@ -8170,6 +8170,10 @@ const commands = [
     .setDescription("Generate a Bounty Poster for an active bounty")
     .addUserOption(opt => opt.setName("user").setDescription("Whose bounty to generate a poster for").setRequired(true))
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("gang-leaderboard")
+    .setDescription("Rank every gang by treasury")
+    .toJSON(),
 ];
 
 const LOYALTY_HELP_TEXT =
@@ -8271,6 +8275,12 @@ async function init() {
       applyLoadedGuildData(loaded);
       isFirstGuild = false;
       await loadLockdownState(guildInLoop.id); // resume lockdown if bot restarted mid-lockdown
+      // Turf is now per-server (it used to be one global set of zones shared
+      // by every server the bot was in — gangs from completely unrelated
+      // servers were fighting over, and stealing, each other's turf without
+      // either server even knowing the other existed). Seed each guild's own
+      // independent set here.
+      await turf.ensureZonesSeeded(guildInLoop.id).catch(e => console.error("[TURF SEED]", e.message));
       startDeadMansSwitch(guildInLoop);
       startInactivityCheck(guildInLoop);
       if (PSYCH_WARFARE_ENABLED) startPsychologicalWarfare(guildInLoop);
@@ -8311,7 +8321,6 @@ async function init() {
         bloxlinkGuildId: process.env.BLOXLINK_GUILD_ID,
       });
       auditlog.initAuditLog(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, client);
-      await turf.ensureZonesSeeded().catch(e => console.error("[TURF SEED]", e.message));
       await rivalnpc.ensureBarzinisExist().catch(e => console.error("[BARZINI SEED]", e.message));
       await firms.loadAllFirms();
       console.log("🏢 Firms loaded");
@@ -8341,8 +8350,11 @@ async function init() {
       // Start daily turf processing (gang treasury income + inactivity release)
       const runTurfDaily = async () => {
         await turf.runDailyTurfProcessing().catch(e => console.error("[TURF DAILY]", e.message));
-        await rivalnpc.runRivalRaids(async (text) => {
-          const genCh = readyClient.guilds.cache.first()?.channels.cache.get(GENERAL_CHANNEL_ID);
+        await rivalnpc.runRivalRaids(async (guildId, text) => {
+          const guild = readyClient.guilds.cache.get(guildId);
+          if (!guild) return;
+          activateGuildConfig(guildId); // GENERAL_CHANNEL_ID is per-guild, re-activate before reading it
+          const genCh = guild.channels.cache.get(GENERAL_CHANNEL_ID);
           if (genCh) await genCh.send(`🗺️ **TURF REPORT**\n${text}`).catch(() => {});
         }).catch(e => console.error("[BARZINI RAID]", e.message));
         setTimeout(runTurfDaily, 24 * 60 * 60 * 1000);
@@ -9777,6 +9789,17 @@ async function init() {
           await interaction.editReply({ content: `Failed: ${e.message}` }).catch(async () => {
             await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
           });
+        }
+        return;
+      }
+
+      if (interaction.commandName === "gang-leaderboard") {
+        try {
+          const list = await gangs.getGangLeaderboard();
+          const text = gangs.formatGangLeaderboard(list);
+          await interaction.reply({ content: `🏴 **GANG LEADERBOARD**\n\n${text}` }).catch(() => {});
+        } catch (e) {
+          await interaction.reply({ content: `Failed: ${e.message}`, ephemeral: true }).catch(() => {});
         }
         return;
       }
