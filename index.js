@@ -7053,9 +7053,9 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         if (!deducted) return "Insufficient funds. Check your balance with **Cosa balance**.";
       }
       const slotsCharmActive = features.hasEffect(message.author.id, "lucky_charm");
-      const slotsHouseFavorActive = features.hasEffect(message.author.id, "house_favor") && features.getItemCooldownRemaining(message.author.id, "house_favor") === 0;
+      const slotsHouseFavorActive = features.isHouseFavorArmed(message.author.id);
       const result = eco.playSlots(bet, slotsCharmActive, slotsHouseFavorActive);
-      if (slotsHouseFavorActive) features.consumeItem(message.author.id, "house_favor");
+      if (slotsHouseFavorActive) features.clearHouseFavorArmed(message.author.id);
       let msg = "🎰 **FAMILY SLOTS**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[ " + result.display + " ]\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
       if (result.winnings > 0) {
         if (message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, result.winnings);
@@ -7108,13 +7108,13 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         if (!deducted) return "Insufficient funds.";
       }
       const wheelCharmActive = features.hasEffect(message.author.id, "lucky_charm");
-      const wheelHouseFavorActive = features.hasEffect(message.author.id, "house_favor") && features.getItemCooldownRemaining(message.author.id, "house_favor") === 0;
+      const wheelHouseFavorActive = features.isHouseFavorArmed(message.author.id);
       let seg = eco.spinWheel(wheelHouseFavorActive);
       // Lucky charm: reroll once if bankrupt or 0.5x (both count as losses)
       if (wheelCharmActive && seg.multiplier <= 0.5) {
         seg = eco.spinWheel(wheelHouseFavorActive);
       }
-      if (wheelHouseFavorActive) features.consumeItem(message.author.id, "house_favor");
+      if (wheelHouseFavorActive) features.clearHouseFavorArmed(message.author.id);
       const winnings = Math.floor(bet * seg.multiplier);
       if (winnings > 0 && message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, winnings);
       if (winnings === 0 && message.author.id !== MASTER_ID) {
@@ -8225,6 +8225,29 @@ async function init() {
   // once the client is ready and we actually know which guilds we're in —
   // see the ClientReady handler below.
 
+  // ── Gateway health logging ────────────────────────────────────────────────
+  // Previously there was NO visibility at all into gateway errors or dropped
+  // connections — if the WebSocket silently died, background setInterval/
+  // setTimeout work (stock ticks, daily processing, etc.) would keep firing
+  // completely normally since those don't depend on the gateway at all, while
+  // Discord message/command handling just went silent with zero trace of why.
+  // This makes that failure mode actually diagnosable instead of a mystery.
+  client.on(Events.Error, (err) => {
+    console.error("[CLIENT ERROR]", err.message || err);
+  });
+  client.on(Events.ShardError, (err, shardId) => {
+    console.error(`[SHARD ${shardId} ERROR]`, err.message || err);
+  });
+  client.on(Events.ShardDisconnect, (event, shardId) => {
+    console.error(`[SHARD ${shardId} DISCONNECT] code=${event?.code} reason=${event?.reason || "none"}`);
+  });
+  client.on(Events.ShardReconnecting, (shardId) => {
+    console.log(`[SHARD ${shardId} RECONNECTING]`);
+  });
+  client.on(Events.ShardResume, (shardId, replayedEvents) => {
+    console.log(`[SHARD ${shardId} RESUMED] replayed ${replayedEvents} events`);
+  });
+
   // ── Ready ───────────────────────────────────────────────────────────────────
   client.once(Events.ClientReady, async (readyClient) => {
     console.log(`✅ The Family's Cosa is online as ${readyClient.user.tag}`);
@@ -8265,6 +8288,13 @@ async function init() {
       await loadLoans();
       await loadCosaMemory();
       await loadTreasuryStats();
+      // This was missing entirely — features.js's own Supabase client never
+      // got set up, which is why every DB call inside it ([SAVE STOCKS],
+      // [LOAD PORTFOLIOS], [LOAD INV], [LOAD GIVEAWAYS]) has been silently
+      // failing with "Cannot read properties of undefined (reading 'from')"
+      // on every single tick. Must run before any of the features.js load
+      // calls below, or even this first boot's loads would still fail.
+      features.initFeatures(null, eco, MASTER_ID, client);
       await features.loadGiveaways(guild);
       await features.loadPortfolios();
       await features.loadStockPrices();
