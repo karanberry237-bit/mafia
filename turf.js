@@ -4,25 +4,40 @@ const { fmt } = require("./economy");
 const gangs = require("./gangs");
 
 // ── Turf Wars ──────────────────────────────────────────────────────────────
-// A fixed set of named zones. Controlled by a GANG (not an individual).
-// Unclaimed turf can just be claimed. Claimed turf must be attacked, and
-// defenders get a home-field edge. Controlled turf pays the gang treasury on
-// the daily tick. Inactive control auto-releases after a set number of days.
+// A fixed set of named zones, PER DISCORD SERVER. Controlled by a GANG (not
+// an individual). Unclaimed turf can just be claimed. Claimed turf must be
+// attacked, and defenders get a home-field edge. Controlled turf pays the
+// gang treasury on the daily tick. Inactive control auto-releases after a
+// set number of days.
 //
 // Table: turf_zones
-//   name text primary key, tier int,  -- higher tier = more valuable/contested
+//   guild_id text, name text, tier int,  -- higher tier = more valuable/contested
 //   controller_gang_id uuid references gangs(id) on delete set null,
 //   claimed_at timestamptz, last_income_at timestamptz, last_attacked_at timestamptz
+//   PRIMARY KEY (guild_id, name)
+//
+// ⚠️ MIGRATION NEEDED if you're upgrading from the old global (non-guild-
+// scoped) version of this file — every Discord server the bot was in was
+// sharing the exact same 8 zones, so gangs from completely unrelated servers
+// were fighting over (and stealing) each other's turf without either server
+// even being aware the other existed. Since the zone list is also changing
+// (2 new zones, 4x income), just wipe and let the bot reseed fresh:
+//   truncate table turf_zones;
+//   alter table turf_zones drop constraint if exists turf_zones_pkey;
+//   alter table turf_zones add column if not exists guild_id text;
+//   alter table turf_zones add primary key (guild_id, name);
 
 const ZONES = [
-  { name: "The Docks",      tier: 1, income: 30_000,  claimCost: 60_000 },
-  { name: "Little Italy",   tier: 1, income: 35_000,  claimCost: 70_000 },
-  { name: "Chinatown",      tier: 2, income: 60_000,  claimCost: 130_000 },
-  { name: "The Strip",      tier: 2, income: 65_000,  claimCost: 140_000 },
-  { name: "Uptown",         tier: 3, income: 110_000, claimCost: 250_000 },
-  { name: "The Warehouse District", tier: 3, income: 120_000, claimCost: 260_000 },
-  { name: "Financial District", tier: 4, income: 200_000, claimCost: 450_000 },
-  { name: "The Boardwalk",  tier: 4, income: 220_000, claimCost: 480_000 },
+  { name: "The Docks",              tier: 1, income: 120_000,   claimCost: 60_000 },
+  { name: "Little Italy",           tier: 1, income: 140_000,   claimCost: 70_000 },
+  { name: "Chinatown",              tier: 2, income: 240_000,   claimCost: 130_000 },
+  { name: "The Strip",              tier: 2, income: 260_000,   claimCost: 140_000 },
+  { name: "Uptown",                 tier: 3, income: 440_000,   claimCost: 250_000 },
+  { name: "The Warehouse District", tier: 3, income: 480_000,   claimCost: 260_000 },
+  { name: "Financial District",     tier: 4, income: 800_000,   claimCost: 450_000 },
+  { name: "The Boardwalk",          tier: 4, income: 880_000,   claimCost: 480_000 },
+  { name: "The Velvet Lounge",      tier: 5, income: 1_300_000, claimCost: 750_000 },
+  { name: "The Airport",            tier: 6, income: 2_000_000, claimCost: 1_200_000 },
 ];
 
 const ATTACK_COOLDOWN_HOURS = 6;
@@ -40,28 +55,36 @@ function getZoneDef(name) {
   return ZONES.find(z => z.name.toLowerCase() === name.toLowerCase()) || null;
 }
 
-async function ensureZonesSeeded() {
+// Seeds every zone for ONE specific guild. Called once per guild the bot is
+// in (at boot, and whenever it joins a new server) — every server gets its
+// own independent set of zones instead of one shared global set.
+async function ensureZonesSeeded(guildId) {
   for (const z of ZONES) {
     await supabase.from("turf_zones").upsert(
-      { name: z.name, tier: z.tier, controller_gang_id: null, claimed_at: null, last_income_at: new Date().toISOString(), last_attacked_at: null },
-      { onConflict: "name", ignoreDuplicates: true }
+      { guild_id: guildId, name: z.name, tier: z.tier, controller_gang_id: null, claimed_at: null, last_income_at: new Date().toISOString(), last_attacked_at: null },
+      { onConflict: "guild_id,name", ignoreDuplicates: true }
     );
   }
 }
 
-async function getZone(name) {
-  const { data, error } = await supabase.from("turf_zones").select("*").ilike("name", name).maybeSingle();
+async function getZone(guildId, name) {
+  const { data, error } = await supabase.from("turf_zones").select("*").eq("guild_id", guildId).ilike("name", name).maybeSingle();
   if (error) { console.error("[TURF GET]", error.message); return null; }
   return data;
 }
 
-async function getAllZones() {
-  const { data, error } = await supabase.from("turf_zones").select("*").order("tier", { ascending: true });
+// Pass a guildId to get just that server's zones (normal usage everywhere).
+// Omit it only for cross-server aggregates (e.g. Commission ranking a gang's
+// total turf held across every server it's active in).
+async function getAllZones(guildId) {
+  let q = supabase.from("turf_zones").select("*").order("tier", { ascending: true });
+  if (guildId) q = q.eq("guild_id", guildId);
+  const { data, error } = await q;
   if (error) { console.error("[TURF LIST]", error.message); return []; }
   return data || [];
 }
 
-async function claimZone(userId, zoneName) {
+async function claimZone(userId, guildId, zoneName) {
   const zoneDef = getZoneDef(zoneName);
   if (!zoneDef) return { success: false, reason: "Unknown zone. Use **Cosa turf list** to see zones." };
 
@@ -69,7 +92,7 @@ async function claimZone(userId, zoneName) {
   if (!userGang) return { success: false, reason: "You need to be in a gang to claim turf." };
   if (userGang.membership.role === "member") return { success: false, reason: "Only leaders/officers can claim turf on behalf of the gang." };
 
-  const zone = await getZone(zoneDef.name);
+  const zone = await getZone(guildId, zoneDef.name);
   if (!zone) return { success: false, reason: "Zone not found — ask an admin to run turf setup." };
   if (zone.controller_gang_id) return { success: false, reason: `**${zone.name}** is already controlled. Use **Cosa turf attack** instead.` };
 
@@ -80,23 +103,23 @@ async function claimZone(userId, zoneName) {
     controller_gang_id: userGang.gang.id,
     claimed_at: new Date().toISOString(),
     last_income_at: new Date().toISOString(),
-  }).eq("name", zone.name);
+  }).eq("guild_id", guildId).eq("name", zone.name);
   if (error) { console.error("[TURF CLAIM]", error.message); return { success: false, reason: error.message }; }
 
   return { success: true, zone: zoneDef, gang: userGang.gang };
 }
 
-function attackCooldownKey(gangId, zoneName) { return gangId + ":" + zoneName; }
+function attackCooldownKey(gangId, guildId, zoneName) { return gangId + ":" + guildId + ":" + zoneName; }
 const attackCooldowns = new Map();
 
-function getAttackCooldownRemaining(gangId, zoneName) {
-  const last = attackCooldowns.get(attackCooldownKey(gangId, zoneName));
+function getAttackCooldownRemaining(gangId, guildId, zoneName) {
+  const last = attackCooldowns.get(attackCooldownKey(gangId, guildId, zoneName));
   if (!last) return 0;
   const elapsedHours = (Date.now() - last) / (1000 * 60 * 60);
   return Math.max(0, ATTACK_COOLDOWN_HOURS - elapsedHours);
 }
 
-async function attackZone(userId, zoneName) {
+async function attackZone(userId, guildId, zoneName) {
   const zoneDef = getZoneDef(zoneName);
   if (!zoneDef) return { success: false, reason: "Unknown zone." };
 
@@ -104,15 +127,15 @@ async function attackZone(userId, zoneName) {
   if (!attackerGang) return { success: false, reason: "You need to be in a gang to attack turf." };
   if (attackerGang.membership.role === "member") return { success: false, reason: "Only leaders/officers can lead an attack." };
 
-  const zone = await getZone(zoneDef.name);
+  const zone = await getZone(guildId, zoneDef.name);
   if (!zone) return { success: false, reason: "Zone not found." };
   if (!zone.controller_gang_id) return { success: false, reason: `**${zone.name}** is unclaimed — use **Cosa turf claim** instead.` };
   if (zone.controller_gang_id === attackerGang.gang.id) return { success: false, reason: "You already control this zone." };
 
-  const remaining = getAttackCooldownRemaining(attackerGang.gang.id, zone.name);
+  const remaining = getAttackCooldownRemaining(attackerGang.gang.id, guildId, zone.name);
   if (remaining > 0) return { success: false, reason: `Still regrouping. Attack again in ${remaining.toFixed(1)}h.` };
 
-  attackCooldowns.set(attackCooldownKey(attackerGang.gang.id, zone.name), Date.now());
+  attackCooldowns.set(attackCooldownKey(attackerGang.gang.id, guildId, zone.name), Date.now());
 
   const defenderGang = await gangs.getGangById(zone.controller_gang_id);
   const successChance = Math.max(0.1, ATTACK_BASE_CHANCE - DEFENDER_EDGE);
@@ -124,16 +147,19 @@ async function attackZone(userId, zoneName) {
       claimed_at: new Date().toISOString(),
       last_income_at: new Date().toISOString(),
       last_attacked_at: new Date().toISOString(),
-    }).eq("name", zone.name);
+    }).eq("guild_id", guildId).eq("name", zone.name);
     if (error) console.error("[TURF ATTACK WIN]", error.message);
   } else {
-    await supabase.from("turf_zones").update({ last_attacked_at: new Date().toISOString() }).eq("name", zone.name);
+    await supabase.from("turf_zones").update({ last_attacked_at: new Date().toISOString() }).eq("guild_id", guildId).eq("name", zone.name);
   }
 
   return { success: true, won, zone: zoneDef, attackerGang: attackerGang.gang, defenderGang };
 }
 
 // ── Daily processing: pay income to controllers, release inactive turf ─────
+// Runs across EVERY guild's zones in one pass — no guildId filter needed
+// here since every row already carries its own guild_id and is handled
+// independently regardless of which server it belongs to.
 async function runDailyTurfProcessing() {
   const zones = await getAllZones();
   const now = Date.now();
@@ -156,24 +182,30 @@ async function runDailyTurfProcessing() {
     );
     const daysSinceActivity = (now - lastActivity) / (1000 * 60 * 60 * 24);
     if (daysSinceActivity >= INACTIVITY_RELEASE_DAYS) {
-      await supabase.from("turf_zones").update({ controller_gang_id: null, claimed_at: null }).eq("name", zone.name);
+      await supabase.from("turf_zones").update({ controller_gang_id: null, claimed_at: null }).eq("guild_id", zone.guild_id).eq("name", zone.name);
       released++;
       continue;
     }
 
     await gangs.addToGangTreasury(zone.controller_gang_id, zoneDef.income);
-    await supabase.from("turf_zones").update({ last_income_at: new Date().toISOString() }).eq("name", zone.name);
+    await supabase.from("turf_zones").update({ last_income_at: new Date().toISOString() }).eq("guild_id", zone.guild_id).eq("name", zone.name);
     paid++;
   }
   console.log(`[TURF] Daily processing complete — paid ${paid}, released ${released}`);
 }
 
-function formatZoneList(zones) {
-  return zones.map(z => {
+async function formatZoneList(zones) {
+  const lines = [];
+  for (const z of zones) {
     const def = getZoneDef(z.name);
-    const status = z.controller_gang_id ? `🏴 controlled` : "🏳️ unclaimed";
-    return `**${z.name}** (Tier ${z.tier}) — ${status} | 💵 ${fmt(def.income)}/day | claim: ${fmt(def.claimCost)}`;
-  }).join("\n");
+    let status = "🏳️ unclaimed";
+    if (z.controller_gang_id) {
+      const controller = await gangs.getGangById(z.controller_gang_id);
+      status = controller ? `${gangs.getGangFlag(controller.id)} **${controller.name}**` : "🏴 controlled";
+    }
+    lines.push(`**${z.name}** (Tier ${z.tier}) — ${status} | 💵 ${fmt(def.income)}/day | claim: ${fmt(def.claimCost)}`);
+  }
+  return lines.join("\n");
 }
 
 module.exports = {
