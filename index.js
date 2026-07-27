@@ -9630,7 +9630,12 @@ async function init() {
               return;
             }
             const label = commission.TAX_CHOICES[res.taxKey].label;
-            await interaction.reply({ content: `🕴️ **${res.gangName}** voted for **${label}**.`, ephemeral: true }).catch(() => {});
+            if (res.autoResolved) {
+              await interaction.reply({ content: `🕴️ **${res.gangName}** voted for **${label}** — that's everyone! Resolving now, results going out in general.`, ephemeral: true }).catch(() => {});
+              await announceCommissionResolution(interaction.guild, res.summary);
+            } else {
+              await interaction.reply({ content: `🕴️ **${res.gangName}** voted for **${label}**.`, ephemeral: true }).catch(() => {});
+            }
             return;
           }
           if (sub === "call-meeting") {
