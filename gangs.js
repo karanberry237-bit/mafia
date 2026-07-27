@@ -282,18 +282,10 @@ function formatGangLeaderboard(list) {
 }
 
 // ── Bribes (rival gang leaders poaching members) ────────────────────────────
-// A gang leader can offer Cash to lure a RIVAL gang's regular member (not
-// their leader — leadership has to change hands the normal way first) into
-// jumping ship. The bribe amount is escrowed out of the offering leader's
-// wallet immediately, so spamming offers isn't free; it's refunded in full
-// if the target declines or the offer just expires unanswered. If accepted,
-// the target leaves their old gang (auto-disbanding it if they were the
-// last member) and joins the bribing leader's gang as a regular member.
-const BRIBE_EXPIRY_MS = 15 * 60000; // 15 minutes to respond
-const pendingBribes = new Map(); // targetUserId -> { fromGangId, fromGangName, amount, offeredBy, offeredByGangId, createdAt, timeout, addCopper }
-
-function getBribeOffer(targetUserId) { return pendingBribes.get(targetUserId) || null; }
-
+// A gang leader can pay a RIVAL gang's regular member (not their leader —
+// leadership has to change hands the normal way first) straight Cash to
+// jump ship immediately. Simple and instant: pay them, they leave their old
+// gang (auto-disbanding it if they were the last member), and join yours.
 async function offerBribe(actorId, targetUserId, amount, deductFromWallet, addCopper) {
   if (!amount || amount <= 0) return { success: false, reason: "Bribe amount must be positive." };
   if (targetUserId === actorId) return { success: false, reason: "You can't bribe yourself." };
@@ -307,67 +299,32 @@ async function offerBribe(actorId, targetUserId, amount, deductFromWallet, addCo
   if (targetGang.gang.id === actorGang.gang.id) return { success: false, reason: "They're already in your gang." };
   if (targetGang.membership.role === "leader") return { success: false, reason: "You can't bribe a gang leader away — they'd have to transfer leadership first." };
 
-  if (pendingBribes.has(targetUserId)) return { success: false, reason: "That user already has a pending bribe offer — they need to accept or decline it first." };
-
   const deducted = await deductFromWallet(actorId, amount);
   if (!deducted) return { success: false, reason: "Insufficient funds to offer that bribe." };
-
-  const timeout = setTimeout(async () => {
-    const pending = pendingBribes.get(targetUserId);
-    if (pending && pending.offeredBy === actorId) {
-      pendingBribes.delete(targetUserId);
-      await addCopper(actorId, pending.amount); // unanswered — refund in full
-    }
-  }, BRIBE_EXPIRY_MS);
-
-  pendingBribes.set(targetUserId, {
-    fromGangId: actorGang.gang.id,
-    fromGangName: actorGang.gang.name,
-    amount,
-    offeredBy: actorId,
-    offeredByGangId: actorGang.gang.id,
-    createdAt: Date.now(),
-    timeout,
-  });
-
-  return { success: true, targetGang: targetGang.gang, actorGang: actorGang.gang, amount };
-}
-
-async function acceptBribe(targetUserId, addCopper) {
-  const offer = pendingBribes.get(targetUserId);
-  if (!offer) return { success: false, reason: "You have no pending bribe offer (or it expired)." };
-
-  const targetGang = await getUserGang(targetUserId);
-  if (!targetGang) { clearTimeout(offer.timeout); pendingBribes.delete(targetUserId); return { success: false, reason: "You're not in a gang anymore." }; }
-  if (targetGang.membership.role === "leader") { clearTimeout(offer.timeout); pendingBribes.delete(targetUserId); return { success: false, reason: "You're a gang leader now — you'd need to transfer leadership before jumping ship." }; }
-
-  clearTimeout(offer.timeout);
-  pendingBribes.delete(targetUserId);
 
   const oldGangId = targetGang.gang.id;
   const oldGangName = targetGang.gang.name;
 
   const { error: leaveError } = await supabase.from("gang_members").delete().eq("gang_id", oldGangId).eq("user_id", targetUserId);
-  if (leaveError) { console.error("[BRIBE LEAVE]", leaveError.message); return { success: false, reason: "Database error leaving your old gang: " + leaveError.message }; }
+  if (leaveError) {
+    console.error("[BRIBE LEAVE]", leaveError.message);
+    await addCopper(actorId, amount); // refund — the move failed, don't just eat their Cash
+    return { success: false, reason: "Database error moving them over — refunded. " + leaveError.message };
+  }
 
   const remaining = await getMembers(oldGangId);
   if (remaining.length === 0) await supabase.from("gangs").delete().eq("id", oldGangId);
 
-  const { error: joinError } = await supabase.from("gang_members").insert({ gang_id: offer.fromGangId, user_id: targetUserId, role: "member" });
-  if (joinError) { console.error("[BRIBE JOIN]", joinError.message); return { success: false, reason: "Database error joining your new gang: " + joinError.message }; }
+  const { error: joinError } = await supabase.from("gang_members").insert({ gang_id: actorGang.gang.id, user_id: targetUserId, role: "member" });
+  if (joinError) {
+    console.error("[BRIBE JOIN]", joinError.message);
+    await addCopper(actorId, amount); // refund — they didn't actually end up in your gang
+    return { success: false, reason: "Database error moving them over — refunded. " + joinError.message };
+  }
 
-  await addCopper(targetUserId, offer.amount);
+  await addCopper(targetUserId, amount);
 
-  return { success: true, amount: offer.amount, oldGangName, newGangName: offer.fromGangName };
-}
-
-async function declineBribe(targetUserId, addCopper) {
-  const offer = pendingBribes.get(targetUserId);
-  if (!offer) return { success: false, reason: "You have no pending bribe offer." };
-  clearTimeout(offer.timeout);
-  pendingBribes.delete(targetUserId);
-  await addCopper(offer.offeredBy, offer.amount); // refund the offering leader in full
-  return { success: true, fromGangName: offer.fromGangName, amount: offer.amount };
+  return { success: true, amount, oldGangName, newGangName: actorGang.gang.name, targetGang: targetGang.gang, actorGang: actorGang.gang };
 }
 
 module.exports = {
@@ -376,5 +333,5 @@ module.exports = {
   addToGangTreasury, deductFromGangTreasury, depositToGang, formatGangCard,
   withdrawFromTreasury, getWithdrawCooldownRemaining, WITHDRAW_COOLDOWN_MS, getAllGangs,
   getGangFlag, getGangLeaderboard, formatGangLeaderboard,
-  offerBribe, acceptBribe, declineBribe, getBribeOffer, BRIBE_EXPIRY_MS,
+  offerBribe,
 };
