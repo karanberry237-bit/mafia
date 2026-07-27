@@ -26,8 +26,13 @@ const INK = "rgb(83, 63, 36)";
 // Fractions of the template's own width/height — these stay correct no
 // matter what pixel size we ultimately render at.
 const PHOTO_BOX = { left: 0.0926, right: 0.9071, top: 0.2143, bottom: 0.6307 };
-const NAME_Y_FRAC = 0.745;
-const BOUNTY_Y_FRAC = 0.825;
+// The blank band between "DEAD OR ALIVE" (baked into the template) and the
+// fine-print/MARINE row at the bottom (also baked in) — measured directly
+// from the template's own pixels. Name + bounty share this band, and their
+// font sizes are capped so they can never grow past its edges no matter how
+// short the text is.
+const TEXT_BAND_TOP_FRAC = 0.702;
+const TEXT_BAND_BOTTOM_FRAC = 0.856;
 const TEXT_SAFE_LEFT_FRAC = 0.15;   // stays clear of the flourish curls on both
 const TEXT_SAFE_RIGHT_FRAC = 0.85;  // sides of "DEAD OR ALIVE"
 
@@ -111,7 +116,10 @@ async function renderPoster({ avatarUrl, name, highlightValue }) {
   ctx.drawImage(template, 0, 0, W, H);
 
   // Text overlay — name, then the bounty amount below it (no currency mark,
-  // just the plain comma-formatted number).
+  // just the plain comma-formatted number). Both share the blank band
+  // between "DEAD OR ALIVE" and the fine print — name gets the top ~55%,
+  // bounty the bottom ~45%, each capped so its own line can't grow past its
+  // slice of the band even if the text is short enough to want to.
   ctx.textAlign = "center";
   ctx.fillStyle = INK;
   const safeLeft = TEXT_SAFE_LEFT_FRAC * W;
@@ -119,16 +127,27 @@ async function renderPoster({ avatarUrl, name, highlightValue }) {
   const safeWidth = safeRight - safeLeft;
   const centerX = W / 2;
 
+  const bandTop = TEXT_BAND_TOP_FRAC * H;
+  const bandBottom = TEXT_BAND_BOTTOM_FRAC * H;
+  const bandHeight = bandBottom - bandTop;
+  const nameSlotH = bandHeight * 0.55;
+  const bountySlotH = bandHeight * 0.45;
+  // Cap height (the visible glyph height for bold caps/digits) is roughly
+  // 72% of the nominal font size, so divide by that to get a size that
+  // actually fits its slot rather than just guessing a pixel number.
+  const nameMaxByHeight = nameSlotH * 0.72;
+  const bountyMaxByHeight = bountySlotH * 0.72;
+
   const nameText = (name || "").toUpperCase().trim().split(/\s+/).join("•");
-  const nameSize = fitFontSize(ctx, nameText, "bold", 34, 16, safeWidth);
+  const nameSize = fitFontSize(ctx, nameText, "bold", Math.min(90, nameMaxByHeight), 18, safeWidth);
   ctx.font = `bold ${nameSize}px PosterFont, sans-serif`;
   ctx.fillStyle = INK;
-  ctx.fillText(nameText, centerX, NAME_Y_FRAC * H);
+  ctx.fillText(nameText, centerX, bandTop + nameSlotH * 0.82);
 
-  const bountySize = fitFontSize(ctx, highlightValue, "bold", 52, 22, safeWidth);
+  const bountySize = fitFontSize(ctx, highlightValue, "bold", Math.min(70, bountyMaxByHeight), 22, safeWidth);
   ctx.font = `bold ${bountySize}px PosterFont, sans-serif`;
   ctx.fillStyle = INK;
-  ctx.fillText(highlightValue, centerX, BOUNTY_Y_FRAC * H);
+  ctx.fillText(highlightValue, centerX, bandTop + nameSlotH + bountySlotH * 0.78);
 
   return canvas.toBuffer("image/png");
 }
