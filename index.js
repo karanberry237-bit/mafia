@@ -176,16 +176,10 @@ async function postBountyPosterToAudit(guildId, targetId, bounty) {
     const targetUser = await client.users.fetch(targetId).catch(() => null);
     if (!targetUser) return;
 
-    const contributors = (bounty.placed_by || []).length;
-    const msLeft = Math.max(0, new Date(bounty.expires_at).getTime() - Date.now());
-    const daysLeft = (msLeft / 86400000).toFixed(1);
     const avatarUrl = targetUser.displayAvatarURL({ extension: "png", size: 256 });
 
     const buf = await poster.renderPoster({
-      headerText: "BOUNTY",
       avatarUrl,
-      name: targetUser.username,
-      subtitle: "DEAD OR ALIVE",
       highlightValue: poster.formatFullAmount(bounty.total_amount),
     });
     const attachment = new AttachmentBuilder(buf, { name: "bounty.png" });
@@ -9669,12 +9663,9 @@ async function init() {
 
           const avatarUrl = targetUser.displayAvatarURL({ extension: "png", size: 256 });
           const buf = await poster.renderPoster({
-            headerText: "WANTED",
             avatarUrl,
-            name: targetUser.username,
-            subtitle: "DEAD OR ALIVE",
             highlightValue: poster.formatFullAmount(balance),
-                });
+          });
           const attachment = new AttachmentBuilder(buf, { name: "wanted.png" });
           await interaction.editReply({ files: [attachment] }).catch(() => {});
         } catch (e) {
@@ -9700,12 +9691,9 @@ async function init() {
 
           const avatarUrl = targetUser.displayAvatarURL({ extension: "png", size: 256 });
           const buf = await poster.renderPoster({
-            headerText: "BOUNTY",
             avatarUrl,
-            name: targetUser.username,
-            subtitle: "DEAD OR ALIVE",
             highlightValue: poster.formatFullAmount(bounty.total_amount),
-                });
+          });
           const attachment = new AttachmentBuilder(buf, { name: "bounty.png" });
           await interaction.editReply({ files: [attachment] }).catch(() => {});
         } catch (e) {
