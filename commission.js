@@ -1,343 +1,602 @@
 const { createClient } = require("@supabase/supabase-js");
 const ws = require("ws");
-const gangs = require("./gangs");
-const turf = require("./turf");
-const eco = require("./economy");
 
-// ── The Commission ───────────────────────────────────────────────────────────
-// The top gangs (ranked by treasury + turf held) get a seat on the Commission
-// each cycle. Their leaders vote on a server-wide tax rate that applies to
-// BOTH business income (collected via businesses.collectBusiness) and
-// gambling losses (the "house cut" that normally flows entirely to the Don).
-// All tax collected during the cycle accumulates in a shared pot, split
-// 50/30/20 among the Commission's #1/#2/#3 gangs (by rank) when the cycle
-// ends. A new cycle then locks in based on the current standings.
-//
-// Persisted as a single JSON blob in the existing empire_data table (key
-// "commission_state") — no new table/migration needed.
-//
-// Voting eligibility is checked live against gangs.getUserGang() at vote time,
-// not snapshotted — so if a gang's leader changes mid-cycle (new Don/leader
-// via gangs.transferLeadership), the new leader automatically inherits voting
-// rights with zero extra bookkeeping.
-//
-// If a Commission member gang disbands mid-cycle, its seat just goes empty —
-// no replacement is pulled in, and its share of the pot at payout time is
-// simply forfeited (not redistributed to the remaining members).
+// ── Currency System ───────────────────────────────────────────────────────────
+// Single flat currency: Cash. 1 is just 1 — no denominations, no conversion.
+// `copper`/`silver`/`gold`/`stellar` remain the Supabase column names (renaming
+// requires a migration), but only `copper` is ever used now. Old wallets that
+// still have a balance sitting in silver/gold/stellar (from before the
+// flatten) are folded into `copper` automatically the moment they're read —
+// nobody's balance disappears, it just all becomes Cash going forward.
+function formatWallet(wallet) {
+  return `💵 ${fmt(Math.floor(wallet.copper || 0))} Cash`;
+}
 
-const CYCLE_MS = 3 * 24 * 60 * 60 * 1000; // every 3 days
-const TARGET_SIZE = 3;                    // normal Commission size
-const MAX_SIZE = 5;                       // hard cap even if TARGET_SIZE is raised later
-// Payout split by Commission rank, keyed by how many members are actually
-// seated that cycle (fewer gangs on the server = fewer seats = a different
-// split table, not just truncating the 5-seat one).
-const SPLIT_TABLES = {
-  1: [1],
-  2: [0.60, 0.40],
-  3: [0.50, 0.30, 0.20],
-  4: [0.40, 0.28, 0.20, 0.12],
-  5: [0.35, 0.25, 0.18, 0.13, 0.09],
-};
+function walletToCopper(wallet) {
+  return Math.floor(
+    (wallet.copper  || 0) +
+    (wallet.silver  || 0) * 100 +
+    (wallet.gold    || 0) * 10000 +
+    (wallet.stellar || 0) * 1000000
+  );
+}
 
-const TAX_CHOICES = {
-  low:    { key: "low",    label: "5% — Light Touch",   rate: 0.05 },
-  medium: { key: "medium", label: "10% — Standard Cut", rate: 0.10 },
-  high:   { key: "high",   label: "15% — Heavy Skim",   rate: 0.15 },
-};
-const DEFAULT_TAX_KEY = "low";
-const STATE_KEY = "commission_state";
+function fromCopper(copper) {
+  return { copper: Math.floor(copper), silver: 0, gold: 0, stellar: 0 };
+}
 
+function parseBet(amount) {
+  if (amount === null || amount === undefined) return null;
+  const str = String(amount).trim();
+  const m = str.match(/^(\d+(?:\.\d+)?)\s*(k|m|b)?$/i);
+  if (!m) {
+    // Fallback for plain ints that don't match the shorthand pattern
+    const num = parseInt(str);
+    return (!isNaN(num) && num > 0) ? num : null;
+  }
+  let num = parseFloat(m[1]);
+  const suffix = (m[2] || "").toLowerCase();
+  if (suffix === "k") num *= 1e3;
+  else if (suffix === "m") num *= 1e6;
+  else if (suffix === "b") num *= 1e9;
+  num = Math.floor(num);
+  return num > 0 ? num : null;
+}
+
+// ── Supabase Wallet Store ─────────────────────────────────────────────────────
 let supabase;
-function initCommission(url, key) {
-  supabase = createClient(url, key, { realtime: { transport: ws } });
-  refreshCachedTaxRate().catch(() => {});
-  console.log("🕴️ Commission system initialized");
+function initEconomy(supabaseUrl, supabaseKey) {
+  try {
+    supabase = createClient(supabaseUrl, supabaseKey, { realtime: { transport: ws } });
+    console.log("✅ Economy system initialized");
+  } catch (e) {
+    console.error("[ECONOMY] Init failed:", e.message);
+  }
 }
 
-function freshState(members, carryTaxKey) {
-  return {
-    cycleStartAt: Date.now(),
-    cycleEndAt: Date.now() + CYCLE_MS,
-    members,                              // [{ gangId, gangName }], ranked #1 first
-    votes: {},                             // gangId -> taxKey
-    activeTaxKey: carryTaxKey || DEFAULT_TAX_KEY, // stays in effect until THIS cycle resolves its own vote
-    pot: 0,
+// ── Per-user wallet lock ──────────────────────────────────────────────────────
+// addCopper/deductCopper/saveWallet all do a plain read-then-write with no
+// atomicity — if two calls for the SAME user overlap (e.g. a spammed command,
+// or a deliberate "claim daily twice via Second Wind" flow racing against
+// itself), the second write can read a stale balance and silently clobber the
+// first one's money. This serializes every wallet-mutating call per user so
+// that can't happen, without needing any DB-level locking.
+const userWalletLocks = new Map(); // userId -> chained Promise
+function withUserLock(userId, fn) {
+  const prev = userWalletLocks.get(userId) || Promise.resolve();
+  const run = prev.then(fn, fn); // run fn regardless of whether the prior op succeeded
+  userWalletLocks.set(userId, run.catch(() => {})); // keep the chain alive even on error
+  return run;
+}
+
+async function getWallet(userId) {
+  const empty = { user_id: userId, copper: 0, silver: 0, gold: 0, stellar: 0, last_daily: null, total_earned: 0, debt: 0 };
+  if (!supabase) return empty;
+  const { data, error } = await supabase.from("wallets").select("*").eq("user_id", userId);
+  if (error) {
+    console.error("[GET WALLET ERROR]", error.message);
+    return empty;
+  }
+  if (!data || data.length === 0) return empty;
+  // Flatten on read — a wallet with a leftover balance in silver/gold/stellar
+  // from before the flatten shows up as Cash immediately, not just after its
+  // next transaction.
+  const w = data[0];
+  return { ...w, copper: walletToCopper(w), silver: 0, gold: 0, stellar: 0 };
+}
+
+async function saveWallet(wallet) {
+  if (!supabase) return;
+  const { error } = await supabase.from("wallets").upsert(wallet, { onConflict: "user_id" });
+  if (error) console.error("[SAVE WALLET]", error.message);
+}
+
+async function getDebt(userId) {
+  const w = await getWallet(userId);
+  return w.debt || 0;
+}
+
+async function addDebt(userId, amount) {
+  try {
+    const w = await getWallet(userId);
+    const newW = { ...w, debt: (w.debt || 0) + amount };
+    await saveWallet(newW);
+    return newW;
+  } catch (e) { console.error("[ADD DEBT]", e.message); return null; }
+}
+
+async function payDebt(userId, amount) {
+  try {
+    const w = await getWallet(userId);
+    const currentDebt = w.debt || 0;
+    const pay = Math.min(amount, currentDebt);
+    const newW = { ...w, debt: currentDebt - pay };
+    // Also deduct from balance
+    const totalCopper = walletToCopper(w);
+    if (totalCopper < pay) return null;
+    Object.assign(newW, fromCopper(totalCopper - pay));
+    await saveWallet(newW);
+    return newW;
+  } catch (e) { console.error("[PAY DEBT]", e.message); return null; }
+}
+
+function formatDebt(debt) {
+  if (!debt || debt === 0) return null;
+  return "🔴 **YOU OWE THE FAMILY: " + fmt(debt) + " Cash**";
+}
+
+async function addCopper(userId, copperAmount) {
+  return withUserLock(userId, async () => {
+    try {
+      const w = await getWallet(userId);
+      const total = walletToCopper(w) + copperAmount;
+      const newW = { ...w, ...fromCopper(total), total_earned: (w.total_earned || 0) + Math.max(0, copperAmount) };
+      await saveWallet(newW);
+      return newW;
+    } catch (e) { console.error("[ADD COPPER]", e.message); return null; }
+  });
+}
+
+async function deductCopper(userId, copperAmount) {
+  return withUserLock(userId, async () => {
+    try {
+      const w = await getWallet(userId);
+      const total = walletToCopper(w);
+      if (total < copperAmount) return null;
+      const newW = { ...w, ...fromCopper(total - copperAmount) };
+      await saveWallet(newW);
+      return newW;
+    } catch (e) { console.error("[DEDUCT COPPER]", e.message); return null; }
+  });
+}
+
+// Atomically credits the daily reward AND stamps last_daily in ONE locked
+// read-modify-write, instead of calling addCopper() then a separate
+// saveWallet() for last_daily (two unlocked writes with a gap between them —
+// exactly the kind of gap that let a Second-Wind-triggered second claim
+// silently lose its money to a race in testing).
+async function claimDaily(userId, copperAmount) {
+  return withUserLock(userId, async () => {
+    try {
+      const w = await getWallet(userId);
+      const total = walletToCopper(w) + copperAmount;
+      const newW = {
+        ...w,
+        ...fromCopper(total),
+        total_earned: (w.total_earned || 0) + Math.max(0, copperAmount),
+        last_daily: new Date().toISOString(),
+      };
+      await saveWallet(newW);
+      return newW;
+    } catch (e) { console.error("[CLAIM DAILY]", e.message); return null; }
+  });
+}
+
+async function getLeaderboard(limit = 10) {
+  // Order by "copper" as a first-pass filter (cheap on the DB side), but pull
+  // extra rows and re-sort in JS by TRUE current balance (walletToCopper —
+  // flattens any legacy silver/gold/stellar left over from before the
+  // currency flatten). Sorting by total_earned here was the bug: that's a
+  // lifetime stat that drifts from current balance the moment someone
+  // spends, gambles, or gets robbed, so the displayed order looked scrambled
+  // even though the sort itself was "working."
+  const { data, error } = await supabase.from("wallets").select("*").order("copper", { ascending: false }).limit(Math.max(limit * 5, 50));
+  if (error) {
+    console.error("[GET LEADERBOARD ERROR]", error.message);
+    return [];
+  }
+  const sorted = (data || [])
+    .map(w => ({ ...w, _balance: walletToCopper(w) }))
+    .sort((a, b) => b._balance - a._balance)
+    .slice(0, limit);
+  return sorted;
+}
+
+// ── Daily Rewards by Rank ─────────────────────────────────────────────────────
+// Mirrors the 10-tier Family ladder. Flat Cash amounts now (same effective
+// values as the old tiered rewards, just no denominations to think in).
+// Don Clint's cut is effectively bottomless.
+const DAILY_REWARDS = {
+  streetrat:   100,
+  associate:   500,
+  soldier:     1000,
+  mademan:     3000,
+  enforcer:    10000,
+  capo:        100000,
+  underboss:   200000,
+  consigliere: 1000000,
+  boss:        5000000,
+  donclint:    999_000_000_000_000, // 999 Trillion — the Don doesn't do dailies, he does GDPs
+};
+
+function getDailyAmount(rankKey) {
+  return DAILY_REWARDS[rankKey] || DAILY_REWARDS.streetrat;
+}
+
+// ── Short-form number formatting ──────────────────────────────────────────────
+// Turns big Cash amounts into compact strings: 1000 -> "1k", 2500000 -> "2.5m",
+// 1000000000 -> "1b". One decimal place, only when it isn't a round number
+// (so "2m", not "2.0m"). Floors rather than rounds so we never overflow a unit
+// (e.g. 999,999 shows "999.9k", never "1000k"). Below 1000 it's printed as-is.
+function fmt(n) {
+  n = Math.floor(Number(n) || 0);
+  const neg = n < 0;
+  n = Math.abs(n);
+  const unit = (x, suffix) => {
+    const r = Math.floor(x * 10) / 10; // 1 decimal, floored
+    return (Number.isInteger(r) ? String(r) : r.toFixed(1)) + suffix;
   };
+  let out;
+  if (n < 1e3)       out = String(n);
+  else if (n < 1e6)  out = unit(n / 1e3, "k");
+  else if (n < 1e9)  out = unit(n / 1e6, "m");
+  else if (n < 1e12) out = unit(n / 1e9, "b");
+  else               out = unit(n / 1e12, "t");
+  return (neg ? "-" : "") + out;
 }
 
-async function getState() {
-  const { data, error } = await supabase.from("empire_data").select("value").eq("key", STATE_KEY).maybeSingle();
-  if (error) { console.error("[COMMISSION GET STATE]", error.message); return null; }
-  return data?.value || null;
-}
+// ── Notoriety (activity leveling) ─────────────────────────────────────────────
+// A second ladder, separate from the Family rank. Earned purely by USING Cosa —
+// economy commands and just talking to her. Higher notoriety = a flat daily-cut
+// bonus that STACKS on top of your rank's daily. Grindy on purpose: Kingpin is
+// meant to take a dedicated player a month or two.
+//
+// `xp` on each tier is the CUMULATIVE XP required to reach it.
+const NOTORIETY_TIERS = [
+  { key: "nobody",      name: "Nobody",      emoji: "🚬", xp: 0,      dailyBonus: 0        },
+  { key: "whisper",     name: "Whisper",     emoji: "🍃", xp: 300,    dailyBonus: 5000     },
+  { key: "known",       name: "Known",       emoji: "👀", xp: 1200,   dailyBonus: 25000    },
+  { key: "respected",   name: "Respected",   emoji: "🤝", xp: 3500,   dailyBonus: 75000    },
+  { key: "connected",   name: "Connected",   emoji: "🕸️", xp: 9000,   dailyBonus: 200000   },
+  { key: "feared",      name: "Feared",      emoji: "😰", xp: 22000,  dailyBonus: 600000   },
+  { key: "notorious",   name: "Notorious",   emoji: "📰", xp: 55000,  dailyBonus: 1500000  },
+  { key: "untouchable", name: "Untouchable", emoji: "🛡️", xp: 120000, dailyBonus: 5000000  },
+  { key: "legend",      name: "Legend",      emoji: "🌟", xp: 210000, dailyBonus: 15000000 },
+  { key: "kingpin",     name: "Kingpin",     emoji: "👑", xp: 360000, dailyBonus: 50000000 },
+];
 
-async function saveState(state) {
-  const { error } = await supabase.from("empire_data").upsert({ key: STATE_KEY, value: state }, { onConflict: "key" });
-  if (error) console.error("[COMMISSION SAVE STATE]", error.message);
-}
+// In-memory cache of per-user XP and economy bans, backed by a single
+// empire_data row ("notoriety_data"). Loaded once at startup, written back on a
+// throttle so per-message XP grants don't hammer the DB.
+const _xpCache = new Map();     // userId -> total xp (number)
+const _ecoBans = new Set();     // userIds banned from the economy
+const _xpCooldowns = new Map(); // userId -> timestamp of last XP grant (anti-spam)
+let _notorietyDirty = false;
+let _notorietyLoaded = false;
 
-// Ranks every gang by treasury + turf held (each controlled zone counts as a
-// flat Cash-equivalent bonus toward rank, so turf actually matters here too).
-const TURF_RANK_WEIGHT = 200000;
-async function rankGangs() {
-  const allGangs = await gangs.getAllGangs();
-  const zones = await turf.getAllZones();
-  const turfCountByGang = new Map();
-  for (const z of zones) {
-    if (!z.controller_gang_id) continue;
-    turfCountByGang.set(z.controller_gang_id, (turfCountByGang.get(z.controller_gang_id) || 0) + 1);
+// Per-source anti-spam windows. Talking is cheap so it's throttled hard;
+// commands cost a real cooldown/action already, so a light window just stops
+// someone macro-spamming `cosa balance` for infinite XP.
+const XP_COOLDOWNS = { chat: 40 * 1000, command: 8 * 1000 };
+// XP granted per grant, by source (kept modest so Kingpin stays a 1-2 month grind).
+const XP_AMOUNTS = { chat: [6, 10], command: [12, 20] };
+
+async function loadNotoriety() {
+  if (!supabase) { _notorietyLoaded = true; return; }
+  try {
+    const { data } = await supabase.from("empire_data").select("value").eq("key", "notoriety_data").maybeSingle();
+    const v = data?.value || {};
+    _xpCache.clear();
+    for (const [uid, xp] of Object.entries(v.xp || {})) _xpCache.set(uid, Number(xp) || 0);
+    _ecoBans.clear();
+    for (const uid of (v.bans || [])) _ecoBans.add(uid);
+    console.log(`✅ Notoriety loaded — ${_xpCache.size} players, ${_ecoBans.size} banned`);
+  } catch (e) {
+    console.error("[NOTORIETY LOAD]", e.message);
   }
-  return allGangs
-    .map(g => ({ gangId: g.id, gangName: g.name, score: (g.treasury || 0) + (turfCountByGang.get(g.id) || 0) * TURF_RANK_WEIGHT }))
-    .sort((a, b) => b.score - a.score);
+  _notorietyLoaded = true;
+  // Periodic flush — only writes when something actually changed.
+  setInterval(() => { if (_notorietyDirty) saveNotoriety().catch(() => {}); }, 20000);
 }
 
-async function pickCommissionMembers() {
-  const ranked = await rankGangs();
-  const size = Math.min(TARGET_SIZE, MAX_SIZE, ranked.length);
-  return ranked.slice(0, size).map(g => ({ gangId: g.gangId, gangName: g.gangName }));
-}
-
-// Starts a brand-new cycle from scratch (first-ever boot, or state got wiped).
-async function startNewCycle() {
-  const members = await pickCommissionMembers();
-  const state = freshState(members);
-  await saveState(state);
-  await refreshCachedTaxRate();
-  return state;
-}
-
-// Resolves the current cycle's vote, pays out the pot, and starts the next
-// cycle. Returns a summary object for the announcement message, or null if
-// there was no active cycle to end.
-async function endCycleAndPayout() {
-  const state = await getState();
-  if (!state) return null;
-  pendingMeeting = null; // any in-flight meeting is moot once the cycle actually resolves
-
-  // Resolve vote: majority among CAST votes wins; a tie (or nobody voted)
-  // means abstain — the tax rate carries over unchanged.
-  const tally = new Map();
-  for (const taxKey of Object.values(state.votes)) {
-    tally.set(taxKey, (tally.get(taxKey) || 0) + 1);
+async function saveNotoriety() {
+  if (!supabase || !_notorietyLoaded) return;
+  try {
+    const value = { xp: Object.fromEntries(_xpCache), bans: [..._ecoBans] };
+    await supabase.from("empire_data").upsert({ key: "notoriety_data", value }, { onConflict: "key" });
+    _notorietyDirty = false;
+  } catch (e) {
+    console.error("[NOTORIETY SAVE]", e.message);
   }
-  let resolvedTaxKey = state.activeTaxKey;
-  if (tally.size > 0) {
-    const maxVotes = Math.max(...tally.values());
-    const winners = [...tally.entries()].filter(([, c]) => c === maxVotes);
-    if (winners.length === 1) resolvedTaxKey = winners[0][0];
-    // else: genuine tie among the top choices -> abstain, keep previous rate
-  }
+}
 
-  // Payout — split table matches however many seats were actually filled
-  // this cycle. A gang that disbanded mid-cycle (getGangById returns null)
-  // simply forfeits its share.
-  const payouts = [];
-  if (state.pot > 0) {
-    const ratios = SPLIT_TABLES[state.members.length] || SPLIT_TABLES[MAX_SIZE];
-    for (let i = 0; i < state.members.length && i < ratios.length; i++) {
-      const member = state.members[i];
-      const gang = await gangs.getGangById(member.gangId);
-      if (!gang) { payouts.push({ ...member, amount: 0, forfeited: true }); continue; }
-      const share = Math.floor(state.pot * ratios[i]);
-      if (share > 0) await gangs.addToGangTreasury(member.gangId, share);
-      payouts.push({ ...member, amount: share, forfeited: false });
+function getXP(userId) {
+  return _xpCache.get(userId) || 0;
+}
+
+// Which tier an XP total falls into.
+function getNotorietyTier(xp) {
+  let tier = NOTORIETY_TIERS[0];
+  for (const t of NOTORIETY_TIERS) { if (xp >= t.xp) tier = t; else break; }
+  return tier;
+}
+
+// The next tier up (or null if already Kingpin), for progress display.
+function getNextNotorietyTier(xp) {
+  for (const t of NOTORIETY_TIERS) { if (xp < t.xp) return t; }
+  return null;
+}
+
+function getNotorietyBonus(userId) {
+  return getNotorietyTier(getXP(userId)).dailyBonus;
+}
+
+// Grant XP for using Cosa. `source` is "chat" or "command"; each has its own
+// anti-spam window. The XP amount is rolled from XP_AMOUNTS for that source.
+// Returns { leveledUp, tier } so callers can announce a promotion. `null` tier
+// change on a cooldowned/no-op call.
+function addXP(userId, source = "command") {
+  const cur = getNotorietyTier(getXP(userId));
+  if (!userId) return { leveledUp: false, tier: cur };
+  const cd = XP_COOLDOWNS[source] || 0;
+  const key = userId + ":" + source;
+  const last = _xpCooldowns.get(key) || 0;
+  if (Date.now() - last < cd) return { leveledUp: false, tier: cur };
+  _xpCooldowns.set(key, Date.now());
+  const [lo, hi] = XP_AMOUNTS[source] || XP_AMOUNTS.command;
+  const amount = lo + Math.floor(Math.random() * (hi - lo + 1));
+  const before = getXP(userId);
+  const after = before + amount;
+  _xpCache.set(userId, after);
+  _notorietyDirty = true;
+  const afterTier = getNotorietyTier(after);
+  return { leveledUp: afterTier.key !== cur.key, tier: afterTier, prevTier: cur, xp: after, gained: amount };
+}
+
+// Admin: hard-set a user's XP (snaps them to whatever tier that lands in).
+function setXP(userId, amount) {
+  _xpCache.set(userId, Math.max(0, Math.floor(amount)));
+  _notorietyDirty = true;
+  saveNotoriety().catch(() => {});
+  return getNotorietyTier(getXP(userId));
+}
+
+// A human-readable list of every valid tier — reused by the admin command's
+// error message so a typo always comes back with "here's every valid option."
+function formatTierList() {
+  return NOTORIETY_TIERS.map(t => `${t.emoji} \`${t.key}\` (${t.name})`).join(", ");
+}
+
+// Simple Levenshtein distance — used to catch typos like "kingpn" -> "kingpin"
+// or "ntorious" -> "notorious" without needing an exact match.
+function levenshtein(a, b) {
+  a = a.toLowerCase(); b = b.toLowerCase();
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
     }
   }
-
-  const summary = { previousMembers: state.members, payouts, resolvedTaxKey, pot: state.pot };
-
-  // Start the next cycle immediately, carrying the resolved tax rate forward
-  // as the baseline until this new cycle resolves its own vote.
-  const members = await pickCommissionMembers();
-  const newState = freshState(members, resolvedTaxKey);
-  await saveState(newState);
-  await refreshCachedTaxRate();
-
-  return summary;
+  return dp[m][n];
 }
 
-// Call this periodically (e.g. hourly) — a cheap no-op if the cycle isn't
-// over yet. Returns a payout summary only on the tick where a cycle actually
-// rolled over (for announcing), otherwise null.
-async function checkCycleRollover() {
-  let state = await getState();
-  if (!state) { await startNewCycle(); return null; }
-  if (Date.now() < state.cycleEndAt) return null;
-  return await endCycleAndPayout();
-}
+// Fuzzy-resolve a tier from typed input. Tries exact key/name match first,
+// then falls back to closest Levenshtein match against key + name (typo
+// tolerance scales a little with word length so "king"->"kingpin" doesn't
+// falsely match while "kingpn"->"kingpin" does).
+function resolveNotorietyTier(input) {
+  if (!input) return { tier: null, corrected: false };
+  const q = input.toLowerCase().trim();
 
-// ── Active tax rate (cached in memory) ──────────────────────────────────────
-// Gambling's house-cut fires synchronously and often — no DB round trip on
-// every spin. The cache is refreshed whenever the active rate could have
-// changed (init + every cycle rollover).
-let cachedTaxRate = TAX_CHOICES[DEFAULT_TAX_KEY].rate;
-async function refreshCachedTaxRate() {
-  const state = await getState();
-  const key = state?.activeTaxKey || DEFAULT_TAX_KEY;
-  cachedTaxRate = (TAX_CHOICES[key] || TAX_CHOICES[DEFAULT_TAX_KEY]).rate;
-}
-function getActiveTaxRate() {
-  return cachedTaxRate;
-}
+  const exact = NOTORIETY_TIERS.find(t => t.key === q || t.name.toLowerCase() === q);
+  if (exact) return { tier: exact, corrected: false };
 
-async function addToPot(amount) {
-  amount = Math.floor(amount);
-  if (amount <= 0) return;
-  const state = await getState();
-  if (!state) return;
-  state.pot = (state.pot || 0) + amount;
-  await saveState(state);
-}
-
-// Only the CURRENT leader of a Commission-member gang can vote — checked live
-// each time, so leadership changes (new Don/leader) just work automatically.
-async function castVote(userId, taxKey) {
-  if (!TAX_CHOICES[taxKey]) return { success: false, reason: "Invalid tax choice." };
-  const state = await getState();
-  if (!state) return { success: false, reason: "The Commission hasn't convened yet." };
-  const ug = await gangs.getUserGang(userId);
-  if (!ug || ug.membership.role !== "leader") return { success: false, reason: "Only a gang leader can vote on Commission policy." };
-  const isMember = state.members.some(m => m.gangId === ug.gang.id);
-  if (!isMember) return { success: false, reason: "Your gang isn't on the Commission this cycle." };
-
-  state.votes[ug.gang.id] = taxKey;
-  await saveState(state);
-  return { success: true, gangName: ug.gang.name, taxKey };
-}
-
-function formatCommissionStatus(state) {
-  if (!state) return "🕴️ The Commission hasn't convened yet.";
-  const lines = state.members.map((m, i) => {
-    const voted = state.votes[m.gangId];
-    return `**#${i + 1}** ${m.gangName}${voted ? ` — voted **${TAX_CHOICES[voted].label}**` : " — hasn't voted yet"}`;
-  });
-  const activeLabel = (TAX_CHOICES[state.activeTaxKey] || TAX_CHOICES[DEFAULT_TAX_KEY]).label;
-  const timeLeft = Math.max(0, state.cycleEndAt - Date.now());
-  const daysLeft = (timeLeft / 86400000).toFixed(1);
-  return (
-    `🕴️ **THE COMMISSION**\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `Active tax rate *(business + gambling)*: **${activeLabel}**\n` +
-    `Pot this cycle: **💵 ${eco.fmt(state.pot || 0)} Cash**\n` +
-    `Cycle ends in **${daysLeft}d**\n\n` +
-    (lines.length ? lines.join("\n") : "*No gangs currently qualify for a seat.*")
-  );
-}
-
-function formatPayoutSummary(summary) {
-  if (!summary) return null;
-  const taxLabel = (TAX_CHOICES[summary.resolvedTaxKey] || TAX_CHOICES[DEFAULT_TAX_KEY]).label;
-  const lines = summary.payouts.map((p, i) =>
-    p.forfeited
-      ? `**#${i + 1}** ${p.gangName} — *disbanded, share forfeited*`
-      : `**#${i + 1}** ${p.gangName} — 💵 ${eco.fmt(p.amount)} Cash`
-  );
-  return (
-    `🕴️ **THE COMMISSION CYCLE HAS ENDED**\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `Pot collected: **💵 ${eco.fmt(summary.pot)} Cash**\n` +
-    `Resolved tax rate going forward: **${taxLabel}**\n\n` +
-    (lines.length ? lines.join("\n") : "*No gangs held a seat this cycle.*") +
-    `\n\n*A new Commission has convened based on current standings.*`
-  );
-}
-
-// ── Call a meeting ───────────────────────────────────────────────────────────
-// Any current Commission leader can call an early vote instead of waiting out
-// the full cycle. Calling it counts as an automatic "yes" from their own
-// gang. If a majority of the CURRENT Commission's members agree within the
-// window, the cycle resolves immediately (same resolution path as a normal
-// timer rollover or the Don's force-vote). If majority never arrives before
-// the window closes, it just fizzles — the normal timer keeps running
-// untouched. 3-day cooldown per gang (not per person), so a leadership
-// change doesn't reset it.
-const MEETING_WINDOW_MS = 60 * 60 * 1000;   // 1 hour to reach majority
-const MEETING_COOLDOWN_MS = 3 * 24 * 60 * 60 * 1000; // 3 days per gang
-const meetingCooldowns = new Map(); // gangId -> timestamp of last call
-let pendingMeeting = null; // { calledByGangId, calledByGangName, acceptedGangIds: Set, expiresAt }
-
-function majorityNeeded(memberCount) {
-  return Math.floor(memberCount / 2) + 1;
-}
-
-function getMeetingCooldownRemaining(gangId) {
-  const last = meetingCooldowns.get(gangId) || 0;
-  return Math.max(0, MEETING_COOLDOWN_MS - (Date.now() - last));
-}
-
-function clearExpiredMeeting() {
-  if (pendingMeeting && Date.now() > pendingMeeting.expiresAt) pendingMeeting = null;
-}
-
-function getMeetingStatus() {
-  clearExpiredMeeting();
-  return pendingMeeting;
-}
-
-async function callMeeting(userId) {
-  clearExpiredMeeting();
-  const state = await getState();
-  if (!state) return { success: false, reason: "The Commission hasn't convened yet." };
-  const ug = await gangs.getUserGang(userId);
-  if (!ug || ug.membership.role !== "leader") return { success: false, reason: "Only a gang leader can call a Commission meeting." };
-  const isMember = state.members.some(m => m.gangId === ug.gang.id);
-  if (!isMember) return { success: false, reason: "Your gang isn't on the Commission this cycle." };
-  if (pendingMeeting) return { success: false, reason: "A meeting is already in session — other Commission leaders can still accept it with **/commission accept-meeting**." };
-
-  const remaining = getMeetingCooldownRemaining(ug.gang.id);
-  if (remaining > 0) {
-    const hrs = Math.floor(remaining / 3600000);
-    const mins = Math.floor((remaining % 3600000) / 60000);
-    return { success: false, reason: `**${ug.gang.name}** already called a meeting recently — try again in **${hrs}h ${mins}m**.` };
+  let best = null, bestDist = Infinity;
+  for (const t of NOTORIETY_TIERS) {
+    const dKey = levenshtein(q, t.key);
+    const dName = levenshtein(q, t.name.toLowerCase());
+    const d = Math.min(dKey, dName);
+    if (d < bestDist) { bestDist = d; best = t; }
   }
-
-  meetingCooldowns.set(ug.gang.id, Date.now());
-  pendingMeeting = {
-    calledByGangId: ug.gang.id,
-    calledByGangName: ug.gang.name,
-    acceptedGangIds: new Set([ug.gang.id]),
-    expiresAt: Date.now() + MEETING_WINDOW_MS,
-  };
-
-  const needed = majorityNeeded(state.members.length);
-  if (pendingMeeting.acceptedGangIds.size >= needed) {
-    const summary = await endCycleAndPayout();
-    return { success: true, resolved: true, summary, gangName: ug.gang.name };
-  }
-  return { success: true, resolved: false, gangName: ug.gang.name, acceptedCount: pendingMeeting.acceptedGangIds.size, neededTotal: needed };
+  const threshold = Math.max(2, Math.ceil(Math.min(best?.key.length || 0, q.length) * 0.4));
+  if (best && bestDist <= threshold) return { tier: best, corrected: true, distance: bestDist };
+  return { tier: null, corrected: false };
 }
 
-async function acceptMeeting(userId) {
-  clearExpiredMeeting();
-  if (!pendingMeeting) return { success: false, reason: "No Commission meeting is currently in session." };
-  const state = await getState();
-  if (!state) return { success: false, reason: "The Commission hasn't convened yet." };
-  const ug = await gangs.getUserGang(userId);
-  if (!ug || ug.membership.role !== "leader") return { success: false, reason: "Only a gang leader can respond to a Commission meeting." };
-  const isMember = state.members.some(m => m.gangId === ug.gang.id);
-  if (!isMember) return { success: false, reason: "Your gang isn't on the Commission this cycle." };
-
-  pendingMeeting.acceptedGangIds.add(ug.gang.id);
-  const needed = majorityNeeded(state.members.length);
-  if (pendingMeeting.acceptedGangIds.size >= needed) {
-    const summary = await endCycleAndPayout();
-    return { success: true, resolved: true, summary, gangName: ug.gang.name };
-  }
-  return { success: true, resolved: false, gangName: ug.gang.name, acceptedCount: pendingMeeting.acceptedGangIds.size, neededTotal: needed };
+// Admin: set a user straight to a named notoriety tier. Typo-tolerant —
+// returns { tier, corrected, from } on a fuzzy match, or null if nothing
+// close enough was found (caller should show formatTierList() in that case).
+function setNotorietyTier(userId, tierKey) {
+  const { tier, corrected } = resolveNotorietyTier(tierKey);
+  if (!tier) return null;
+  const result = setXP(userId, tier.xp);
+  return { ...result, corrected, inputWas: tierKey };
 }
 
-function formatMeetingStatus() {
-  const m = getMeetingStatus();
-  if (!m) return "🕴️ No Commission meeting is currently in session.";
-  const minsLeft = Math.max(0, Math.ceil((m.expiresAt - Date.now()) / 60000));
-  return `🕴️ **${m.calledByGangName}** called a Commission meeting — **${m.acceptedGangIds.size}** gang(s) agreed so far. Closes in **${minsLeft}m** if majority isn't reached.`;
+function isEcoBanned(userId) {
+  return _ecoBans.has(userId);
+}
+
+function setEcoBan(userId, banned) {
+  if (banned) _ecoBans.add(userId); else _ecoBans.delete(userId);
+  _notorietyDirty = true;
+  saveNotoriety().catch(() => {});
+}
+
+// ── Slots ─────────────────────────────────────────────────────────────────────
+// Weights tuned so matching two commons is frequent, jackpots are rare.
+// Total weight ~100. Skull symbol reduced from 37→15 so near-misses feel fair.
+const SLOT_SYMBOLS = [
+  { emoji: "🤵", weight: 3,  multiplier: 10  }, // rare jackpot — the Don himself
+  { emoji: "💎", weight: 6,  multiplier: 6   },
+  { emoji: "🔫", weight: 10, multiplier: 4   },
+  { emoji: "🥃", weight: 16, multiplier: 2.5 },
+  { emoji: "🎩", weight: 22, multiplier: 1.5 },
+  { emoji: "🚬", weight: 24, multiplier: 1   },
+  { emoji: "💵", weight: 27, multiplier: 0.5 }, // partial return on pair
+  { emoji: "💀", weight: 8,  multiplier: 0   }, // loss, further reduced
+];
+
+function spinSlot() {
+  const totalWeight = SLOT_SYMBOLS.reduce((a, s) => a + s.weight, 0);
+  let r = Math.random() * totalWeight;
+  for (const s of SLOT_SYMBOLS) { r -= s.weight; if (r <= 0) return s; }
+  return SLOT_SYMBOLS[SLOT_SYMBOLS.length - 1];
+}
+
+function playSlots(bet, charmActive = false, houseFavorActive = false) {
+  const reels = [spinSlot(), spinSlot(), spinSlot()];
+  // Loaded dice: reroll the worst reel once if no match
+  if (charmActive) {
+    const hasMatch = reels[0].emoji === reels[1].emoji || reels[1].emoji === reels[2].emoji || reels[0].emoji === reels[2].emoji;
+    if (!hasMatch) {
+      // Find the odd one out and reroll it
+      const idx = reels[0].emoji === reels[1].emoji ? 2 : reels[1].emoji === reels[2].emoji ? 0 : 1;
+      reels[idx] = spinSlot();
+    }
+  }
+  // House Favor: guarantee no 💀 (total-loss) symbol makes it into the final result
+  if (houseFavorActive) {
+    for (let i = 0; i < reels.length; i++) {
+      let tries = 0;
+      while (reels[i].multiplier === 0 && tries < 8) {
+        reels[i] = spinSlot();
+        tries++;
+      }
+    }
+  }
+  const display = reels.map(r => r.emoji).join(" | ");
+  let multiplier = 0;
+  let isJackpot = false;
+  if (reels[0].emoji === reels[1].emoji && reels[1].emoji === reels[2].emoji) {
+    multiplier = reels[0].multiplier * 3; // jackpot
+    isJackpot = multiplier > 1;
+  } else if (reels[0].emoji === reels[1].emoji) {
+    multiplier = reels[0].multiplier * 0.5; // pair uses the matched symbol's payout
+  } else if (reels[1].emoji === reels[2].emoji) {
+    multiplier = reels[1].multiplier * 0.5;
+  } else if (reels[0].emoji === reels[2].emoji) {
+    multiplier = reels[0].multiplier * 0.5;
+  }
+  const winnings = Math.floor(bet * multiplier);
+  return { display, multiplier, winnings, isJackpot };
+}
+
+// ── Wheel ─────────────────────────────────────────────────────────────────────
+// Max is now 5x. 0.5x counts as a loss (loaded dice reroll it).
+// 3x and 5x are rare but reachable. Total weight = 1000 for clean math.
+const WHEEL_SEGMENTS = [
+  { label: "💀 WIPED OUT",  multiplier: 0,   weight: 180 },
+  { label: "☠️ WIPED OUT",  multiplier: 0,   weight: 150 },
+  { label: "0.5x 😬",       multiplier: 0.5, weight: 170 }, // treated as loss for loaded dice
+  { label: "1x",            multiplier: 1,   weight: 250 },
+  { label: "2x",            multiplier: 2,   weight: 150 },
+  { label: "3x 🔥",         multiplier: 3,   weight: 70  },
+  { label: "5x ⚡",         multiplier: 5,   weight: 30  },
+];
+
+function spinWheel(houseFavorActive = false) {
+  function roll() {
+    const total = WHEEL_SEGMENTS.reduce((a, s) => a + s.weight, 0);
+    let r = Math.random() * total;
+    for (const s of WHEEL_SEGMENTS) { r -= s.weight; if (r <= 0) return s; }
+    return WHEEL_SEGMENTS[0];
+  }
+  let seg = roll();
+  // House Favor: a would-be wipeout becomes a straight 1x instead of a
+  // reroll. Rerolling from the full table was the actual bug — removing the
+  // 0x segments and renormalizing over what's left proportionally inflates
+  // EVERY other outcome, including 2x/3x/5x, so House Favor was quietly also
+  // boosting jackpot odds (~25% -> ~37%) on top of removing downside risk.
+  // Converting straight to 1x guarantees "no wipeout" without touching the
+  // odds of anything else — 2x+ stays exactly as rare as it normally is.
+  if (houseFavorActive && seg.multiplier === 0) {
+    seg = WHEEL_SEGMENTS.find(s => s.multiplier === 1) || seg;
+  }
+  return seg;
+}
+
+// ── Blackjack ─────────────────────────────────────────────────────────────────
+const BJ_DECK = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
+function bjValue(card) { return card === "A" ? 11 : ["J","Q","K"].includes(card) ? 10 : parseInt(card); }
+function bjHandValue(hand) {
+  let total = hand.reduce((a, c) => a + bjValue(c), 0);
+  let aces = hand.filter(c => c === "A").length;
+  while (total > 21 && aces > 0) { total -= 10; aces--; }
+  return total;
+}
+function dealCard() { return BJ_DECK[Math.floor(Math.random() * BJ_DECK.length)]; }
+function newBjHand() { return [dealCard(), dealCard()]; }
+
+// ── Shakedown (Rob) ────────────────────────────────────────────────────────────
+// 40% success, 30% caught (fine = 50% of attempted take), 30% they got away clean
+function attemptRob(targetCopperBalance, robberCopperBalance, robberDebt = 0) {
+  const r = Math.random();
+  const steal = Math.floor(targetCopperBalance * (0.2 + Math.random() * 0.2));
+  const finePercent = 0.5 + Math.random() * 0.2;
+  // In debt to the Family = lower success rate (20% instead of 40%)
+  const successThreshold = robberDebt > 0 ? 0.25 : 0.50;
+  if (r < successThreshold) return { result: "success", amount: steal };
+  if (r < 0.7) return { result: "caught", fine: Math.floor(steal * finePercent) };
+  return { result: "escaped" };
+}
+
+// ── Chat Rewards ──────────────────────────────────────────────────────────────
+const chatCounters = new Map(); // userId -> message count since last reward
+function shouldRewardChat(userId) {
+  const count = (chatCounters.get(userId) || 0) + 1;
+  chatCounters.set(userId, count);
+  if (count >= (5 + Math.floor(Math.random() * 6))) { // every 5-10 messages
+    chatCounters.set(userId, 0);
+    return Math.floor(10 + Math.random() * 40); // 10-50 cash
+  }
+  return 0;
+}
+
+// Active blackjack games: userId -> { playerHand, dealerHand, bet, channelId }
+const bjGames = new Map();
+
+// ── Gifting ────────────────────────────────────────────────────────────────
+// Send Cash directly to another user. Small tax skimmed to the Don's treasury,
+// same vig pattern used elsewhere (bank fees, bounty posting fee).
+const GIFT_TAX_PCT = 0.03; // 3%
+const GIFT_DAILY_CAP = 5_000_000; // per-user cap on total Cash gifted per rolling 24h
+const giftDailyTotals = new Map(); // userId -> { total, resetAt }
+
+function checkGiftCap(userId, amount) {
+  const now = Date.now();
+  let entry = giftDailyTotals.get(userId);
+  if (!entry || now >= entry.resetAt) {
+    entry = { total: 0, resetAt: now + 24 * 60 * 60 * 1000 };
+  }
+  if (entry.total + amount > GIFT_DAILY_CAP) return false;
+  entry.total += amount;
+  giftDailyTotals.set(userId, entry);
+  return true;
+}
+
+async function giftCopper(fromId, toId, amount, addToTreasury, masterId) {
+  if (fromId === toId) return { success: false, reason: "You can't gift Cash to yourself." };
+  if (amount <= 0) return { success: false, reason: "Gift amount must be positive." };
+  if (!checkGiftCap(fromId, amount)) return { success: false, reason: `Daily gifting cap reached (${fmt(GIFT_DAILY_CAP)}/day).` };
+
+  const deducted = await deductCopper(fromId, amount);
+  if (!deducted) return { success: false, reason: "Insufficient funds." };
+
+  const tax = Math.floor(amount * GIFT_TAX_PCT);
+  const net = amount - tax;
+  await addCopper(toId, net);
+  if (tax > 0 && addToTreasury) await addToTreasury(masterId, tax);
+
+  return { success: true, net, tax };
 }
 
 module.exports = {
-  initCommission, TAX_CHOICES, DEFAULT_TAX_KEY, CYCLE_MS,
-  getState, startNewCycle, checkCycleRollover, endCycleAndPayout,
-  castVote, addToPot, getActiveTaxRate, refreshCachedTaxRate,
-  formatCommissionStatus, formatPayoutSummary, rankGangs,
-  callMeeting, acceptMeeting, getMeetingStatus, formatMeetingStatus, getMeetingCooldownRemaining,
+  giftCopper, GIFT_TAX_PCT, GIFT_DAILY_CAP,
+  fromCopper, formatWallet, walletToCopper, parseBet, fmt,
+  initEconomy, getWallet, saveWallet, addCopper, deductCopper, getLeaderboard, claimDaily,
+  getDailyAmount, DAILY_REWARDS,
+  playSlots, spinWheel, WHEEL_SEGMENTS,
+  bjHandValue, dealCard, newBjHand, bjGames,
+  attemptRob, shouldRewardChat,
+  getDebt, addDebt, payDebt, formatDebt,
+  // Notoriety leveling
+  NOTORIETY_TIERS, loadNotoriety, saveNotoriety,
+  getXP, addXP, setXP, setNotorietyTier, resolveNotorietyTier, formatTierList,
+  getNotorietyTier, getNextNotorietyTier, getNotorietyBonus,
+  isEcoBanned, setEcoBan,
 };
