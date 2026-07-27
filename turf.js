@@ -51,6 +51,20 @@ function initTurf(url, key) {
   console.log("🗺️ Turf Wars system initialized");
 }
 
+// ── Gang debuff ──────────────────────────────────────────────────────────────
+// Set by bounties.collectBounty when a big enough bounty gets collected on a
+// GANG LEADER — knocks the gang's turf income down for the debuff's
+// duration. Applied at daily-payout time, same as businesses.js's version.
+const GANG_TURF_DEBUFF_PCT = 0.5; // -50% turf income while debuffed
+const gangTurfDebuffs = new Map(); // gangId -> expiresAt
+function applyGangDebuff(gangId, durationMs) {
+  gangTurfDebuffs.set(gangId, Date.now() + durationMs);
+}
+function isGangDebuffed(gangId) {
+  const exp = gangTurfDebuffs.get(gangId);
+  return !!exp && exp > Date.now();
+}
+
 function getZoneDef(name) {
   return ZONES.find(z => z.name.toLowerCase() === name.toLowerCase()) || null;
 }
@@ -195,7 +209,7 @@ async function runDailyTurfProcessing() {
       continue;
     }
 
-    await gangs.addToGangTreasury(zone.controller_gang_id, zoneDef.income);
+    await gangs.addToGangTreasury(zone.controller_gang_id, isGangDebuffed(zone.controller_gang_id) ? Math.floor(zoneDef.income * (1 - GANG_TURF_DEBUFF_PCT)) : zoneDef.income);
     await supabase.from("turf_zones").update({ last_income_at: new Date().toISOString() }).eq("guild_id", zone.guild_id).eq("name", zone.name);
     paid++;
   }
@@ -220,4 +234,5 @@ module.exports = {
   initTurf, ZONES, ensureZonesSeeded, getZoneDef, getZone, getAllZones,
   claimZone, attackZone, getAttackCooldownRemaining, clearAttackCooldown, runDailyTurfProcessing, formatZoneList,
   ATTACK_COOLDOWN_HOURS, INACTIVITY_RELEASE_DAYS,
+  applyGangDebuff, isGangDebuffed,
 };
