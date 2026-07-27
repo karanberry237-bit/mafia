@@ -228,23 +228,33 @@ async function castVote(userId, taxKey) {
   state.votes[ug.gang.id] = taxKey;
   await saveState(state);
 
-  // If every seated member has now voted (including any Barzini auto-vote),
-  // there's nothing left to wait for — resolve immediately instead of
-  // sitting idle until the timer, a forced vote, or a called meeting.
-  if (Object.keys(state.votes).length >= state.members.length) {
-    const summary = await endCycleAndPayout();
-    return { success: true, gangName: ug.gang.name, taxKey, autoResolved: true, summary };
-  }
-
+  // NOTE: casting a vote no longer auto-resolves the cycle, even once every
+  // seat has voted. With the Barzinis auto-casting their vote the moment a
+  // cycle convenes, "everyone has voted" could become true after a single
+  // real gang leader voted — which used to immediately end the cycle,
+  // re-rank gangs, and reconvene (usually the SAME gangs, with the Barzinis
+  // auto-voting again), so the very next vote would instantly resolve that
+  // new cycle too. That collapsed the whole 3-day cadence into a rapid
+  // end -> reconvene -> end loop. Resolution now only happens via the
+  // 3-day timer, a called meeting reaching majority, or the Don's
+  // force-vote — voting just records your gang's choice.
   return { success: true, gangName: ug.gang.name, taxKey, autoResolved: false };
 }
 
-function formatCommissionStatus(state) {
+async function formatCommissionStatus(state) {
   if (!state) return "🕴️ The Commission hasn't convened yet.";
-  const lines = state.members.map((m, i) => {
+  const lines = [];
+  for (let i = 0; i < state.members.length; i++) {
+    const m = state.members[i];
     const voted = state.votes[m.gangId];
-    return `**#${i + 1}** ${m.gangName}${voted ? ` — voted **${TAX_CHOICES[voted].label}**` : " — hasn't voted yet"}`;
-  });
+    lines.push(`**#${i + 1}** ${m.gangName}${voted ? ` — voted **${TAX_CHOICES[voted].label}**` : " — hasn't voted yet"}`);
+    if (m.gangName !== rivalnpc.BARZINI_NAME) {
+      const gang = await gangs.getGangById(m.gangId);
+      const members = await gangs.getMembers(m.gangId);
+      const rest = members.filter(mem => mem.user_id !== gang?.leader_id);
+      if (rest.length) lines.push(`　└ ${rest.map(mem => `<@${mem.user_id}>`).join(", ")}`);
+    }
+  }
   const activeLabel = (TAX_CHOICES[state.activeTaxKey] || TAX_CHOICES[DEFAULT_TAX_KEY]).label;
   const timeLeft = Math.max(0, state.cycleEndAt - Date.now());
   const daysLeft = (timeLeft / 86400000).toFixed(1);
@@ -256,6 +266,25 @@ function formatCommissionStatus(state) {
     `Cycle ends in **${daysLeft}d**\n\n` +
     (lines.length ? lines.join("\n") : "*No gangs currently qualify for a seat.*")
   );
+}
+
+// ── Dramatic closing line ────────────────────────────────────────────────────
+// A flavor-text sting posted to general right after a cycle's payout summary,
+// separate from the plain numbers — gives the resolution some theater.
+const DRAMATIC_LINES = [
+  "The smoke clears from the back room. Deals were made, promises were broken, and the ledgers have been settled — for now.",
+  "Gavel down. The old arrangement is dead; a new one takes its place before the ink even dries.",
+  "Handshakes all around the table — the kind that mean absolutely nothing until the next envelope changes hands.",
+  "The pot's been split, the grudges noted, and the families go back to watching each other's every move.",
+  "Another sit-down survived without bloodshed. Whether that lasts until the next cycle is anyone's guess.",
+  "The books are closed on this cycle. Somewhere, a gang that came up short is already planning its next move.",
+];
+
+function getDramaticClosingLine(summary) {
+  const line = DRAMATIC_LINES[Math.floor(Math.random() * DRAMATIC_LINES.length)];
+  const topPayout = summary?.payouts?.find(p => !p.forfeited && p.amount > 0);
+  const topLine = topPayout ? `\n**${topPayout.gangName}** walks away the biggest winner this cycle.` : "";
+  return `🥃 *${line}*${topLine}`;
 }
 
 function formatPayoutSummary(summary) {
@@ -291,6 +320,14 @@ async function formatConvenedAnnouncement(state) {
     const gang = await gangs.getGangById(m.gangId);
     const leaderMention = gang?.leader_id ? `<@${gang.leader_id}>` : "*(unknown leader)*";
     lines.push(`**${m.gangName}** — ${leaderMention}`);
+
+    // List the rest of the gang below its leader so the whole crew sees
+    // they've got a seat at the table this cycle, not just the leader.
+    const members = await gangs.getMembers(m.gangId);
+    const rest = members.filter(mem => mem.user_id !== gang?.leader_id);
+    if (rest.length) {
+      lines.push(`　└ ${rest.map(mem => `<@${mem.user_id}>`).join(", ")}`);
+    }
   }
   const daysLeft = Math.max(0, (state.cycleEndAt - Date.now()) / 86400000).toFixed(1);
   return (
@@ -397,6 +434,6 @@ module.exports = {
   initCommission, TAX_CHOICES, DEFAULT_TAX_KEY, CYCLE_MS,
   getState, startNewCycle, checkCycleRollover, endCycleAndPayout,
   castVote, addToPot, getActiveTaxRate, refreshCachedTaxRate,
-  formatCommissionStatus, formatPayoutSummary, formatConvenedAnnouncement, rankGangs,
+  formatCommissionStatus, formatPayoutSummary, formatConvenedAnnouncement, getDramaticClosingLine, rankGangs,
   callMeeting, acceptMeeting, getMeetingStatus, formatMeetingStatus, getMeetingCooldownRemaining,
 };
