@@ -228,6 +228,20 @@ async function announceCommissionResolution(guild, result) {
       title: "🕴️ Commission Convened",
       description: `New seats: ${result.newState.members.map(m => m.gangName).join(", ") || "none"}.`,
     }).catch(() => {});
+
+    // Give leaders 10 minutes to vote, then auto-resolve with whatever was
+    // cast — self-sustaining, since resolving here produces a fresh
+    // newState which re-enters this same branch and schedules its own
+    // 10-minute window in turn. expectedCycleStartAt guards against firing
+    // if this cycle already resolved some other way (full real-gang vote,
+    // meeting, or force-vote) in the meantime.
+    const cycleStartAt = result.newState.cycleStartAt;
+    setTimeout(async () => {
+      try {
+        const summary = await commission.checkVoteWindowExpiry(cycleStartAt);
+        if (summary) await announceCommissionResolution(guild, summary);
+      } catch (e) { console.error("[COMMISSION VOTE WINDOW]", e.message); }
+    }, commission.VOTE_WINDOW_MS);
   }
 }
 const ROB_COOLDOWN_MS = 30 * 60 * 1000;
