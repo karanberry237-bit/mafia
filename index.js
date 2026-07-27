@@ -187,7 +187,6 @@ async function postBountyPosterToAudit(guildId, targetId, bounty) {
       name: targetUser.username,
       subtitle: "DEAD OR ALIVE",
       highlightValue: poster.formatFullAmount(bounty.total_amount),
-      footerText: "Cosa Family",
     });
     const attachment = new AttachmentBuilder(buf, { name: "bounty.png" });
     await channel.send({ files: [attachment] }).catch(() => {});
@@ -9675,8 +9674,7 @@ async function init() {
             name: targetUser.username,
             subtitle: "DEAD OR ALIVE",
             highlightValue: poster.formatFullAmount(balance),
-            footerText: "Cosa Family",
-          });
+                });
           const attachment = new AttachmentBuilder(buf, { name: "wanted.png" });
           await interaction.editReply({ files: [attachment] }).catch(() => {});
         } catch (e) {
@@ -9707,8 +9705,7 @@ async function init() {
             name: targetUser.username,
             subtitle: "DEAD OR ALIVE",
             highlightValue: poster.formatFullAmount(bounty.total_amount),
-            footerText: "Cosa Family",
-          });
+                });
           const attachment = new AttachmentBuilder(buf, { name: "bounty.png" });
           await interaction.editReply({ files: [attachment] }).catch(() => {});
         } catch (e) {
