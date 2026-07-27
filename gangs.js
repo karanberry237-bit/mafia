@@ -240,11 +240,25 @@ async function getAllGangs() {
   return data || [];
 }
 
+// ── Gang flag colors ─────────────────────────────────────────────────────────
+// Every gang gets a colored flag emoji, assigned deterministically from its
+// own id — no new DB column or migration needed, existing gangs get one
+// automatically the moment this is deployed since it's computed on the fly
+// rather than stored. Two gangs can land on the same color if the palette's
+// exhausted, which is an acceptable tradeoff for not needing a schema change.
+const FLAG_PALETTE = ["🟥", "🟧", "🟨", "🟩", "🟦", "🟪", "🟫", "⬛", "⬜"];
+function getGangFlag(gangId) {
+  let hash = 0;
+  const str = String(gangId || "");
+  for (let i = 0; i < str.length; i++) hash = (hash * 31 + str.charCodeAt(i)) | 0;
+  return FLAG_PALETTE[Math.abs(hash) % FLAG_PALETTE.length];
+}
+
 function formatGangCard(gang, members) {
   const leader = members.find(m => m.role === "leader");
   const officers = members.filter(m => m.role === "officer");
   const rank = members.filter(m => m.role === "member");
-  let out = `🕴️ **${gang.name}**\n`;
+  let out = `${getGangFlag(gang.id)} 🕴️ **${gang.name}**\n`;
   out += `💰 Treasury: ${fmt(gang.treasury)} Cash\n`;
   out += `👑 Leader: <@${leader ? leader.user_id : gang.leader_id}>\n`;
   if (officers.length) out += `⭐ Officers: ${officers.map(o => `<@${o.user_id}>`).join(", ")}\n`;
@@ -252,9 +266,25 @@ function formatGangCard(gang, members) {
   return out;
 }
 
+// Ranks every gang by treasury (the plain, guild-independent measure of a
+// gang's strength — turf itself is now per-server, so it's left out of this
+// global ranking and shown separately where relevant, e.g. the Commission).
+async function getGangLeaderboard() {
+  const all = await getAllGangs();
+  return all.sort((a, b) => (b.treasury || 0) - (a.treasury || 0));
+}
+
+function formatGangLeaderboard(list) {
+  if (!list.length) return "🏴 No gangs exist yet.";
+  return list.slice(0, 15).map((g, i) =>
+    `**#${i + 1}** ${getGangFlag(g.id)} **${g.name}** — 💵 ${fmt(g.treasury || 0)} Cash`
+  ).join("\n");
+}
+
 module.exports = {
   initGangs, createGang, disbandGang, getUserGang, getGangById, getGangByName, getMembers,
   inviteMember, acceptInvite, getInvite, deleteInvite, leaveGang, kickMember, promoteMember, transferLeadership,
   addToGangTreasury, deductFromGangTreasury, depositToGang, formatGangCard,
   withdrawFromTreasury, getWithdrawCooldownRemaining, WITHDRAW_COOLDOWN_MS, getAllGangs,
+  getGangFlag, getGangLeaderboard, formatGangLeaderboard,
 };
