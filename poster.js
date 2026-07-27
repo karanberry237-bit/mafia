@@ -20,7 +20,7 @@ try {
 // Geometry below was measured directly from the template file's own pixels
 // (the transparent cutout's exact bounding box, and the ink color sampled
 // from its "WANTED" headline) rather than guessed.
-const TEMPLATE_PATH = path.join(__dirname, "assets", "wanted_template.png");
+const TEMPLATE_PATH = path.join(__dirname, "wanted_template.png");
 const INK = "rgb(83, 63, 36)";
 
 // Fractions of the template's own width/height — these stay correct no
@@ -44,7 +44,7 @@ async function getTemplate() {
     try {
       fileBuffer = fs.readFileSync(TEMPLATE_PATH);
     } catch (e) {
-      throw new Error(`Wanted poster template not found at ${TEMPLATE_PATH} — make sure assets/wanted_template.png was deployed alongside poster.js.`);
+      throw new Error(`Wanted poster template not found at ${TEMPLATE_PATH} — make sure wanted_template.png is deployed alongside poster.js and font.ttf.`);
     }
     cachedTemplate = await loadImage(fileBuffer);
   }
