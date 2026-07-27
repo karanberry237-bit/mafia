@@ -1416,12 +1416,15 @@ const RARITY_LABEL  = {
 // ── Per-item real-time use cooldowns ──────────────────────────────────────────
 // Separate from inventory "uses" — owning 50 copies of an item no longer lets
 // you burn them back-to-back. You can only actually USE one every N ms, no
-// matter how many are sitting in inventory. Currently guards the two items
-// that were previously fully stackable/spammable: Made Pass (noble_pass) and
-// House Favor (house_favor).
+// matter how many are sitting in inventory. Guards the items that were
+// previously fully stackable/spammable: Made Pass (noble_pass), House Favor
+// (house_favor), and Second Wind (second_wind — this one got missed when the
+// other two were fixed, which is exactly how someone was able to chain-claim
+// the daily reward 3x in a row just by owning 3 of them).
 const ITEM_USE_COOLDOWNS = {
-  noble_pass: 5 * 60 * 1000,   // 5 minutes
-  house_favor: 60 * 60 * 1000, // 1 hour
+  noble_pass: 5 * 60 * 1000,        // 5 minutes
+  house_favor: 60 * 60 * 1000,      // 1 hour
+  second_wind: 20 * 60 * 60 * 1000, // 20 hours — matches the daily cooldown itself, so it's truly one bonus claim per day, not per stockpile
 };
 const itemLastUsed = new Map(); // `${userId}:${itemId}` -> timestamp
 
