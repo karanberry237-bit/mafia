@@ -56,15 +56,29 @@ function initCommission(url, key) {
   console.log("🕴️ Commission system initialized");
 }
 
-function freshState(members, carryTaxKey) {
+function freshState(members, carryTaxKey, carryPot = 0) {
   return {
+    dormant: false,
     cycleStartAt: Date.now(),
     cycleEndAt: Date.now() + CYCLE_MS,
     voteDeadline: Date.now() + VOTE_WINDOW_MS, // gang leaders have this long to vote before it auto-resolves
     members,                              // [{ gangId, gangName }], ranked #1 first
     votes: {},                             // gangId -> taxKey
     activeTaxKey: carryTaxKey || DEFAULT_TAX_KEY, // stays in effect until THIS cycle resolves its own vote
-    pot: 0,
+    pot: carryPot || 0,
+  };
+}
+
+// The quiet stretch between cycles — the tax rate is locked in, no seats are
+// held, and nothing convenes again until nextConveneAt. Tax collected here
+// (business income + gambling cuts) still piles into `pot` via addToPot(),
+// carrying forward into whichever gangs actually hold a seat next cycle.
+function dormantState(taxKey, carryPot, nextConveneAt) {
+  return {
+    dormant: true,
+    activeTaxKey: taxKey || DEFAULT_TAX_KEY,
+    pot: carryPot || 0,
+    nextConveneAt,
   };
 }
 
@@ -126,7 +140,7 @@ function applyNpcAutoVotes(state) {
 // already moved on.
 async function checkVoteWindowExpiry(expectedCycleStartAt) {
   const state = await getState();
-  if (!state) return null;
+  if (!state || state.dormant) return null;
   if (state.cycleStartAt !== expectedCycleStartAt) return null; // this cycle already resolved and a new one is in progress
   if (Date.now() < (state.voteDeadline || 0)) return null; // window hasn't closed yet
   return await endCycleAndPayout();
@@ -147,7 +161,7 @@ async function startNewCycle() {
 // there was no active cycle to end.
 async function endCycleAndPayout() {
   const state = await getState();
-  if (!state) return null;
+  if (!state || state.dormant) return null; // nothing active to resolve
   pendingMeeting = null; // any in-flight meeting is moot once the cycle actually resolves
 
   // Resolve vote: majority among CAST votes wins; a tie (or nobody voted)
@@ -166,42 +180,60 @@ async function endCycleAndPayout() {
 
   // Payout — split table matches however many seats were actually filled
   // this cycle. A gang that disbanded mid-cycle (getGangById returns null)
-  // simply forfeits its share.
+  // simply forfeits its share. Seated gangs are listed here even when the
+  // pot is empty (share = 0) — an empty pot isn't the same thing as no
+  // gangs holding a seat, and the summary should say so correctly.
   const payouts = [];
-  if (state.pot > 0) {
-    const ratios = SPLIT_TABLES[state.members.length] || SPLIT_TABLES[MAX_SIZE];
-    for (let i = 0; i < state.members.length && i < ratios.length; i++) {
-      const member = state.members[i];
-      const gang = await gangs.getGangById(member.gangId);
-      if (!gang) { payouts.push({ ...member, amount: 0, forfeited: true }); continue; }
-      const share = Math.floor(state.pot * ratios[i]);
-      if (share > 0) await gangs.addToGangTreasury(member.gangId, share);
-      payouts.push({ ...member, amount: share, forfeited: false });
-    }
+  const ratios = SPLIT_TABLES[state.members.length] || SPLIT_TABLES[MAX_SIZE];
+  for (let i = 0; i < state.members.length && i < ratios.length; i++) {
+    const member = state.members[i];
+    const gang = await gangs.getGangById(member.gangId);
+    if (!gang) { payouts.push({ ...member, amount: 0, forfeited: true }); continue; }
+    const share = state.pot > 0 ? Math.floor(state.pot * ratios[i]) : 0;
+    if (share > 0) await gangs.addToGangTreasury(member.gangId, share);
+    payouts.push({ ...member, amount: share, forfeited: false });
   }
 
   const summary = { previousMembers: state.members, payouts, resolvedTaxKey, pot: state.pot };
 
-  // Start the next cycle immediately, carrying the resolved tax rate forward
-  // as the baseline until this new cycle resolves its own vote.
-  const members = await pickCommissionMembers();
-  const newState = freshState(members, resolvedTaxKey);
-  applyNpcAutoVotes(newState);
-  await saveState(newState);
+  // Go dormant for the rest of the full 3-day cycle — NO new voting session
+  // starts right now, no matter how this one resolved (full real-gang vote,
+  // meeting, force-vote, or the 3-day timer itself). This is the behavior
+  // that was actually broken before: a new cycle used to reconvene
+  // immediately after every resolution, so a fully-voted or forced
+  // resolution looked like it was looping straight back into another vote
+  // instead of the resolved tax rate just holding quietly for the full 3
+  // days. Any tax collected while dormant keeps accumulating in `pot` via
+  // addToPot() and carries forward into the gangs that hold a seat next
+  // cycle. checkCycleRollover is what actually reconvenes things once
+  // nextConveneAt arrives.
+  const next = dormantState(resolvedTaxKey, 0, Date.now() + CYCLE_MS);
+  await saveState(next);
   await refreshCachedTaxRate();
 
-  summary.newState = newState; // lets callers announce the freshly-convened seats too
+  summary.newState = null; // nothing convenes right now — see checkCycleRollover
   return summary;
 }
 
-// Call this periodically (e.g. hourly) — a cheap no-op if the cycle isn't
-// over yet. Returns { previousMembers, payouts, resolvedTaxKey, pot, newState }
-// on a normal rollover, { newState } only on the very first cycle ever
-// (nothing to resolve yet), or null if nothing happened this tick.
+// Call this periodically (e.g. hourly) — a cheap no-op if nothing's due yet.
+// Returns { previousMembers, payouts, resolvedTaxKey, pot, newState: null }
+// when a live cycle's timer just expired (goes dormant — see
+// endCycleAndPayout), { newState } when a dormant period just ended and a
+// fresh cycle convened (or on the very first cycle ever, nothing to resolve
+// yet), or null if nothing happened this tick.
 async function checkCycleRollover() {
   let state = await getState();
   if (!state) {
     const newState = await startNewCycle();
+    return { newState };
+  }
+  if (state.dormant) {
+    if (Date.now() < state.nextConveneAt) return null; // still resting between cycles
+    const members = await pickCommissionMembers();
+    const newState = freshState(members, state.activeTaxKey, state.pot);
+    applyNpcAutoVotes(newState);
+    await saveState(newState);
+    await refreshCachedTaxRate();
     return { newState };
   }
   if (Date.now() < state.cycleEndAt) return null;
@@ -237,6 +269,7 @@ async function castVote(userId, taxKey) {
   if (!TAX_CHOICES[taxKey]) return { success: false, reason: "Invalid tax choice." };
   const state = await getState();
   if (!state) return { success: false, reason: "The Commission hasn't convened yet." };
+  if (state.dormant) return { success: false, reason: `The Commission isn't in session right now — it reconvenes in ${formatCountdown(state.nextConveneAt)}.` };
   const ug = await gangs.getUserGang(userId);
   if (!ug || ug.membership.role !== "leader") return { success: false, reason: "Only a gang leader can vote on Commission policy." };
   const isMember = state.members.some(m => m.gangId === ug.gang.id);
@@ -264,8 +297,25 @@ async function castVote(userId, taxKey) {
   return { success: true, gangName: ug.gang.name, taxKey, autoResolved: false };
 }
 
+function formatCountdown(targetMs) {
+  const ms = Math.max(0, (targetMs || 0) - Date.now());
+  const hrs = Math.floor(ms / 3600000);
+  const mins = Math.floor((ms % 3600000) / 60000);
+  return `${hrs}h ${mins}m`;
+}
+
 async function formatCommissionStatus(state) {
   if (!state) return "🕴️ The Commission hasn't convened yet.";
+  if (state.dormant) {
+    const activeLabel = (TAX_CHOICES[state.activeTaxKey] || TAX_CHOICES[DEFAULT_TAX_KEY]).label;
+    return (
+      `🕴️ **THE COMMISSION**\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `The Commission isn't in session — locked-in tax rate *(business + gambling)*: **${activeLabel}**\n` +
+      `Pot building for next cycle: **💵 ${eco.fmt(state.pot || 0)} Cash**\n` +
+      `Reconvenes in **${formatCountdown(state.nextConveneAt)}**.`
+    );
+  }
   const lines = [];
   for (let i = 0; i < state.members.length; i++) {
     const m = state.members[i];
@@ -400,6 +450,7 @@ async function callMeeting(userId) {
   clearExpiredMeeting();
   const state = await getState();
   if (!state) return { success: false, reason: "The Commission hasn't convened yet." };
+  if (state.dormant) return { success: false, reason: `The Commission isn't in session right now — it reconvenes in ${formatCountdown(state.nextConveneAt)}.` };
   const ug = await gangs.getUserGang(userId);
   if (!ug || ug.membership.role !== "leader") return { success: false, reason: "Only a gang leader can call a Commission meeting." };
   const isMember = state.members.some(m => m.gangId === ug.gang.id);
@@ -434,6 +485,7 @@ async function acceptMeeting(userId) {
   if (!pendingMeeting) return { success: false, reason: "No Commission meeting is currently in session." };
   const state = await getState();
   if (!state) return { success: false, reason: "The Commission hasn't convened yet." };
+  if (state.dormant) return { success: false, reason: `The Commission isn't in session right now — it reconvenes in ${formatCountdown(state.nextConveneAt)}.` };
   const ug = await gangs.getUserGang(userId);
   if (!ug || ug.membership.role !== "leader") return { success: false, reason: "Only a gang leader can respond to a Commission meeting." };
   const isMember = state.members.some(m => m.gangId === ug.gang.id);
