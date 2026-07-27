@@ -7072,7 +7072,8 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const robberDebt = await eco.getDebt(message.author.id);
       const targetBal = eco.walletToCopper(targetW);
       if (targetBal < 100) return "That mark has nothing worth stealing.";
-      const outcome = eco.attemptRob(targetBal, eco.walletToCopper(robberW), robberDebt);
+      const targetMarked = bounties.isMarked(cmd.targetId);
+      const outcome = eco.attemptRob(targetBal, eco.walletToCopper(robberW), robberDebt, targetMarked);
       const targetUser = await client.users.fetch(cmd.targetId).catch(() => null);
       const targetName = targetUser?.username || `<@${cmd.targetId}>`;
       if (outcome.result === "success") {
@@ -7081,11 +7082,17 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         const currentDebt = await eco.getDebt(message.author.id);
         const debtLine = currentDebt > 0 ? "\n🔴 You still owe **💵 " + eco.fmt(currentDebt) + " Cash** in debt." : "";
         const bountyResult = await bounties.collectBounty(cmd.targetId, message.author.id, eco.addCopper).catch(() => ({ collected: 0 }));
-        const bountyLine = bountyResult.collected > 0
-          ? "\n🎯 **BOUNTY COLLECTED!** An extra **💵 " + eco.fmt(bountyResult.collected) + " Cash** for taking them down."
-          : "";
+        let bountyLine = "";
+        if (bountyResult.collected > 0) {
+          bountyLine = "\n🎯 **BOUNTY COLLECTED!** An extra **💵 " + eco.fmt(bountyResult.collected) + " Cash** for taking them down.";
+          if (bountyResult.marked) {
+            bountyLine += `\n🩸 **${targetName}** is now **MARKED** for the next hour — easier to rob.` +
+              (bountyResult.gangDebuffed ? ` Their gang **${bountyResult.gangName}** is also taking a hit on business & turf income while it lasts.` : "");
+          }
+        }
         if (bountyResult.collected > 0) auditlog.logBountyCollected(message.guild?.id, message.author.id, cmd.targetId, bountyResult.collected).catch(() => {});
-        return "🦹 **ROB SUCCESSFUL!**\nYou swiped **💵 " + eco.fmt(outcome.amount) + " Cash** from **" + targetName + "** without them noticing. 😈" + debtLine + bountyLine;
+        const markedLine = targetMarked ? "\n🎯 They were **marked** — easy pickings." : "";
+        return "🦹 **ROB SUCCESSFUL!**\nYou swiped **💵 " + eco.fmt(outcome.amount) + " Cash** from **" + targetName + "** without them noticing. 😈" + debtLine + bountyLine + markedLine;
       } else if (outcome.result === "caught") {
         const robberBal = eco.walletToCopper(await eco.getWallet(message.author.id));
         if (robberBal >= outcome.fine) {
