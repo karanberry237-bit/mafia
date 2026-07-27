@@ -27,6 +27,7 @@ const rivalnpc = require("./rivalnpc");
 // simply forfeited (not redistributed to the remaining members).
 
 const CYCLE_MS = 3 * 24 * 60 * 60 * 1000; // every 3 days
+const VOTE_WINDOW_MS = 10 * 60 * 1000;    // 10 minutes to vote once a cycle convenes
 const TARGET_SIZE = 3;                    // normal Commission size
 const MAX_SIZE = 5;                       // hard cap even if TARGET_SIZE is raised later
 // Payout split by Commission rank, keyed by how many members are actually
@@ -59,6 +60,7 @@ function freshState(members, carryTaxKey) {
   return {
     cycleStartAt: Date.now(),
     cycleEndAt: Date.now() + CYCLE_MS,
+    voteDeadline: Date.now() + VOTE_WINDOW_MS, // gang leaders have this long to vote before it auto-resolves
     members,                              // [{ gangId, gangName }], ranked #1 first
     votes: {},                             // gangId -> taxKey
     activeTaxKey: carryTaxKey || DEFAULT_TAX_KEY, // stays in effect until THIS cycle resolves its own vote
@@ -113,6 +115,21 @@ function applyNpcAutoVotes(state) {
       state.votes[member.gangId] = "high";
     }
   }
+}
+
+// Call this ~10 minutes after a cycle convenes (scheduled per-cycle by the
+// caller, keyed off cycleStartAt). Resolves the cycle with whatever votes
+// were cast in that window — same tally/abstain rules as any other
+// resolution path. Safe to call even if the cycle already resolved some
+// other way (vote completion, meeting, force-vote, or the 3-day timer) —
+// expectedCycleStartAt guards against double-resolving a cycle that's
+// already moved on.
+async function checkVoteWindowExpiry(expectedCycleStartAt) {
+  const state = await getState();
+  if (!state) return null;
+  if (state.cycleStartAt !== expectedCycleStartAt) return null; // this cycle already resolved and a new one is in progress
+  if (Date.now() < (state.voteDeadline || 0)) return null; // window hasn't closed yet
+  return await endCycleAndPayout();
 }
 
 // Starts a brand-new cycle from scratch (first-ever boot, or state got wiped).
@@ -228,16 +245,22 @@ async function castVote(userId, taxKey) {
   state.votes[ug.gang.id] = taxKey;
   await saveState(state);
 
-  // NOTE: casting a vote no longer auto-resolves the cycle, even once every
-  // seat has voted. With the Barzinis auto-casting their vote the moment a
-  // cycle convenes, "everyone has voted" could become true after a single
-  // real gang leader voted — which used to immediately end the cycle,
-  // re-rank gangs, and reconvene (usually the SAME gangs, with the Barzinis
-  // auto-voting again), so the very next vote would instantly resolve that
-  // new cycle too. That collapsed the whole 3-day cadence into a rapid
-  // end -> reconvene -> end loop. Resolution now only happens via the
-  // 3-day timer, a called meeting reaching majority, or the Don's
-  // force-vote — voting just records your gang's choice.
+  // Early-resolve once every REAL (non-Barzini) gang leader has voted — but
+  // only real votes count toward that check. The Barzinis auto-cast their
+  // vote the instant a cycle convenes, so counting their vote toward "has
+  // everyone voted" meant a single real gang's vote could look like full
+  // participation and instantly end + reconvene the cycle, over and over
+  // (the original loop bug). Requiring every REAL seat specifically fixes
+  // that: the Barzinis' seat, if they have one, no longer counts as "already
+  // voted" for this check, so this only fires once actual gang leaders have
+  // all weighed in.
+  const realMemberIds = state.members.filter(m => m.gangName !== rivalnpc.BARZINI_NAME).map(m => m.gangId);
+  const allRealVoted = realMemberIds.length > 0 && realMemberIds.every(id => Object.prototype.hasOwnProperty.call(state.votes, id));
+  if (allRealVoted) {
+    const summary = await endCycleAndPayout();
+    return { success: true, gangName: ug.gang.name, taxKey, autoResolved: true, summary };
+  }
+
   return { success: true, gangName: ug.gang.name, taxKey, autoResolved: false };
 }
 
@@ -334,7 +357,9 @@ async function formatConvenedAnnouncement(state) {
     `🕴️ **THE COMMISSION HAS CONVENED**\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     (lines.length ? lines.join("\n") : "*No gangs currently qualify for a seat.*") +
-    `\n\nDiscuss it out, then vote with **/commission vote** — majority wins. Cycle closes in **${daysLeft}d** ` +
+    `\n\n⏱️ You have **10 minutes** to vote with **/commission vote** — after that, the vote resolves automatically ` +
+    `with whatever's been cast (majority wins; a tie or no votes carries the current rate forward). ` +
+    `Cycle otherwise closes in **${daysLeft}d** ` +
     `(or sooner via **/commission call-meeting**, or the Don's **/commission force-vote**).`
   );
 }
@@ -431,8 +456,8 @@ function formatMeetingStatus() {
 }
 
 module.exports = {
-  initCommission, TAX_CHOICES, DEFAULT_TAX_KEY, CYCLE_MS,
-  getState, startNewCycle, checkCycleRollover, endCycleAndPayout,
+  initCommission, TAX_CHOICES, DEFAULT_TAX_KEY, CYCLE_MS, VOTE_WINDOW_MS,
+  getState, startNewCycle, checkCycleRollover, checkVoteWindowExpiry, endCycleAndPayout,
   castVote, addToPot, getActiveTaxRate, refreshCachedTaxRate,
   formatCommissionStatus, formatPayoutSummary, formatConvenedAnnouncement, getDramaticClosingLine, rankGangs,
   callMeeting, acceptMeeting, getMeetingStatus, formatMeetingStatus, getMeetingCooldownRemaining,
