@@ -119,7 +119,15 @@ function getAttackCooldownRemaining(gangId, guildId, zoneName) {
   return Math.max(0, ATTACK_COOLDOWN_HOURS - elapsedHours);
 }
 
-async function attackZone(userId, guildId, zoneName) {
+// Clears a gang's attack cooldown on one specific zone — used by the Don's
+// "skip cooldown?" button prompt.
+function clearAttackCooldown(gangId, guildId, zoneName) {
+  attackCooldowns.delete(attackCooldownKey(gangId, guildId, zoneName));
+}
+
+// bonusChance: flat addition to success chance, e.g. for a Don-led attack
+// getting a personal edge on top of the normal odds.
+async function attackZone(userId, guildId, zoneName, bonusChance = 0) {
   const zoneDef = getZoneDef(zoneName);
   if (!zoneDef) return { success: false, reason: "Unknown zone." };
 
@@ -133,12 +141,12 @@ async function attackZone(userId, guildId, zoneName) {
   if (zone.controller_gang_id === attackerGang.gang.id) return { success: false, reason: "You already control this zone." };
 
   const remaining = getAttackCooldownRemaining(attackerGang.gang.id, guildId, zone.name);
-  if (remaining > 0) return { success: false, reason: `Still regrouping. Attack again in ${remaining.toFixed(1)}h.` };
+  if (remaining > 0) return { success: false, reason: `Still regrouping. Attack again in ${remaining.toFixed(1)}h.`, cooldownBlocked: true, remaining, gangId: attackerGang.gang.id };
 
   attackCooldowns.set(attackCooldownKey(attackerGang.gang.id, guildId, zone.name), Date.now());
 
   const defenderGang = await gangs.getGangById(zone.controller_gang_id);
-  const successChance = Math.max(0.1, ATTACK_BASE_CHANCE - DEFENDER_EDGE);
+  const successChance = Math.max(0.1, Math.min(0.95, ATTACK_BASE_CHANCE - DEFENDER_EDGE + bonusChance));
   const won = Math.random() < successChance;
 
   if (won) {
@@ -210,6 +218,6 @@ async function formatZoneList(zones) {
 
 module.exports = {
   initTurf, ZONES, ensureZonesSeeded, getZoneDef, getZone, getAllZones,
-  claimZone, attackZone, getAttackCooldownRemaining, runDailyTurfProcessing, formatZoneList,
+  claimZone, attackZone, getAttackCooldownRemaining, clearAttackCooldown, runDailyTurfProcessing, formatZoneList,
   ATTACK_COOLDOWN_HOURS, INACTIVITY_RELEASE_DAYS,
 };
