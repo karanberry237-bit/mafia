@@ -608,7 +608,7 @@ async function executeBankRob(channelId, guild) {
       const deducted = await bank.deductFromBank(rob.targetId, takeAmount).catch(() => 0);
       const cut = deducted > 0 ? Math.floor(deducted / crewIds.length) : 0;
       for (const id of crewIds) {
-        if (cut > 0) await eco.addCopper(id, cut).catch(() => {});
+        if (cut > 0) { await eco.addCopper(id, cut).catch(() => {}); eco.markTainted(id, cut); }
       }
       await channel.send(
         `💰 **VAULT CRACKED!**\n${crewMentions}\nNo alarm to stop them — the crew made off with **${bank.formatCopper(deducted)}** from **${targetName}'s** vault (**${bank.formatCopper(cut)}** each) before they even knew what hit them. 😈`
@@ -690,7 +690,7 @@ async function resolveVaultAlarm(token, channel, defused) {
   const deducted = await bank.deductFromBank(alarm.targetId, alarm.takeAmount).catch(() => 0);
   const cut = deducted > 0 ? Math.floor(deducted / alarm.crewIds.length) : 0;
   for (const id of alarm.crewIds) {
-    if (cut > 0) await eco.addCopper(id, cut).catch(() => {});
+    if (cut > 0) { await eco.addCopper(id, cut).catch(() => {}); eco.markTainted(id, cut); }
   }
   await channel.send(
     `💰 **VAULT CRACKED!**\n${crewMentions}\nNo alarm in time — the crew made off with **${bank.formatCopper(deducted)}** from **${targetName}'s** vault (**${bank.formatCopper(cut)}** each). 😈`
