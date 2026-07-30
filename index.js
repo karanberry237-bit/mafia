@@ -4617,6 +4617,8 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+heist\b/.test(lower) && targetId) return { action: "eco_heist", targetId };
   if (/\bcosa\s+blacklist\s+gambl/.test(lower) && targetId) return { action: "eco_gamble_ban", targetId };
   if (/\bcosa\s+unblacklist\b/.test(lower) && targetId) return { action: "eco_gamble_unban", targetId };
+  if (/\bcosa\s+clear\s+taint\b/.test(lower) && targetId) return { action: "clear_taint", targetId };
+  if (/\bcosa\s+clear\s+wanted\b/.test(lower) && targetId) return { action: "clear_wanted", targetId };
   // ── Notoriety / economy admin (Don only) ──
   if (/\bcosa\s+set\s+xp\b/.test(lower) && targetId) {
     const m = text.replace(/<@!?\d+>/g, "").match(/(\d+)/);
@@ -5201,6 +5203,20 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     gamblingBlacklist.delete(cmd.targetId);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
     return "✅ **" + (tu?.username||cmd.targetId) + "** can gamble again.";
+  }
+  if (action === "clear_taint") {
+    if (userId !== MASTER_ID) return "Don only.";
+    eco.clearTaint(cmd.targetId);
+    const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
+    return "🧼 **" + (tu?.username||cmd.targetId) + "'s** money is clean again — Black/White split cleared, full gambling limits restored.";
+  }
+  if (action === "clear_wanted") {
+    if (userId !== MASTER_ID) return "Don only.";
+    const hadLock = bank.clearWithdrawLock(cmd.targetId);
+    const hadFreeze = bank.clearInterestFreeze(cmd.targetId);
+    const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
+    if (!hadLock && !hadFreeze) return "🕊️ **" + (tu?.username||cmd.targetId) + "** wasn't under any Most Wanted debuffs.";
+    return "🕊️ **" + (tu?.username||cmd.targetId) + "'s** Most Wanted debuffs cleared — withdrawals unlocked, interest unfrozen.";
   }
   if (action === "eco_setxp") {
     if (userId !== MASTER_ID) return "Don only.";
@@ -8041,6 +8057,8 @@ function buildRankHelpText(userId) {
     modLines.push("  Cosa heist @user  ← steal EVERYTHING");
     modLines.push("  Cosa blacklist gamble @user  ← ban from gambling");
     modLines.push("  Cosa unblacklist @user  ← remove gambling ban");
+    modLines.push("  Cosa clear taint @user  ← clear Black/White split, unlock full gambling limit");
+    modLines.push("  Cosa clear wanted @user  ← unlock bank withdrawals + un-freeze interest early");
     modLines.push("  Cosa eco stats  ← economy overview");
     modLines.push("  Cosa eco wipe rich  ← ⚠️ wipe all wallets with 💵 10,000,000+ Cash");
     modLines.push("  Cosa bank wipe all  ← ⚠️ wipe ALL bank balances");
