@@ -555,17 +555,20 @@ function newBjHand() { return [dealCard(), dealCard()]; }
 
 // ── Shakedown (Rob) ────────────────────────────────────────────────────────────
 // 40% success, 30% caught (fine = 50% of attempted take), 30% they got away clean
-// targetMarked (from bounties.isMarked) bumps success chance — a target
+// markedBonus (from bounties.getMarkedBonus) bumps success chance — a target
 // who just had a big bounty collected on them is exposed and easy pickings
-// for the next hour.
-const MARKED_ROB_BONUS = 0.25;
-function attemptRob(targetCopperBalance, robberCopperBalance, robberDebt = 0, targetMarked = false) {
+// for the debuff's duration. Bigger bounties (100M+) mark harder than small
+// ones, so this is a number now, not a flat boolean bump.
+const MARKED_ROB_BONUS = 0.25; // default/minor-tier bonus, kept for reference & back-compat
+function attemptRob(targetCopperBalance, robberCopperBalance, robberDebt = 0, markedBonus = 0) {
   const r = Math.random();
   const steal = Math.floor(targetCopperBalance * (0.2 + Math.random() * 0.2));
   const finePercent = 0.5 + Math.random() * 0.2;
   // In debt to the Family = lower success rate (20% instead of 40%)
   let successThreshold = robberDebt > 0 ? 0.25 : 0.50;
-  if (targetMarked) successThreshold = Math.min(0.9, successThreshold + MARKED_ROB_BONUS);
+  // Accept legacy boolean `true` (old callers) as the default marked bonus.
+  const bonus = markedBonus === true ? MARKED_ROB_BONUS : (Number(markedBonus) || 0);
+  if (bonus > 0) successThreshold = Math.min(0.9, successThreshold + bonus);
   if (r < successThreshold) return { result: "success", amount: steal };
   if (r < 0.7) return { result: "caught", fine: Math.floor(steal * finePercent) };
   return { result: "escaped" };

@@ -32,14 +32,18 @@ function initBusinesses(url, key) {
 // GANG LEADER — knocks payouts down for every member of that gang for the
 // debuff's duration, applied at collection time (not accrual time), so it
 // always actually bites regardless of when the business happened to tick.
-const GANG_BUSINESS_DEBUFF_PCT = 0.5; // -50% collected income while debuffed
-const gangBusinessDebuffs = new Map(); // gangId -> expiresAt
-function applyGangDebuff(gangId, durationMs) {
-  gangBusinessDebuffs.set(gangId, Date.now() + durationMs);
+const GANG_BUSINESS_DEBUFF_PCT = 0.5; // -50% collected income while debuffed (default/minor tier)
+const gangBusinessDebuffs = new Map(); // gangId -> { expiresAt, pct }
+function applyGangDebuff(gangId, durationMs, pct = GANG_BUSINESS_DEBUFF_PCT) {
+  gangBusinessDebuffs.set(gangId, { expiresAt: Date.now() + durationMs, pct });
 }
 function isGangDebuffed(gangId) {
-  const exp = gangBusinessDebuffs.get(gangId);
-  return !!exp && exp > Date.now();
+  const d = gangBusinessDebuffs.get(gangId);
+  return !!d && d.expiresAt > Date.now();
+}
+function getGangDebuffPct(gangId) {
+  const d = gangBusinessDebuffs.get(gangId);
+  return (d && d.expiresAt > Date.now()) ? d.pct : 0;
 }
 
 // ── Business type ladders (5 tiers each) ──────────────────────────────────
@@ -197,7 +201,7 @@ async function collectBusiness(userId, type, addCopper) {
   let debuffed = false;
   const ug = await gangs.getUserGang(userId);
   if (ug && isGangDebuffed(ug.gang.id)) {
-    grossCollected = Math.floor(grossCollected * (1 - GANG_BUSINESS_DEBUFF_PCT));
+    grossCollected = Math.floor(grossCollected * (1 - getGangDebuffPct(ug.gang.id)));
     debuffed = true;
   }
 
@@ -321,5 +325,5 @@ module.exports = {
   buyBusiness, upgradeBusiness, upgradeSecurity, collectBusiness, payUpkeep, sellBusiness,
   getBusiness, getBusinessById, getUserBusinesses, processBusiness, runDailyBusinessProcessing,
   raidBusiness, getRaidCooldownRemaining, formatBusinessCard, getFlavorName, RAID_COOLDOWN_HOURS,
-  applyGangDebuff, isGangDebuffed,
+  applyGangDebuff, isGangDebuffed, getGangDebuffPct,
 };

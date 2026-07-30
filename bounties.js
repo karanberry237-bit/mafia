@@ -4,6 +4,7 @@ const { fmt } = require("./economy");
 const gangs = require("./gangs");
 const businesses = require("./businesses");
 const turf = require("./turf");
+const bank = require("./bank");
 
 // ── Bounties ───────────────────────────────────────────────────────────────
 // Place a price on someone's head. Whoever successfully robs that target
@@ -20,28 +21,67 @@ const BOUNTY_POST_FEE_PCT = 0.05; // 5% non-refundable posting fee
 
 // ── Bounty debuffs ───────────────────────────────────────────────────────────
 // Getting successfully collected on isn't just a Cash loss anymore — it's a
-// full hour of being a marked target. Only kicks in once the bounty that got
-// collected was actually worth something (small bounties stay Cash-only).
-const MIN_BOUNTY_FOR_DEBUFF = 10_000_000; // 10m minimum pooled bounty to trigger the debuffs
-const DEBUFF_DURATION_MS = 60 * 60 * 1000; // 1 hour
+// stretch of being a marked target. Only kicks in once the bounty that got
+// collected was actually worth something (small bounties stay Cash-only),
+// and it scales in two tiers: a "Marked" tier for solid bounties, and a much
+// nastier "Most Wanted" tier once the pooled bounty crosses 100M.
+const MIN_BOUNTY_FOR_DEBUFF = 10_000_000;    // 10m minimum pooled bounty to trigger the debuffs at all
+const MAJOR_BOUNTY_THRESHOLD = 100_000_000;  // 100m+ pooled bounty triggers the harsh "Most Wanted" tier
+const DEBUFF_DURATION_MS = 60 * 60 * 1000;         // 1 hour — minor tier
+const MAJOR_DEBUFF_DURATION_MS = 3 * 60 * 60 * 1000; // 3 hours — major tier
+const WITHDRAWAL_LOCK_MS = 6 * 60 * 60 * 1000;       // 6 hours — major tier bank/gang vault lockout
+
+const DEBUFF_TIERS = {
+  minor: {
+    label: "🎯 Marked",
+    durationMs: DEBUFF_DURATION_MS,
+    robBonus: 0.25,        // matches economy.MARKED_ROB_BONUS
+    gangPct: 0.5,           // -50% gang business/turf income
+    leaderOnly: true,       // only drags the gang down if the target IS the leader
+    bankFreeze: false,
+  },
+  major: {
+    label: "🚨 MOST WANTED",
+    durationMs: MAJOR_DEBUFF_DURATION_MS,
+    robBonus: 0.45,         // way easier to rob for 3 hours
+    gangPct: 0.75,          // -75% gang business/turf income
+    leaderOnly: false,      // even a regular member getting hit for 100M+ tanks the whole crew
+    bankFreeze: true,        // target's bank vault earns zero interest for the duration
+    withdrawLockMs: WITHDRAWAL_LOCK_MS, // target's bank AND their gang's treasury lock for 6h — no withdrawals
+  },
+};
 
 // "Marked" — the target personally becomes an easier rob target for the
-// next hour (see economy.attemptRob's targetMarked param).
-const markedUsers = new Map(); // userId -> expiresAt
-function markUser(userId, durationMs) {
+// debuff's duration (see economy.attemptRob's markedBonus param). Stores the
+// rob-success bonus alongside the expiry so major-tier marks hit harder.
+const markedUsers = new Map(); // userId -> { expiresAt, robBonus }
+function markUser(userId, durationMs, robBonus = DEBUFF_TIERS.minor.robBonus) {
   const expiresAt = Date.now() + durationMs;
-  markedUsers.set(userId, expiresAt);
+  markedUsers.set(userId, { expiresAt, robBonus });
   setTimeout(() => {
-    if (markedUsers.get(userId) === expiresAt) markedUsers.delete(userId);
+    const cur = markedUsers.get(userId);
+    if (cur && cur.expiresAt === expiresAt) markedUsers.delete(userId);
   }, durationMs);
 }
 function isMarked(userId) {
-  const exp = markedUsers.get(userId);
-  return !!exp && exp > Date.now();
+  const m = markedUsers.get(userId);
+  return !!m && m.expiresAt > Date.now();
 }
 function getMarkedRemainingMs(userId) {
-  const exp = markedUsers.get(userId);
-  return exp ? Math.max(0, exp - Date.now()) : 0;
+  const m = markedUsers.get(userId);
+  return m ? Math.max(0, m.expiresAt - Date.now()) : 0;
+}
+function getMarkedBonus(userId) {
+  const m = markedUsers.get(userId);
+  return (m && m.expiresAt > Date.now()) ? m.robBonus : 0;
+}
+
+// Picks the strongest tier the given pooled bounty amount qualifies for,
+// or null if it's below the minimum for any debuff at all.
+function getDebuffTier(bountyAmount) {
+  if (bountyAmount >= MAJOR_BOUNTY_THRESHOLD) return DEBUFF_TIERS.major;
+  if (bountyAmount >= MIN_BOUNTY_FOR_DEBUFF) return DEBUFF_TIERS.minor;
+  return null;
 }
 
 let supabase;
@@ -109,33 +149,72 @@ async function collectBounty(targetId, collectorId, addCopper) {
   await supabase.from("bounties").delete().eq("target_id", targetId);
 
   let marked = false;
+  let major = false;
   let gangDebuffed = false;
   let gangName = null;
+  let bankFrozen = false;
+  let bankWithdrawLocked = false;
+  let gangWithdrawLocked = false;
 
   // Debuffs only trigger once the collected bounty was actually worth
   // something — small bounties stay a pure Cash payout, no downside for
-  // the target beyond losing the pool.
-  if (bounty.total_amount >= MIN_BOUNTY_FOR_DEBUFF) {
-    markUser(targetId, DEBUFF_DURATION_MS);
+  // the target beyond losing the pool. Bounties of 100M+ escalate into the
+  // much harsher "Most Wanted" tier.
+  const tier = getDebuffTier(bounty.total_amount);
+  if (tier) {
+    markUser(targetId, tier.durationMs, tier.robBonus);
     marked = true;
+    major = tier === DEBUFF_TIERS.major;
 
-    // If the target actually LEADS a gang, their whole crew feels it too —
-    // businesses and turf income take a hit for the same hour. A regular
-    // member getting hit doesn't drag the gang down, only the leader does.
+    // Minor tier only drags the gang down if the target IS the leader.
+    // Major tier ("Most Wanted") hits the gang even off a regular member —
+    // a 100M+ bounty landing on anyone in the crew is bad enough news.
     try {
       const ug = await gangs.getUserGang(targetId);
-      if (ug && ug.membership.role === "leader") {
-        businesses.applyGangDebuff(ug.gang.id, DEBUFF_DURATION_MS);
-        turf.applyGangDebuff(ug.gang.id, DEBUFF_DURATION_MS);
+      if (ug && (ug.membership.role === "leader" || !tier.leaderOnly)) {
+        businesses.applyGangDebuff(ug.gang.id, tier.durationMs, tier.gangPct);
+        turf.applyGangDebuff(ug.gang.id, tier.durationMs, tier.gangPct);
         gangDebuffed = true;
         gangName = ug.gang.name;
       }
     } catch (e) {
       console.error("[BOUNTY GANG DEBUFF]", e.message);
     }
+
+    // Major tier only: their bank vault stops earning interest AND locks
+    // out withdrawals entirely for 6 hours — deposits still work, but
+    // nothing comes back out.
+    if (tier.bankFreeze) {
+      try {
+        bank.applyInterestFreeze(targetId, tier.durationMs);
+        bankFrozen = true;
+      } catch (e) {
+        console.error("[BOUNTY BANK FREEZE]", e.message);
+      }
+    }
+    if (tier.withdrawLockMs) {
+      try {
+        bank.applyWithdrawLock(targetId, tier.withdrawLockMs);
+        bankWithdrawLocked = true;
+        // If they're in a gang, the gang's treasury locks too — the whole
+        // crew's Cash is frozen right along with their own.
+        const ugForLock = await gangs.getUserGang(targetId);
+        if (ugForLock) {
+          gangs.applyTreasuryWithdrawLock(ugForLock.gang.id, tier.withdrawLockMs);
+          gangWithdrawLocked = true;
+        }
+      } catch (e) {
+        console.error("[BOUNTY WITHDRAW LOCK]", e.message);
+      }
+    }
   }
 
-  return { collected: bounty.total_amount, placedBy: bounty.placed_by, marked, gangDebuffed, gangName };
+  return {
+    collected: bounty.total_amount, placedBy: bounty.placed_by,
+    marked, major, gangDebuffed, gangName, bankFrozen, bankWithdrawLocked, gangWithdrawLocked,
+    tierLabel: tier ? tier.label : null, durationMs: tier ? tier.durationMs : 0,
+    withdrawLockMs: tier ? (tier.withdrawLockMs || 0) : 0,
+  };
 }
 
 // Refunds expired bounties (call this on a daily tick, mirrors bank.runDailyBankProcessing).
@@ -165,5 +244,7 @@ function formatBountyBoard(bounties) {
 module.exports = {
   initBounties, getBounty, getAllActiveBounties, placeBounty, collectBounty,
   refundExpiredBounties, formatBountyBoard, BOUNTY_EXPIRY_DAYS,
-  isMarked, getMarkedRemainingMs, MIN_BOUNTY_FOR_DEBUFF, DEBUFF_DURATION_MS,
+  isMarked, getMarkedRemainingMs, getMarkedBonus, getDebuffTier,
+  MIN_BOUNTY_FOR_DEBUFF, DEBUFF_DURATION_MS,
+  MAJOR_BOUNTY_THRESHOLD, MAJOR_DEBUFF_DURATION_MS, WITHDRAWAL_LOCK_MS, DEBUFF_TIERS,
 };

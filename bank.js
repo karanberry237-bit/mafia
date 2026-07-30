@@ -31,6 +31,36 @@ function getNextTier(currentTier) {
   return TIER_ORDER[idx + 1];
 }
 
+// ── Bounty debuff: frozen interest ────────────────────────────────────────
+// Set by bounties.collectBounty when a MASSIVE bounty (100M+) gets collected
+// on someone — their vault stops earning interest for the debuff's duration.
+// Fees still apply, so parked Cash actively bleeds instead of just stalling.
+const frozenInterestUsers = new Map(); // userId -> expiresAt
+function applyInterestFreeze(userId, durationMs) {
+  frozenInterestUsers.set(userId, Date.now() + durationMs);
+}
+function isInterestFrozen(userId) {
+  const exp = frozenInterestUsers.get(userId);
+  return !!exp && exp > Date.now();
+}
+
+// ── Bounty debuff: withdrawal lock ────────────────────────────────────────
+// Major-tier ("Most Wanted") bounty collection also freezes the target OUT
+// of their own bank — no withdrawals for the lock duration. Deposits still
+// work (money can go in, just can't come back out).
+const withdrawLockedUsers = new Map(); // userId -> expiresAt
+function applyWithdrawLock(userId, durationMs) {
+  withdrawLockedUsers.set(userId, Date.now() + durationMs);
+}
+function isWithdrawLocked(userId) {
+  const exp = withdrawLockedUsers.get(userId);
+  return !!exp && exp > Date.now();
+}
+function getWithdrawLockRemainingMs(userId) {
+  const exp = withdrawLockedUsers.get(userId);
+  return exp ? Math.max(0, exp - Date.now()) : 0;
+}
+
 // ── Bank Operations ───────────────────────────────────────────────────────────
 async function getBankAccount(userId) {
   const empty = { user_id: userId, balance: 0, vault_tier: "shoebox", last_processed: new Date().toISOString() };
@@ -61,7 +91,7 @@ async function processBank(account, masterId, addToTreasury) {
     return account;
   }
 
-  const interest = Math.floor(balance * tier.interestRate);
+  const interest = isInterestFrozen(account.user_id) ? 0 : Math.floor(balance * tier.interestRate);
   const fee = Math.floor(balance * tier.feeRate);
   const net = interest - fee;
 
@@ -87,6 +117,12 @@ async function deposit(userId, copperAmount) {
 }
 
 async function withdraw(userId, copperAmount) {
+  if (isWithdrawLocked(userId)) {
+    const remaining = getWithdrawLockRemainingMs(userId);
+    const hrs = Math.floor(remaining / 3600000);
+    const mins = Math.floor((remaining % 3600000) / 60000);
+    return { success: false, reason: `🚨 Your vault is frozen — you're **Most Wanted** and can't withdraw for **${hrs}h ${mins}m**.` };
+  }
   const account = await getBankAccount(userId);
   if (copperAmount > account.balance) return { success: false, reason: "Insufficient bank balance." };
   account.balance -= copperAmount;
@@ -228,4 +264,6 @@ module.exports = {
   upgradeTier, getBankBalance, deductFromBank, formatCopper,
   runDailyBankProcessing, wipeAllBanks, VAULT_TIERS, TIER_ORDER, getNextTier, processBank,
   isVaultSkipUsed, markVaultSkipUsed, resetBanksByTier, resetSingleBank,
+  applyInterestFreeze, isInterestFrozen,
+  applyWithdrawLock, isWithdrawLocked, getWithdrawLockRemainingMs,
 };

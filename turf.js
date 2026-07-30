@@ -55,14 +55,18 @@ function initTurf(url, key) {
 // Set by bounties.collectBounty when a big enough bounty gets collected on a
 // GANG LEADER — knocks the gang's turf income down for the debuff's
 // duration. Applied at daily-payout time, same as businesses.js's version.
-const GANG_TURF_DEBUFF_PCT = 0.5; // -50% turf income while debuffed
-const gangTurfDebuffs = new Map(); // gangId -> expiresAt
-function applyGangDebuff(gangId, durationMs) {
-  gangTurfDebuffs.set(gangId, Date.now() + durationMs);
+const GANG_TURF_DEBUFF_PCT = 0.5; // -50% turf income while debuffed (default/minor tier)
+const gangTurfDebuffs = new Map(); // gangId -> { expiresAt, pct }
+function applyGangDebuff(gangId, durationMs, pct = GANG_TURF_DEBUFF_PCT) {
+  gangTurfDebuffs.set(gangId, { expiresAt: Date.now() + durationMs, pct });
 }
 function isGangDebuffed(gangId) {
-  const exp = gangTurfDebuffs.get(gangId);
-  return !!exp && exp > Date.now();
+  const d = gangTurfDebuffs.get(gangId);
+  return !!d && d.expiresAt > Date.now();
+}
+function getGangDebuffPct(gangId) {
+  const d = gangTurfDebuffs.get(gangId);
+  return (d && d.expiresAt > Date.now()) ? d.pct : 0;
 }
 
 function getZoneDef(name) {
@@ -209,7 +213,7 @@ async function runDailyTurfProcessing() {
       continue;
     }
 
-    await gangs.addToGangTreasury(zone.controller_gang_id, isGangDebuffed(zone.controller_gang_id) ? Math.floor(zoneDef.income * (1 - GANG_TURF_DEBUFF_PCT)) : zoneDef.income);
+    await gangs.addToGangTreasury(zone.controller_gang_id, isGangDebuffed(zone.controller_gang_id) ? Math.floor(zoneDef.income * (1 - getGangDebuffPct(zone.controller_gang_id))) : zoneDef.income);
     await supabase.from("turf_zones").update({ last_income_at: new Date().toISOString() }).eq("guild_id", zone.guild_id).eq("name", zone.name);
     paid++;
   }
@@ -234,5 +238,5 @@ module.exports = {
   initTurf, ZONES, ensureZonesSeeded, getZoneDef, getZone, getAllZones,
   claimZone, attackZone, getAttackCooldownRemaining, clearAttackCooldown, runDailyTurfProcessing, formatZoneList,
   ATTACK_COOLDOWN_HOURS, INACTIVITY_RELEASE_DAYS,
-  applyGangDebuff, isGangDebuffed,
+  applyGangDebuff, isGangDebuffed, getGangDebuffPct,
 };

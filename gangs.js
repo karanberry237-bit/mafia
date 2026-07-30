@@ -212,11 +212,35 @@ function getWithdrawCooldownRemaining(gangId) {
   return Math.max(0, WITHDRAW_COOLDOWN_MS - (Date.now() - last));
 }
 
+// ── Bounty debuff: treasury withdrawal lock ─────────────────────────────────
+// Set by bounties.collectBounty on a major-tier ("Most Wanted") collection —
+// locks the WHOLE gang's treasury from withdrawals for the duration, on top
+// of whatever business/turf income debuff already applies.
+const treasuryWithdrawLocks = new Map(); // gangId -> expiresAt
+function applyTreasuryWithdrawLock(gangId, durationMs) {
+  treasuryWithdrawLocks.set(gangId, Date.now() + durationMs);
+}
+function isTreasuryWithdrawLocked(gangId) {
+  const exp = treasuryWithdrawLocks.get(gangId);
+  return !!exp && exp > Date.now();
+}
+function getTreasuryWithdrawLockRemainingMs(gangId) {
+  const exp = treasuryWithdrawLocks.get(gangId);
+  return exp ? Math.max(0, exp - Date.now()) : 0;
+}
+
 async function withdrawFromTreasury(userId, amount, addCopper) {
   const ug = await getUserGang(userId);
   if (!ug) return { success: false, reason: "You're not in a gang." };
   if (ug.membership.role !== "leader") return { success: false, reason: "Only the gang leader can withdraw from the treasury." };
   if (!amount || amount <= 0) return { success: false, reason: "Withdrawal amount must be positive." };
+
+  if (isTreasuryWithdrawLocked(ug.gang.id)) {
+    const remaining = getTreasuryWithdrawLockRemainingMs(ug.gang.id);
+    const hrs = Math.floor(remaining / 3600000);
+    const mins = Math.floor((remaining % 3600000) / 60000);
+    return { success: false, reason: `🚨 The treasury is frozen — someone in the gang is **Most Wanted** and it's locked for **${hrs}h ${mins}m**.` };
+  }
 
   const remaining = getWithdrawCooldownRemaining(ug.gang.id);
   if (remaining > 0) {
@@ -382,6 +406,7 @@ module.exports = {
   inviteMember, acceptInvite, getInvite, deleteInvite, leaveGang, kickMember, promoteMember, transferLeadership,
   addToGangTreasury, deductFromGangTreasury, depositToGang, formatGangCard,
   withdrawFromTreasury, getWithdrawCooldownRemaining, WITHDRAW_COOLDOWN_MS, getAllGangs,
+  applyTreasuryWithdrawLock, isTreasuryWithdrawLocked, getTreasuryWithdrawLockRemainingMs,
   getGangFlag, getGangLeaderboard, formatGangLeaderboard,
   offerBribe, acceptBribe, declineBribe, getBribeOffer,
 };

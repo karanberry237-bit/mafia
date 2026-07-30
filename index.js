@@ -7088,7 +7088,8 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const targetBal = eco.walletToCopper(targetW);
       if (targetBal < 100) return "That mark has nothing worth stealing.";
       const targetMarked = bounties.isMarked(cmd.targetId);
-      const outcome = eco.attemptRob(targetBal, eco.walletToCopper(robberW), robberDebt, targetMarked);
+      const targetMarkedBonus = bounties.getMarkedBonus(cmd.targetId);
+      const outcome = eco.attemptRob(targetBal, eco.walletToCopper(robberW), robberDebt, targetMarkedBonus);
       const targetUser = await client.users.fetch(cmd.targetId).catch(() => null);
       const targetName = targetUser?.username || `<@${cmd.targetId}>`;
       if (outcome.result === "success") {
@@ -7101,8 +7102,15 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
         if (bountyResult.collected > 0) {
           bountyLine = "\n🎯 **BOUNTY COLLECTED!** An extra **💵 " + eco.fmt(bountyResult.collected) + " Cash** for taking them down.";
           if (bountyResult.marked) {
-            bountyLine += `\n🩸 **${targetName}** is now **MARKED** for the next hour — easier to rob.` +
-              (bountyResult.gangDebuffed ? ` Their gang **${bountyResult.gangName}** is also taking a hit on business & turf income while it lasts.` : "");
+            const hrs = Math.round(bountyResult.durationMs / 3600000 * 10) / 10;
+            if (bountyResult.major) {
+              const lockHrs = Math.round(bountyResult.withdrawLockMs / 3600000 * 10) / 10;
+              bountyLine += `\n🚨 **${targetName}** is now **MOST WANTED** for the next ${hrs}h — way easier to rob, their bank vault earns zero interest, and both their personal bank AND gang treasury are **locked from withdrawals for ${lockHrs}h**.` +
+                (bountyResult.gangDebuffed ? ` Their gang **${bountyResult.gangName}** is also bleeding business & turf income the whole time.` : ` If they're in a gang, it's about to feel it too.`);
+            } else {
+              bountyLine += `\n🩸 **${targetName}** is now **MARKED** for the next ${hrs}h — easier to rob.` +
+                (bountyResult.gangDebuffed ? ` Their gang **${bountyResult.gangName}** is also taking a hit on business & turf income while it lasts.` : "");
+            }
           }
         }
         if (bountyResult.collected > 0) auditlog.logBountyCollected(message.guild?.id, message.author.id, cmd.targetId, bountyResult.collected).catch(() => {});
