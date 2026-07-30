@@ -1,3 +1,4 @@
+// build: bank-robbery + vault-alarm v2 — 2026-07-30
 const { createClient } = require("@supabase/supabase-js");
 const eco = require("./economy.js");
 const bank = require("./bank.js");
