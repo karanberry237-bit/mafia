@@ -667,8 +667,23 @@ function getMaxBet(userId, normalMax) {
   return getTaintedAmount(userId) > 0 ? Math.min(normalMax, TAINT_GAMBLE_CAP) : normalMax;
 }
 
+// Splits a person's holdings into "Black Money" (still-tainted, recently
+// received/stolen Cash) and "White Money" (everything else) across however
+// many pots you give it, in order — e.g. wallet first, then bank. Money is
+// fungible so this is a display convention, not literal coin-tracking: the
+// tainted pool just gets drawn down pot by pot.
+function splitBlackWhite(userId, pots) {
+  let remainingTaint = getTaintedAmount(userId);
+  return pots.map(potAmount => {
+    const black = Math.min(remainingTaint, potAmount);
+    remainingTaint -= black;
+    return { black, white: potAmount - black };
+  });
+}
+
 module.exports = {
   markTainted, getTaintedAmount, getScalableBalance, getMaxBet, TAINT_GAMBLE_CAP,
+  splitBlackWhite,
   giftCopper, GIFT_TAX_PCT, GIFT_DAILY_CAP,
   fromCopper, formatWallet, walletToCopper, parseBet, fmt,
   initEconomy, getWallet, saveWallet, addCopper, deductCopper, getLeaderboard, claimDaily,
