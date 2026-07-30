@@ -75,6 +75,9 @@ function getMarkedBonus(userId) {
   const m = markedUsers.get(userId);
   return (m && m.expiresAt > Date.now()) ? m.robBonus : 0;
 }
+function clearMark(userId) {
+  return markedUsers.delete(userId);
+}
 
 // Picks the strongest tier the given pooled bounty amount qualifies for,
 // or null if it's below the minimum for any debuff at all.
@@ -244,7 +247,7 @@ function formatBountyBoard(bounties) {
 module.exports = {
   initBounties, getBounty, getAllActiveBounties, placeBounty, collectBounty,
   refundExpiredBounties, formatBountyBoard, BOUNTY_EXPIRY_DAYS,
-  isMarked, getMarkedRemainingMs, getMarkedBonus, getDebuffTier,
+  isMarked, getMarkedRemainingMs, getMarkedBonus, getDebuffTier, clearMark,
   MIN_BOUNTY_FOR_DEBUFF, DEBUFF_DURATION_MS,
   MAJOR_BOUNTY_THRESHOLD, MAJOR_DEBUFF_DURATION_MS, WITHDRAWAL_LOCK_MS, DEBUFF_TIERS,
 };

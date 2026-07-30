@@ -172,6 +172,17 @@ function addToTreasuryFees(amount, type) {
 const pendingWhiteMoneyGambles = new Map(); // token -> { userId, channelId, gameType, bet, choice, expiresAt }
 const WHITE_MONEY_OFFER_WINDOW_MS = 60000;
 
+// ── Don economic-favor helper ─────────────────────────────────────────────
+// Genuine peasant mode needs to strip every place where the Don's OWN
+// actions skip a real cost, cap, or cooldown (gambling deductions, bet caps,
+// job rank/cooldown bypass, the special no-cooldown daily). This does NOT
+// touch admin permission gates ("Don only" commands) — those are actual
+// moderation power, not an economic favor, and stay untouched regardless of
+// peasant mode.
+function donExempt(userId) {
+  return userId === MASTER_ID && !bank.isDonPeasantMode();
+}
+
 function buildWhiteMoneyOfferRow(token) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`whitebet:${token}`).setLabel("💵 Use White Money Only").setStyle(ButtonStyle.Success)
@@ -216,7 +227,7 @@ async function runGambleGame(userId, gameType, bet, choice) {
     if (houseFavorActive) features.clearHouseFavorArmed(userId);
     let msg = "🎰 **FAMILY SLOTS**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[ " + result.display + " ]\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
     if (result.winnings > 0) {
-      if (userId !== MASTER_ID) await eco.addCopper(userId, result.winnings);
+      if (!donExempt(userId)) await eco.addCopper(userId, result.winnings);
       const charmLine = charmActive ? " 🍀" : "";
       const favorLine = houseFavorActive ? " 🎩" : "";
       msg += result.isJackpot ? "🎉 **JACKPOT! " + result.multiplier + "x** — You won **💵 " + eco.fmt(result.winnings) + " Cash**!" + charmLine + favorLine : "✅ **" + result.multiplier + "x** — You won **💵 " + eco.fmt(result.winnings) + " Cash**!" + charmLine + favorLine;
@@ -233,10 +244,10 @@ async function runGambleGame(userId, gameType, bet, choice) {
     const cfCharmActive = features.hasEffect(userId, "lucky_charm");
     const flip = Math.random() < (cfCharmActive ? 0.60 : 0.5) ? choice : (choice === "heads" ? "tails" : "heads");
     const won = flip === choice;
-    if (won && userId !== MASTER_ID) await eco.addCopper(userId, bet * 2);
+    if (won && !donExempt(userId)) await eco.addCopper(userId, bet * 2);
     const charmLineCF = cfCharmActive ? " 🍀" : "";
     const cfResult = won ? "✅ **WIN!** You doubled your bet — **💵 " + eco.fmt((bet * 2)) + " Cash**!" + charmLineCF : "❌ **LOSS.** You lost **💵 " + eco.fmt(bet) + " Cash**. Better luck next time.";
-    if (!won && userId !== MASTER_ID) {
+    if (!won && !donExempt(userId)) {
       await eco.addCopper(MASTER_ID, bet).catch(() => {});
       addToTreasuryFees(bet, "gambling");
     }
@@ -248,8 +259,8 @@ async function runGambleGame(userId, gameType, bet, choice) {
     let seg = eco.spinWheel(wheelHouseFavorActive, wheelCharmActive);
     if (wheelHouseFavorActive) features.clearHouseFavorArmed(userId);
     const winnings = Math.floor(bet * seg.multiplier);
-    if (winnings > 0 && userId !== MASTER_ID) await eco.addCopper(userId, winnings);
-    if (winnings === 0 && userId !== MASTER_ID) {
+    if (winnings > 0 && !donExempt(userId)) await eco.addCopper(userId, winnings);
+    if (winnings === 0 && !donExempt(userId)) {
       await eco.addCopper(MASTER_ID, bet).catch(() => {});
       addToTreasuryFees(bet, "gambling");
     }
@@ -281,13 +292,13 @@ async function runGambleGame(userId, gameType, bet, choice) {
     const picked = horses[Math.floor(Math.random() * horses.length)];
     const won = picked.name === winner.name;
     const payout = won ? Math.floor(bet * picked.odds) : 0;
-    if (won && userId !== MASTER_ID) await eco.addCopper(userId, payout);
+    if (won && !donExempt(userId)) await eco.addCopper(userId, payout);
     const raceLines = horses.map(h => {
       const isWinner = h.name === winner.name;
       const bar = isWinner ? "🏁".repeat(8) : "▬".repeat(Math.floor(Math.random() * 6) + 2);
       return h.name + ": " + bar + (isWinner ? " 🏆" : "") + " (odds: " + h.odds + "x)";
     }).join("\n");
-    if (!won && userId !== MASTER_ID) {
+    if (!won && !donExempt(userId)) {
       await eco.addCopper(MASTER_ID, bet).catch(() => {});
       addToTreasuryFees(bet, "gambling");
     }
@@ -404,7 +415,7 @@ const spamTimestamps = new Map(); // userId -> [timestamps]
 const spamWarnings = new Map();   // userId -> count
 
 async function checkGambleCooldown(userId) {
-  if (userId === MASTER_ID) return null;
+  if (donExempt(userId)) return null;
   if (gamblingBlacklist.has(userId)) return "⛔ You are blacklisted from gambling by Don Clint.";
   const debt = await eco.getDebt(userId);
   if (debt > 0) return "🔴 You're **in debt** (💵 " + eco.fmt(debt) + " Cash). Pay it off first before gambling. Use **Cosa loan** to borrow or earn via **Cosa daily**.";
@@ -5353,9 +5364,10 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     if (userId !== MASTER_ID) return "Don only.";
     const hadLock = bank.clearWithdrawLock(cmd.targetId);
     const hadFreeze = bank.clearInterestFreeze(cmd.targetId);
+    const hadMark = bounties.clearMark(cmd.targetId);
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
-    if (!hadLock && !hadFreeze) return "🕊️ **" + (tu?.username||cmd.targetId) + "** wasn't under any Most Wanted debuffs.";
-    return "🕊️ **" + (tu?.username||cmd.targetId) + "'s** Most Wanted debuffs cleared — withdrawals unlocked, interest unfrozen.";
+    if (!hadLock && !hadFreeze && !hadMark) return "🕊️ **" + (tu?.username||cmd.targetId) + "** wasn't under any Most Wanted debuffs.";
+    return "🕊️ **" + (tu?.username||cmd.targetId) + "'s** Most Wanted status cleared entirely — Marked/Most Wanted tag removed, withdrawals unlocked, interest unfrozen.";
   }
   if (action === "peasant_mode") {
     if (userId !== MASTER_ID) return "Don only.";
@@ -5663,7 +5675,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       return "🏦 **Withdrew " + bank.formatCopper(copper) + "** from your vault.\nBank balance: **" + bank.formatCopper(result.account.balance) + "**";
     }
     case "bank_upgrade": {
-      if (message.author.id === MASTER_ID) {
+      if (donExempt(message.author.id)) {
         // Don gets free max vault
         const acc = await bank.getBankAccount(MASTER_ID);
         acc.vault_tier = "emperor";
@@ -5725,7 +5737,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       return "🏦 **Withdrew " + bank.formatCopper(bCash2) + "** from your vault.\nBalance: **" + bank.formatCopper(bRes2.account.balance) + "**";
     }
     case "bank_upgrade": {
-      if (message.author.id === MASTER_ID) {
+      if (donExempt(message.author.id)) {
         const bKAcc = await bank.getBankAccount(MASTER_ID);
         bKAcc.vault_tier = "emperor";
         await bank.saveBankAccount(bKAcc);
@@ -6235,7 +6247,7 @@ async function executePublicCommand(message, cmd, channelId) {
     }
     case "turf_attack": {
       if (!cmd.zoneName) return "Which zone? Use **Cosa turf list** to see names.";
-      const isDonAttacking = message.author.id === MASTER_ID;
+      const isDonAttacking = donExempt(message.author.id);
 
       if (isDonAttacking) {
         const attackerGang = await gangs.getUserGang(message.author.id);
@@ -6457,7 +6469,7 @@ async function executePublicCommand(message, cmd, channelId) {
       }
       const lastBotChallenge = chessCooldowns.get(message.author.id) || 0;
       const botCooldownLeft = CHESS_COOLDOWN_MS - (Date.now() - lastBotChallenge);
-      if (botCooldownLeft > 0 && message.author.id !== MASTER_ID) return `Slow down. You can start a new game in **${Math.ceil(botCooldownLeft/1000)}s**.`;
+      if (botCooldownLeft > 0 && !donExempt(message.author.id)) return `Slow down. You can start a new game in **${Math.ceil(botCooldownLeft/1000)}s**.`;
       chessCooldowns.set(message.author.id, Date.now());
       const game = chessModule.createGame(message.author.id, message.author.username, "BOT", `Cosa (${diff.label})`, timeLimit);
       // Timeout handler
@@ -6540,7 +6552,7 @@ ${chessModule.getStatusLine(game)}`, files: [att2] }).catch(() => {});
       // Cooldown check
       const lastChallenge = chessCooldowns.get(message.author.id) || 0;
       const cooldownLeft = CHESS_COOLDOWN_MS - (Date.now() - lastChallenge);
-      if (cooldownLeft > 0 && message.author.id !== MASTER_ID) return `Slow down. You can challenge again in **${Math.ceil(cooldownLeft/1000)}s**.`;
+      if (cooldownLeft > 0 && !donExempt(message.author.id)) return `Slow down. You can challenge again in **${Math.ceil(cooldownLeft/1000)}s**.`;
       chessCooldowns.set(message.author.id, Date.now());
       const opponent = await client.users.fetch(oppId).catch(() => null);
       if (!opponent) return "Can't find that user.";
@@ -6802,7 +6814,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       return "🏦 **Withdrew " + bank.formatCopper(pbC2) + "** from vault.\nBank balance: **" + bank.formatCopper(pbRes2.account.balance) + "**";
     }
     case "bank_upgrade": {
-      if (message.author.id === MASTER_ID) {
+      if (donExempt(message.author.id)) {
         const pbKA = await bank.getBankAccount(MASTER_ID);
         pbKA.vault_tier = "donsvault";
         await bank.saveBankAccount(pbKA);
@@ -6851,7 +6863,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
     }
     case "loan_info": {
       const rk = getFamilyRank(message.author.id) || "streetrat";
-      const d = eco.getDailyAmount(rk === "boss" || message.author.id === MASTER_ID ? "donclint" : rk);
+      const d = eco.getDailyAmount(rk === "boss" || donExempt(message.author.id) ? "donclint" : rk);
       const debt = await eco.getDebt(message.author.id);
       const debtLine = debt > 0 ? "Your current debt to the Family: **💵 " + eco.fmt(debt) + " Cash**\n\n" : "*(You have no debt — loans only available when in debt)*\n\n";
       return "🏦 **FAMILY LOAN TYPES**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + debtLine +
@@ -7031,7 +7043,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
     }
     case "daily": {
       console.log("[DAILY] triggered by", message.author.id);
-      if (message.author.id === MASTER_ID) {
+      if (donExempt(message.author.id)) {
         const donAmt = eco.getDailyAmount("donclint");
         await eco.addCopper(MASTER_ID, donAmt).catch(e => console.error("[DAILY DON]", e.message));
         return `🤵 **The Vig overflows.** 💵 ${eco.fmt(donAmt)} Cash deposited.`;
@@ -7102,7 +7114,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
     case "crime":
     case "scavenge":
     case "smuggle": {
-      const isDon = message.author.id === MASTER_ID;
+      const isDon = donExempt(message.author.id);
       const rankKey = getFamilyRank(message.author.id);
       const rankLevel = isDon ? 9 : (rankKey && RANKS[rankKey] ? RANKS[rankKey].level : 0);
       const fn = { work: jobs.doWork, crime: jobs.doCrime, scavenge: jobs.doScavenge, smuggle: jobs.doSmuggle }[cmd.action];
@@ -7122,7 +7134,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
     case "jobs_help":
       return jobs.JOBS_HELP;
     case "cooldowns": {
-      const isDon = message.author.id === MASTER_ID;
+      const isDon = donExempt(message.author.id);
       const userId = message.author.id;
 
       function fmtMs(ms) {
@@ -7258,7 +7270,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (cmd.targetId === message.author.id) return "You can't rob yourself.";
       // Check if target has rob shield
       if (features.hasEffect(cmd.targetId, "rob_shield")) return `🛡️ <@${cmd.targetId}> has a **Rob Shield** active — your attempt was blocked. 😤`;
-      if (message.author.id !== MASTER_ID) {
+      if (!donExempt(message.author.id)) {
         const lastRob = robCooldowns.get(message.author.id) || 0;
         const robLeft = ROB_COOLDOWN_MS - (Date.now() - lastRob);
         if (robLeft > 0) return "⏰ You need to lay low for **" + Math.ceil(robLeft/60000) + " min** before robbing again.";
@@ -7336,11 +7348,11 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const cooldownMsgSL = await checkGambleCooldown(message.author.id);
       if (cooldownMsgSL) return cooldownMsgSL;
       const MAX_BET = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
-      if (bet > MAX_BET && message.author.id !== MASTER_ID) {
+      if (bet > MAX_BET && !donExempt(message.author.id)) {
         if (await offerWhiteMoneyBypass(message, "slots", bet, null, 100000000)) return null;
         return `Max bet is **💵 ${eco.fmt(MAX_BET)} Cash** per spin.` + (MAX_BET < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : " The house has limits.");
       }
-      if (message.author.id !== MASTER_ID) {
+      if (!donExempt(message.author.id)) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds. Check your balance with **Cosa balance**.";
       }
@@ -7350,7 +7362,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (slotsHouseFavorActive) features.clearHouseFavorArmed(message.author.id);
       let msg = "🎰 **FAMILY SLOTS**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[ " + result.display + " ]\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
       if (result.winnings > 0) {
-        if (message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, result.winnings);
+        if (!donExempt(message.author.id)) await eco.addCopper(message.author.id, result.winnings);
         const charmLine = slotsCharmActive ? " 🍀" : "";
         const favorLine = slotsHouseFavorActive ? " 🎩" : "";
         msg += result.isJackpot ? "🎉 **JACKPOT! " + result.multiplier + "x** — You won **💵 " + eco.fmt(result.winnings) + " Cash**!" + charmLine + favorLine : "✅ **" + result.multiplier + "x** — You won **💵 " + eco.fmt(result.winnings) + " Cash**!" + charmLine + favorLine;
@@ -7370,11 +7382,11 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const cooldownMsgCO = await checkGambleCooldown(message.author.id);
       if (cooldownMsgCO) return cooldownMsgCO;
       const MAX_CF = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
-      if (bet > MAX_CF && message.author.id !== MASTER_ID) {
+      if (bet > MAX_CF && !donExempt(message.author.id)) {
         if (await offerWhiteMoneyBypass(message, "coinflip", bet, cmd.choice, 100000000)) return null;
         return `Max bet is **💵 ${eco.fmt(MAX_CF)} Cash** per flip.` + (MAX_CF < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : "");
       }
-      if (message.author.id !== MASTER_ID) {
+      if (!donExempt(message.author.id)) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds.";
       }
@@ -7382,10 +7394,10 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const cfCharmActive = features.hasEffect(message.author.id, "lucky_charm");
       const flip = Math.random() < (cfCharmActive ? 0.60 : 0.5) ? cmd.choice : (cmd.choice === "heads" ? "tails" : "heads");
       const won = flip === cmd.choice;
-      if (won && message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, bet * 2);
+      if (won && !donExempt(message.author.id)) await eco.addCopper(message.author.id, bet * 2);
       const charmLineCF = cfCharmActive ? " 🍀" : "";
       const cfResult = won ? "✅ **WIN!** You doubled your bet — **💵 " + eco.fmt((bet*2)) + " Cash**!" + charmLineCF : "❌ **LOSS.** You lost **💵 " + eco.fmt(bet) + " Cash**. Better luck next time.";
-      if (!won && message.author.id !== MASTER_ID) {
+      if (!won && !donExempt(message.author.id)) {
         await eco.addCopper(MASTER_ID, bet).catch(()=>{});
         addToTreasuryFees(bet, "gambling");
       }
@@ -7397,11 +7409,11 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const cooldownMsgWH = await checkGambleCooldown(message.author.id);
       if (cooldownMsgWH) return cooldownMsgWH;
       const MAX_WHEEL = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
-      if (bet > MAX_WHEEL && message.author.id !== MASTER_ID) {
+      if (bet > MAX_WHEEL && !donExempt(message.author.id)) {
         if (await offerWhiteMoneyBypass(message, "wheel", bet, null, 100000000)) return null;
         return `Max bet is **💵 ${eco.fmt(MAX_WHEEL)} Cash** per spin.` + (MAX_WHEEL < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : " The Family controls the wheel.");
       }
-      if (message.author.id !== MASTER_ID) {
+      if (!donExempt(message.author.id)) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds.";
       }
@@ -7410,8 +7422,8 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       let seg = eco.spinWheel(wheelHouseFavorActive, wheelCharmActive);
       if (wheelHouseFavorActive) features.clearHouseFavorArmed(message.author.id);
       const winnings = Math.floor(bet * seg.multiplier);
-      if (winnings > 0 && message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, winnings);
-      if (winnings === 0 && message.author.id !== MASTER_ID) {
+      if (winnings > 0 && !donExempt(message.author.id)) await eco.addCopper(message.author.id, winnings);
+      if (winnings === 0 && !donExempt(message.author.id)) {
         await eco.addCopper(MASTER_ID, bet).catch(()=>{});
         addToTreasuryFees(bet, "gambling");
       }
@@ -7434,7 +7446,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (!bet) return "Invalid bet.";
       const cooldownMsgBL = await checkGambleCooldown(message.author.id);
       if (cooldownMsgBL) return cooldownMsgBL;
-      if (message.author.id !== MASTER_ID) {
+      if (!donExempt(message.author.id)) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds.";
       }
@@ -7445,7 +7457,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const bjMsg = "🃏 **BLACKJACK**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYour hand: **" + playerHand.join(" ") + "** (" + pVal + ")\nDealer shows: **" + dealerHand[0] + "** + 🂠\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
       if (pVal === 21) {
         eco.bjGames.delete(message.author.id);
-        if (message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, Math.floor(bet * 2.5));
+        if (!donExempt(message.author.id)) await eco.addCopper(message.author.id, Math.floor(bet * 2.5));
         return bjMsg + "🎉 **BLACKJACK!** You win **💵 " + eco.fmt(Math.floor(bet*2.5)) + " Cash**!";
       }
       return bjMsg + "Say **Cosa hit** to draw or **Cosa stand** to hold.";
@@ -7480,13 +7492,13 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       const bjCharmActive = features.hasEffect(message.author.id, "lucky_charm");
       if (dVal > 21 || pVal > dVal) {
         const bjStandWin = Math.floor(game.bet * 2);
-        if (message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, bjStandWin);
+        if (!donExempt(message.author.id)) await eco.addCopper(message.author.id, bjStandWin);
         result = `✅ **YOU WIN!** +**💵 ${eco.fmt(bjStandWin)} Cash**` + (bjCharmActive ? " 🍀" : "");
       } else if (pVal === dVal) {
-        if (message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, game.bet);
+        if (!donExempt(message.author.id)) await eco.addCopper(message.author.id, game.bet);
         result = `🤝 **PUSH!** Bet returned.`;
       } else {
-        if (message.author.id !== MASTER_ID) {
+        if (!donExempt(message.author.id)) {
           await eco.addCopper(MASTER_ID, game.bet).catch(()=>{});
           addToTreasuryFees(game.bet, "gambling");
         }
@@ -7500,11 +7512,11 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       const cooldownMsgRA = await checkGambleCooldown(message.author.id);
       if (cooldownMsgRA) return cooldownMsgRA;
       const MAX_RACE = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
-      if (bet > MAX_RACE && message.author.id !== MASTER_ID) {
+      if (bet > MAX_RACE && !donExempt(message.author.id)) {
         if (await offerWhiteMoneyBypass(message, "race", bet, null, 100000000)) return null;
         return `Max race bet is **💵 ${eco.fmt(MAX_RACE)} Cash**.` + (MAX_RACE < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : "");
       }
-      if (message.author.id !== MASTER_ID) {
+      if (!donExempt(message.author.id)) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds.";
       }
@@ -7527,13 +7539,13 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       const won = picked.name === winner.name;
       const raceCharmActive = features.hasEffect(message.author.id, "lucky_charm");
       const payout = won ? Math.floor(bet * picked.odds) : 0;
-      if (won && message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, payout);
+      if (won && !donExempt(message.author.id)) await eco.addCopper(message.author.id, payout);
       const raceLines = horses.map(h => {
         const isWinner = h.name === winner.name;
         const bar = isWinner ? "🏁".repeat(8) : "▬".repeat(Math.floor(Math.random()*6)+2);
         return h.name + ": " + bar + (isWinner ? " 🏆" : "") + " (odds: " + h.odds + "x)";
       }).join("\n");
-      if (!won && message.author.id !== MASTER_ID) {
+      if (!won && !donExempt(message.author.id)) {
         await eco.addCopper(MASTER_ID, bet).catch(()=>{});
         addToTreasuryFees(bet, "gambling");
       }
@@ -8221,7 +8233,7 @@ function buildRankHelpText(userId) {
     modLines.push("  Cosa blacklist gamble @user  ← ban from gambling");
     modLines.push("  Cosa unblacklist @user  ← remove gambling ban");
     modLines.push("  Cosa clear taint @user  ← clear Black/White split, unlock full gambling limit");
-    modLines.push("  Cosa clear wanted @user  ← unlock bank withdrawals + un-freeze interest early");
+    modLines.push("  Cosa clear wanted @user  ← clear Marked/Most Wanted tag + unlock withdrawals + un-freeze interest");
     modLines.push("  Cosa eco stats  ← economy overview");
     modLines.push("  Cosa eco wipe rich  ← ⚠️ wipe all wallets with 💵 10,000,000+ Cash");
     modLines.push("  Cosa bank wipe all  ← ⚠️ wipe ALL bank balances");
@@ -9647,7 +9659,7 @@ async function init() {
       }
       if (isMentioned || repliedToBot) await message.reply(reply).catch(()=>{}); else await message.channel.send(reply).catch(()=>{});
       // Notoriety XP for talking to Cosa (self-rate-limited to once per 40s).
-      if (message.author.id !== MASTER_ID) {
+      if (!donExempt(message.author.id)) {
         const _xp = eco.addXP(message.author.id, "chat");
         if (_xp.leveledUp) announceNotoriety(message, _xp);
       }
@@ -9760,7 +9772,7 @@ async function init() {
       const [split] = eco.splitBlackWhite(req.userId, [total]);
       if (split.white < req.bet) { await interaction.channel.send("🔒 Your White Money balance changed — no longer enough to cover that bet."); return; }
 
-      if (req.userId !== MASTER_ID) {
+      if (!donExempt(req.userId)) {
         const deducted = await eco.deductCopper(req.userId, req.bet);
         if (!deducted) { await interaction.channel.send("Insufficient funds.").catch(() => {}); return; }
       }
