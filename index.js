@@ -163,6 +163,142 @@ function addToTreasuryFees(amount, type) {
 }
 // robCooldowns, coinflipCooldowns: per-guild, see guildDataStore below.
 
+// ── White Money gamble bypass ─────────────────────────────────────────────
+// While tainted (Black Money on the books), single-bet size is capped at
+// eco.TAINT_GAMBLE_CAP regardless of source, since balances are fungible.
+// BUT if a person's clean White Money alone covers a bigger bet, we offer a
+// one-tap confirm to gamble using only that clean portion — still bound by
+// the normal 100M ceiling either way.
+const pendingWhiteMoneyGambles = new Map(); // token -> { userId, channelId, gameType, bet, choice, expiresAt }
+const WHITE_MONEY_OFFER_WINDOW_MS = 60000;
+
+function buildWhiteMoneyOfferRow(token) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`whitebet:${token}`).setLabel("💵 Use White Money Only").setStyle(ButtonStyle.Success)
+  );
+}
+
+// Offers the bypass if eligible; returns true if an offer was sent (caller
+// should stop and send nothing else). Returns false if not eligible, so the
+// caller falls through to its normal rejection message.
+async function offerWhiteMoneyBypass(message, gameType, bet, choice, normalMax) {
+  if (bet > normalMax) return false; // still over the hard ceiling even with white money
+  const wallet = await eco.getWallet(message.author.id);
+  const total = eco.walletToCopper(wallet);
+  const [split] = eco.splitBlackWhite(message.author.id, [total]);
+  if (split.white < bet) return false; // white money alone doesn't cover it either
+
+  const token = `${message.author.id}_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+  pendingWhiteMoneyGambles.set(token, {
+    userId: message.author.id, channelId: message.channelId, gameType, bet, choice,
+    expiresAt: Date.now() + WHITE_MONEY_OFFER_WINDOW_MS,
+  });
+  setTimeout(() => pendingWhiteMoneyGambles.delete(token), WHITE_MONEY_OFFER_WINDOW_MS);
+
+  await message.channel.send({
+    content:
+      `🔒 Black Money on your books caps single bets while it's tainted.\n` +
+      `You've got **💵 ${eco.fmt(split.white)} Cash** in clean White Money though — enough to cover this **💵 ${eco.fmt(bet)} Cash** bet.\n\n` +
+      `Gamble using **White Money only**? *(60s to confirm)*`,
+    components: [buildWhiteMoneyOfferRow(token)],
+  }).catch(() => {});
+  return true;
+}
+
+// Runs the actual game logic post-deduction. Shared between the normal
+// under-cap path could use this too, but to minimize regression risk it's
+// currently only called from the White Money confirm-button flow.
+async function runGambleGame(userId, gameType, bet, choice) {
+  if (gameType === "slots") {
+    const charmActive = features.hasEffect(userId, "lucky_charm");
+    const houseFavorActive = features.isHouseFavorArmed(userId);
+    const result = eco.playSlots(bet, charmActive, houseFavorActive);
+    if (houseFavorActive) features.clearHouseFavorArmed(userId);
+    let msg = "🎰 **FAMILY SLOTS**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n[ " + result.display + " ]\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+    if (result.winnings > 0) {
+      if (userId !== MASTER_ID) await eco.addCopper(userId, result.winnings);
+      const charmLine = charmActive ? " 🍀" : "";
+      const favorLine = houseFavorActive ? " 🎩" : "";
+      msg += result.isJackpot ? "🎉 **JACKPOT! " + result.multiplier + "x** — You won **💵 " + eco.fmt(result.winnings) + " Cash**!" + charmLine + favorLine : "✅ **" + result.multiplier + "x** — You won **💵 " + eco.fmt(result.winnings) + " Cash**!" + charmLine + favorLine;
+    } else {
+      msg += "💀 **Nothing.** You lost **💵 " + eco.fmt(bet) + " Cash**. The Family thanks you.";
+      await eco.addCopper(MASTER_ID, bet).catch(() => {});
+      addToTreasuryFees(bet, "gambling");
+      await bank.deposit(MASTER_ID, bet).catch(() => {});
+    }
+    if (houseFavorActive) msg += "\n🎩 **House Favor** protected you from a total wipeout this spin!";
+    return msg;
+  }
+  if (gameType === "coinflip") {
+    const cfCharmActive = features.hasEffect(userId, "lucky_charm");
+    const flip = Math.random() < (cfCharmActive ? 0.60 : 0.5) ? choice : (choice === "heads" ? "tails" : "heads");
+    const won = flip === choice;
+    if (won && userId !== MASTER_ID) await eco.addCopper(userId, bet * 2);
+    const charmLineCF = cfCharmActive ? " 🍀" : "";
+    const cfResult = won ? "✅ **WIN!** You doubled your bet — **💵 " + eco.fmt((bet * 2)) + " Cash**!" + charmLineCF : "❌ **LOSS.** You lost **💵 " + eco.fmt(bet) + " Cash**. Better luck next time.";
+    if (!won && userId !== MASTER_ID) {
+      await eco.addCopper(MASTER_ID, bet).catch(() => {});
+      addToTreasuryFees(bet, "gambling");
+    }
+    return "🟣 **COINFLIP**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou called: **" + choice + "** | Result: **" + flip + "**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + cfResult;
+  }
+  if (gameType === "wheel") {
+    const wheelCharmActive = features.hasEffect(userId, "lucky_charm");
+    const wheelHouseFavorActive = features.isHouseFavorArmed(userId);
+    let seg = eco.spinWheel(wheelHouseFavorActive, wheelCharmActive);
+    if (wheelHouseFavorActive) features.clearHouseFavorArmed(userId);
+    const winnings = Math.floor(bet * seg.multiplier);
+    if (winnings > 0 && userId !== MASTER_ID) await eco.addCopper(userId, winnings);
+    if (winnings === 0 && userId !== MASTER_ID) {
+      await eco.addCopper(MASTER_ID, bet).catch(() => {});
+      addToTreasuryFees(bet, "gambling");
+    }
+    const charmLineWH = wheelCharmActive ? " 🍀" : "";
+    const favorLineWH = wheelHouseFavorActive ? " 🎩" : "";
+    let wheelResult;
+    if (winnings > 0) {
+      wheelResult = "✅ You won **💵 " + eco.fmt(winnings) + " Cash**!" + charmLineWH + favorLineWH;
+    } else if (seg.multiplier === 0.5) {
+      wheelResult = "😬 **0.5x** — You lost half. The Family is merciful today." + charmLineWH + favorLineWH;
+    } else {
+      wheelResult = "💀 **BANKRUPT!** You lost everything. The Family claims your coins.";
+    }
+    if (wheelHouseFavorActive) wheelResult += "\n🎩 **House Favor** protected you from the wipeout segments this spin!";
+    return "🎡 **FAMILY WHEEL**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nThe wheel spins...\n\n🎯 **" + seg.label + "**\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + wheelResult;
+  }
+  if (gameType === "race") {
+    const horses = [
+      { name: "🐴 Shadow Blade",  weight: 40, odds: 2  },
+      { name: "🐴 Iron Fist",     weight: 25, odds: 3  },
+      { name: "🐴 Dark Omen",     weight: 18, odds: 4  },
+      { name: "🐴 Golden Fury",   weight: 10, odds: 7  },
+      { name: "🐴 Exile Runner",  weight: 7,  odds: 10 },
+    ];
+    const totalWeight = horses.reduce((a, h) => a + h.weight, 0);
+    let r = Math.random() * totalWeight;
+    let winner = horses[0];
+    for (const h of horses) { r -= h.weight; if (r <= 0) { winner = h; break; } }
+    const picked = horses[Math.floor(Math.random() * horses.length)];
+    const won = picked.name === winner.name;
+    const payout = won ? Math.floor(bet * picked.odds) : 0;
+    if (won && userId !== MASTER_ID) await eco.addCopper(userId, payout);
+    const raceLines = horses.map(h => {
+      const isWinner = h.name === winner.name;
+      const bar = isWinner ? "🏁".repeat(8) : "▬".repeat(Math.floor(Math.random() * 6) + 2);
+      return h.name + ": " + bar + (isWinner ? " 🏆" : "") + " (odds: " + h.odds + "x)";
+    }).join("\n");
+    if (!won && userId !== MASTER_ID) {
+      await eco.addCopper(MASTER_ID, bet).catch(() => {});
+      addToTreasuryFees(bet, "gambling");
+    }
+    const raceResult = won
+      ? "🏆 **YOUR HORSE WON! " + picked.odds + "x** — **💵 " + eco.fmt(payout) + " Cash**!"
+      : "💀 **" + winner.name + " wins.** Not your horse. Lost **💵 " + eco.fmt(bet) + " Cash**.";
+    return "🏇 **FAMILY RACES**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou bet on: **" + picked.name + "** (" + picked.odds + "x)\n\n" + raceLines + "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + raceResult;
+  }
+  return "Unknown game type.";
+}
+
 // Posts a rendered Bounty Poster image straight into the guild's configured
 // audit log channel — called automatically whenever a bounty is placed.
 // Silently no-ops if there's no audit channel set or the target's Discord
@@ -7186,7 +7322,10 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const cooldownMsgSL = await checkGambleCooldown(message.author.id);
       if (cooldownMsgSL) return cooldownMsgSL;
       const MAX_BET = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
-      if (bet > MAX_BET && message.author.id !== MASTER_ID) return `Max bet is **💵 ${eco.fmt(MAX_BET)} Cash** per spin.` + (MAX_BET < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : " The house has limits.");
+      if (bet > MAX_BET && message.author.id !== MASTER_ID) {
+        if (await offerWhiteMoneyBypass(message, "slots", bet, null, 100000000)) return null;
+        return `Max bet is **💵 ${eco.fmt(MAX_BET)} Cash** per spin.` + (MAX_BET < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : " The house has limits.");
+      }
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds. Check your balance with **Cosa balance**.";
@@ -7217,7 +7356,10 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const cooldownMsgCO = await checkGambleCooldown(message.author.id);
       if (cooldownMsgCO) return cooldownMsgCO;
       const MAX_CF = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
-      if (bet > MAX_CF && message.author.id !== MASTER_ID) return `Max bet is **💵 ${eco.fmt(MAX_CF)} Cash** per flip.` + (MAX_CF < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : "");
+      if (bet > MAX_CF && message.author.id !== MASTER_ID) {
+        if (await offerWhiteMoneyBypass(message, "coinflip", bet, cmd.choice, 100000000)) return null;
+        return `Max bet is **💵 ${eco.fmt(MAX_CF)} Cash** per flip.` + (MAX_CF < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : "");
+      }
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds.";
@@ -7241,7 +7383,10 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const cooldownMsgWH = await checkGambleCooldown(message.author.id);
       if (cooldownMsgWH) return cooldownMsgWH;
       const MAX_WHEEL = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
-      if (bet > MAX_WHEEL && message.author.id !== MASTER_ID) return `Max bet is **💵 ${eco.fmt(MAX_WHEEL)} Cash** per spin.` + (MAX_WHEEL < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : " The Family controls the wheel.");
+      if (bet > MAX_WHEEL && message.author.id !== MASTER_ID) {
+        if (await offerWhiteMoneyBypass(message, "wheel", bet, null, 100000000)) return null;
+        return `Max bet is **💵 ${eco.fmt(MAX_WHEEL)} Cash** per spin.` + (MAX_WHEEL < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : " The Family controls the wheel.");
+      }
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds.";
@@ -7341,7 +7486,10 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       const cooldownMsgRA = await checkGambleCooldown(message.author.id);
       if (cooldownMsgRA) return cooldownMsgRA;
       const MAX_RACE = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
-      if (bet > MAX_RACE && message.author.id !== MASTER_ID) return `Max race bet is **💵 ${eco.fmt(MAX_RACE)} Cash**.` + (MAX_RACE < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : "");
+      if (bet > MAX_RACE && message.author.id !== MASTER_ID) {
+        if (await offerWhiteMoneyBypass(message, "race", bet, null, 100000000)) return null;
+        return `Max race bet is **💵 ${eco.fmt(MAX_RACE)} Cash**.` + (MAX_RACE < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : "");
+      }
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds.";
@@ -7890,6 +8038,7 @@ function buildEcoHelpText() {
     "  Cosa wheel [amt]",
     "  Cosa race [amt]",
     "  Cosa blackjack [amt]  → hit / stand",
+    "  *Black Money caps bets at 5M for 24h — if White Money covers a bigger bet, you'll get a button to confirm using White Money only (still capped at 100M).*",
     "",
     "💸  LOANS",
     "  Cosa loans / normal loan / elite loan / ultra loan",
@@ -9575,6 +9724,31 @@ async function init() {
         return;
       }
       await interaction.reply({ content: `💰 Grabbed it! (${res.grabbedCount} crew member(s) so far)`, ephemeral: true }).catch(() => {});
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("whitebet:")) {
+      const token = interaction.customId.split(":").slice(1).join(":");
+      const req = pendingWhiteMoneyGambles.get(token);
+      if (!req) { await interaction.reply({ content: "⌛ That offer expired.", ephemeral: true }).catch(() => {}); return; }
+      if (interaction.user.id !== req.userId) { await interaction.reply({ content: "This isn't your bet to confirm.", ephemeral: true }).catch(() => {}); return; }
+      pendingWhiteMoneyGambles.delete(token);
+      await interaction.deferUpdate().catch(() => {});
+
+      const cdMsg = await checkGambleCooldown(req.userId);
+      if (cdMsg) { await interaction.channel.send(cdMsg).catch(() => {}); return; }
+
+      const wallet = await eco.getWallet(req.userId);
+      const total = eco.walletToCopper(wallet);
+      const [split] = eco.splitBlackWhite(req.userId, [total]);
+      if (split.white < req.bet) { await interaction.channel.send("🔒 Your White Money balance changed — no longer enough to cover that bet."); return; }
+
+      if (req.userId !== MASTER_ID) {
+        const deducted = await eco.deductCopper(req.userId, req.bet);
+        if (!deducted) { await interaction.channel.send("Insufficient funds.").catch(() => {}); return; }
+      }
+      const resultMsg = await runGambleGame(req.userId, req.gameType, req.bet, req.choice);
+      await interaction.channel.send(`💵 **Using White Money only:**\n${resultMsg}`).catch(() => {});
       return;
     }
 
