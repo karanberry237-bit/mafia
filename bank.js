@@ -25,6 +25,24 @@ const VAULT_TIERS = {
 
 const TIER_ORDER = ["shoebox","deposit","safe","vault","offshore","shell","swiss","cayman","trust","donsvault"];
 
+// ── Bank Robbery — crew difficulty by vault tier ──────────────────────────────
+// min = success chance with the minimum crew (3), max = success chance with a
+// full crew (10). Fancier vaults don't just cap lower — they also refuse to
+// budge much even with a full crew, which is what makes Swiss/Cayman/Trust
+// meaningfully harder than just "worse odds," not just a flat penalty.
+const BANK_ROB_TIER_CHANCE = {
+  shoebox:   { min: 0.50, max: 0.75 },
+  deposit:   { min: 0.45, max: 0.70 },
+  safe:      { min: 0.40, max: 0.65 },
+  vault:     { min: 0.36, max: 0.60 },
+  offshore:  { min: 0.31, max: 0.55 },
+  shell:     { min: 0.26, max: 0.50 },
+  swiss:     { min: 0.21, max: 0.40 },
+  cayman:    { min: 0.17, max: 0.28 },
+  trust:     { min: 0.12, max: 0.20 },
+  donsvault: null, // unrobbable
+};
+
 function getNextTier(currentTier) {
   const idx = TIER_ORDER.indexOf(currentTier);
   if (idx === -1 || idx === TIER_ORDER.length - 1) return null;
@@ -266,4 +284,5 @@ module.exports = {
   isVaultSkipUsed, markVaultSkipUsed, resetBanksByTier, resetSingleBank,
   applyInterestFreeze, isInterestFrozen,
   applyWithdrawLock, isWithdrawLocked, getWithdrawLockRemainingMs,
+  BANK_ROB_TIER_CHANCE,
 };
