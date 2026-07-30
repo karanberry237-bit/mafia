@@ -1817,6 +1817,37 @@ async function loadInventories() {
   } catch (e) { console.error("[LOAD INV]", e.message); }
 }
 
+// Strips rob_shield from EVERY player's inventory — in-memory AND in Supabase —
+// so nobody's active/stored Snitch Insurance survives. Used by the Don-only
+// "cosa reset rob shields" command. Returns how many players were affected.
+async function resetAllRobShields() {
+  let affected = 0;
+  // In-memory first — covers anyone already loaded/cached on this running bot.
+  for (const [userId, inv] of userInventories) {
+    if (inv && inv.rob_shield) {
+      delete inv.rob_shield;
+      affected++;
+      await saveInventory(userId, inv);
+    }
+  }
+  // Also sweep Supabase directly in case a row exists that hasn't been loaded
+  // into memory yet (e.g. a player who hasn't interacted since last restart).
+  try {
+    const { data } = await supabase.from("inventories").select("*");
+    for (const row of data || []) {
+      if (userInventories.has(row.user_id)) continue; // already handled above
+      let inv;
+      try { inv = JSON.parse(row.inventory); } catch { continue; }
+      if (!inv.rob_shield) continue;
+      delete inv.rob_shield;
+      affected++;
+      userInventories.set(row.user_id, inv);
+      await saveInventory(row.user_id, inv);
+    }
+  } catch (e) { console.error("[RESET ROB SHIELDS]", e.message); }
+  return affected;
+}
+
 // ── Granting items (no charge) ────────────────────────────────────────────────
 // Drops an item straight into a player's inventory — used by quest rewards.
 // Mirrors buyShopItem's inventory bookkeeping (uses vs. timed duration) but skips
@@ -1887,7 +1918,7 @@ module.exports = {
   // Shop
   SHOP_ITEMS, buyShopItem, useShopItem, hasEffect, consumeItem,
   getActiveEffectsSummary,
-  getShopDisplay, getInventoryDisplay, loadInventories,
+  getShopDisplay, getInventoryDisplay, loadInventories, resetAllRobShields,
   grantItem, grantRandomQuestItem, RARITY_LABEL,
   getItemCooldownRemaining, resetInventory, isHouseFavorArmed, clearHouseFavorArmed,
 };
