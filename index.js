@@ -5461,10 +5461,15 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       const tier = bank.VAULT_TIERS[acc.vault_tier] || bank.VAULT_TIERS.basic;
       const nextTierKey = bank.getNextTier(acc.vault_tier);
       const nextTier = nextTierKey ? bank.VAULT_TIERS[nextTierKey] : null;
+      const [bankSplit] = eco.splitBlackWhite(message.author.id, [acc.balance]);
+      const bankColorLine = bankSplit.black > 0
+        ? "⚫ Black: **" + bank.formatCopper(bankSplit.black) + "** | ⚪ White: **" + bank.formatCopper(bankSplit.white) + "**\n"
+        : "";
       return (
         "🏦 **YOUR BANK** — " + tier.label + "\n" +
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
         "💰 Balance: **" + bank.formatCopper(acc.balance) + "**\n" +
+        bankColorLine +
         "📦 Capacity: **" + bank.formatCopper(tier.maxStorage) + "**\n" +
         "📈 Daily interest: **" + (tier.interestRate * 100).toFixed(1) + "%**\n" +
         "💸 Daily fee: **" + (tier.feeRate * 100).toFixed(1) + "%** → goes to the Vig\n" +
@@ -5533,7 +5538,9 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
       const bTier = bank.VAULT_TIERS[bAcc2.vault_tier] || bank.VAULT_TIERS.basic;
       const bNextKey = bank.getNextTier(bAcc2.vault_tier);
       const bNext = bNextKey ? bank.VAULT_TIERS[bNextKey] : null;
-      return "🏦 **YOUR BANK** — " + bTier.label + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💰 Balance: **" + bank.formatCopper(bAcc2.balance) + "**\n📦 Capacity: **" + bank.formatCopper(bTier.maxStorage) + "**\n📈 Interest: **+" + (bTier.interestRate*100).toFixed(1) + "%**/day\n💸 Fee: **-" + (bTier.feeRate*100).toFixed(1) + "%**/day → the Vig\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + (bNext ? "⬆️ Upgrade to **" + bNext.label + "** for **" + bank.formatCopper(bNext.cost) + "** → Cosa bank upgrade" : "🤵 Max vault reached!");
+      const [bSplit2] = eco.splitBlackWhite(message.author.id, [bAcc2.balance]);
+      const bColorLine2 = bSplit2.black > 0 ? "⚫ Black: **" + bank.formatCopper(bSplit2.black) + "** | ⚪ White: **" + bank.formatCopper(bSplit2.white) + "**\n" : "";
+      return "🏦 **YOUR BANK** — " + bTier.label + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💰 Balance: **" + bank.formatCopper(bAcc2.balance) + "**\n" + bColorLine2 + "📦 Capacity: **" + bank.formatCopper(bTier.maxStorage) + "**\n📈 Interest: **+" + (bTier.interestRate*100).toFixed(1) + "%**/day\n💸 Fee: **-" + (bTier.feeRate*100).toFixed(1) + "%**/day → the Vig\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + (bNext ? "⬆️ Upgrade to **" + bNext.label + "** for **" + bank.formatCopper(bNext.cost) + "** → Cosa bank upgrade" : "🤵 Max vault reached!");
     }
     case "bank_deposit": {
       const bCash = eco.parseBet(cmd.amount, cmd.tier);
@@ -6599,7 +6606,9 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const pbNextKey = bank.getNextTier(pbAcc2.vault_tier);
       const pbNextTier = pbNextKey ? bank.VAULT_TIERS[pbNextKey] : null;
       const isDonBank = message.author.id === MASTER_ID;
-      let bankMsg = "🏦 **YOUR BANK** — " + pbTier.label + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💰 Balance: **" + bank.formatCopper(pbAcc2.balance) + "**\n📦 Capacity: **" + (pbTier.maxStorage === Number.MAX_SAFE_INTEGER ? "∞ Unlimited" : bank.formatCopper(pbTier.maxStorage)) + "**\n📈 Interest: **+" + (pbTier.interestRate*100).toFixed(1) + "%**/day | 💸 Fee: **-" + (pbTier.feeRate*100).toFixed(1) + "%**/day\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 **Cosa bank deposit [amount]** → store cash\n💡 **Cosa bank withdraw [amount]** → take cash out\n💡 **Cosa bank tiers** → see all vault options\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + (pbNextTier ? "⬆️ Next: **" + pbNextTier.label + "** — costs **" + bank.formatCopper(pbNextTier.cost) + "** → Cosa bank upgrade" : "🤵 Maximum vault reached!");
+      const [pbSplit] = eco.splitBlackWhite(message.author.id, [pbAcc2.balance]);
+      const pbColorLine = pbSplit.black > 0 ? "⚫ Black: **" + bank.formatCopper(pbSplit.black) + "** | ⚪ White: **" + bank.formatCopper(pbSplit.white) + "**\n" : "";
+      let bankMsg = "🏦 **YOUR BANK** — " + pbTier.label + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💰 Balance: **" + bank.formatCopper(pbAcc2.balance) + "**\n" + pbColorLine + "📦 Capacity: **" + (pbTier.maxStorage === Number.MAX_SAFE_INTEGER ? "∞ Unlimited" : bank.formatCopper(pbTier.maxStorage)) + "**\n📈 Interest: **+" + (pbTier.interestRate*100).toFixed(1) + "%**/day | 💸 Fee: **-" + (pbTier.feeRate*100).toFixed(1) + "%**/day\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 **Cosa bank deposit [amount]** → store cash\n💡 **Cosa bank withdraw [amount]** → take cash out\n💡 **Cosa bank tiers** → see all vault options\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + (pbNextTier ? "⬆️ Next: **" + pbNextTier.label + "** — costs **" + bank.formatCopper(pbNextTier.cost) + "** → Cosa bank upgrade" : "🤵 Maximum vault reached!");
       if (isDonBank) {
         bankMsg += "\n\n🤵 **THE VIG INCOME**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
           "💸 Bank fees collected: **" + bank.formatCopper(treasuryStats.bankFees) + "**\n" +
@@ -6848,7 +6857,12 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
           (isSelf ? "\n💡 Pay it off with **Cosa pay debt [amount]** (partial payments allowed).\n⚠️ **Miss the deadline and you're auto-blacklisted from gambling + Don Clint gets notified.**" : "")
         : "";
       const flexLine = total >= 1000000 ? "\n*That's **" + shortForm(total) + " Cash** in raw value. The whole neighborhood bows.* 🪙" : "";
-      return "💰 **" + walletName + " Wallet**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + eco.formatWallet(w) + debtLine + loanLine + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Total: " + eco.fmt(total) + " Cash*" + flexLine + debtReminderSuffix;
+      const [walletSplit] = eco.splitBlackWhite(cmd.targetId, [total]);
+      const colorLine = walletSplit.black > 0
+        ? "\n⚫ **Black Money:** " + eco.fmt(walletSplit.black) + " Cash *(recently stolen/transferred — capped gambling)*" +
+          "\n⚪ **White Money:** " + eco.fmt(walletSplit.white) + " Cash"
+        : "";
+      return "💰 **" + walletName + " Wallet**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + eco.formatWallet(w) + colorLine + debtLine + loanLine + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Total: " + eco.fmt(total) + " Cash*" + flexLine + debtReminderSuffix;
     }
     case "daily": {
       console.log("[DAILY] triggered by", message.author.id);
@@ -7098,6 +7112,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (outcome.result === "success") {
         await eco.deductCopper(cmd.targetId, outcome.amount);
         await eco.addCopper(message.author.id, outcome.amount);
+        eco.markTainted(message.author.id, outcome.amount);
         const currentDebt = await eco.getDebt(message.author.id);
         const debtLine = currentDebt > 0 ? "\n🔴 You still owe **💵 " + eco.fmt(currentDebt) + " Cash** in debt." : "";
         const bountyResult = await bounties.collectBounty(cmd.targetId, message.author.id, eco.addCopper).catch(() => ({ collected: 0 }));
