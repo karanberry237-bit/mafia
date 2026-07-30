@@ -615,7 +615,7 @@ async function executeBankRob(channelId, guild) {
       ).catch(() => {});
     }
   } else {
-    // ── FAILURE — everyone eats their own fine ──
+    // ── FAILURE — everyone eats their own fine, shortfall becomes debt ──
     const finePct = BANK_ROB_FINE_MIN_PCT + Math.random() * (BANK_ROB_FINE_MAX_PCT - BANK_ROB_FINE_MIN_PCT);
     const finePerPerson = Math.max(1, Math.floor(targetAccount.balance * finePct));
     let totalToVictim = 0;
@@ -626,7 +626,11 @@ async function executeBankRob(channelId, guild) {
       const bal = eco.walletToCopper(wallet);
       const paid = Math.min(bal, finePerPerson);
       if (paid > 0) await eco.deductCopper(id, paid).catch(() => {});
-      if (paid < finePerPerson) brokeCrew.push(id);
+      const shortfall = finePerPerson - paid;
+      if (shortfall > 0) {
+        await eco.addDebt(id, shortfall).catch(() => {});
+        brokeCrew.push(id);
+      }
       const half = Math.floor(paid / 2);
       totalToVictim += half;
       totalToVig += paid - half;
@@ -634,7 +638,7 @@ async function executeBankRob(channelId, guild) {
     if (totalToVictim > 0) await eco.addCopper(rob.targetId, totalToVictim).catch(() => {});
     if (totalToVig > 0) await eco.addCopper(MASTER_ID, totalToVig).catch(() => {});
 
-    const brokeLine = brokeCrew.length > 0 ? `\n💸 ${brokeCrew.map(id => `<@${id}>`).join(", ")} couldn't cover the full fine and paid what they had.` : "";
+    const brokeLine = brokeCrew.length > 0 ? `\n💸 ${brokeCrew.map(id => `<@${id}>`).join(", ")} couldn't cover the full fine — balance wiped and the rest went to **debt**. Use **Cosa pay debt [amount]**.` : "";
     await channel.send(
       `🚔 **BUSTED!**\n${crewMentions}\nThe crew got made trying to crack **${targetName}'s** vault. Each member ate a fine of **${bank.formatCopper(finePerPerson)}** — half to **${targetName}**, half to the Don as protection money.${brokeLine}`
     ).catch(() => {});
