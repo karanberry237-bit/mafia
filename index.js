@@ -4755,6 +4755,9 @@ function detectMasterCommand(text, message, explicitTrigger) {
   if (/\bcosa\s+unblacklist\b/.test(lower) && targetId) return { action: "eco_gamble_unban", targetId };
   if (/\bcosa\s+clear\s+taint\b/.test(lower) && targetId) return { action: "clear_taint", targetId };
   if (/\bcosa\s+clear\s+wanted\b/.test(lower) && targetId) return { action: "clear_wanted", targetId };
+  if (/\bcosa\s+peasant\s+mode\s+on\b/.test(lower)) return { action: "peasant_mode", state: "on" };
+  if (/\bcosa\s+peasant\s+mode\s+off\b/.test(lower)) return { action: "peasant_mode", state: "off" };
+  if (/\bcosa\s+peasant\s+mode\b/.test(lower)) return { action: "peasant_mode", state: "toggle" };
   // ── Notoriety / economy admin (Don only) ──
   if (/\bcosa\s+set\s+xp\b/.test(lower) && targetId) {
     const m = text.replace(/<@!?\d+>/g, "").match(/(\d+)/);
@@ -5353,6 +5356,16 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
     const tu = await client.users.fetch(cmd.targetId).catch(()=>null);
     if (!hadLock && !hadFreeze) return "🕊️ **" + (tu?.username||cmd.targetId) + "** wasn't under any Most Wanted debuffs.";
     return "🕊️ **" + (tu?.username||cmd.targetId) + "'s** Most Wanted debuffs cleared — withdrawals unlocked, interest unfrozen.";
+  }
+  if (action === "peasant_mode") {
+    if (userId !== MASTER_ID) return "Don only.";
+    let newState;
+    if (cmd.state === "on") newState = bank.setDonPeasantMode(true);
+    else if (cmd.state === "off") newState = bank.setDonPeasantMode(false);
+    else newState = bank.setDonPeasantMode(!bank.isDonPeasantMode());
+    return newState
+      ? "🎭 **Peasant Mode: ON.** You can now be robbed and your bank can be hit like anyone else's. *(Between us — the odds are still quietly in your favor.)* Say **Cosa peasant mode off** to end it."
+      : "🤵 **Peasant Mode: OFF.** Back to untouchable.";
   }
   if (action === "eco_setxp") {
     if (userId !== MASTER_ID) return "Don only.";
@@ -7241,7 +7254,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       return `💸 You sent **${eco.fmt(copperAmt)} Cash** to **${targetUser?.username || `<@${cmd.targetId}>`}**.`;
     }
     case "rob": {
-      if (cmd.targetId === MASTER_ID) return "🤵 You dare rob Don Clint? The audacity. Watch yourself!";
+      if (cmd.targetId === MASTER_ID && !bank.isDonPeasantMode()) return "🤵 You dare rob Don Clint? The audacity. Watch yourself!";
       if (cmd.targetId === message.author.id) return "You can't rob yourself.";
       // Check if target has rob shield
       if (features.hasEffect(cmd.targetId, "rob_shield")) return `🛡️ <@${cmd.targetId}> has a **Rob Shield** active — your attempt was blocked. 😤`;
@@ -7258,7 +7271,8 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (targetBal < 100) return "That mark has nothing worth stealing.";
       const targetMarked = bounties.isMarked(cmd.targetId);
       const targetMarkedBonus = bounties.getMarkedBonus(cmd.targetId);
-      const outcome = eco.attemptRob(targetBal, eco.walletToCopper(robberW), robberDebt, targetMarkedBonus);
+      const isRiggedDonRob = cmd.targetId === MASTER_ID && bank.isDonPeasantMode();
+      const outcome = eco.attemptRob(targetBal, eco.walletToCopper(robberW), robberDebt, targetMarkedBonus, isRiggedDonRob ? bank.PEASANT_MODE_RIGGED_SUCCESS : null);
       const targetUser = await client.users.fetch(cmd.targetId).catch(() => null);
       const targetName = targetUser?.username || `<@${cmd.targetId}>`;
       if (outcome.result === "success") {
@@ -7310,7 +7324,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       }
     }
     case "rob_bank": {
-      if (cmd.targetId === MASTER_ID) return "🤵 You dare go after Don Clint's vault? Suicidal.";
+      if (cmd.targetId === MASTER_ID && !bank.isDonPeasantMode()) return "🤵 You dare go after Don Clint's vault? Suicidal.";
       if (cmd.targetId === message.author.id) return "You can't rob your own bank.";
       if (!message.guild) return "Bank robberies need a crew — try this in a server channel, not DMs.";
       const bResult = await features.startBankRob(message.channel, message.author.id, cmd.targetId);
@@ -8517,6 +8531,9 @@ const LOYALTY_HELP_TEXT =
   `\`cosa loyalty off\` — deactivate\n` +
   `\`cosa reset\` — clear any stuck pending confirmation\n` +
   `*(auto-deactivates after 10 minutes of inactivity)*\n\n` +
+  `**Peasant Mode**\n` +
+  `\`cosa peasant mode\` — toggle; \`cosa peasant mode on\` / \`off\` also work\n` +
+  `While ON, you can be robbed and your bank vault can be hit like anyone else's — the block that normally protects you drops entirely. Quietly, the odds still favor you (~10% real success rate for whoever tries), so it looks legit without actually costing you much.\n\n` +
   `**Related mode**\n` +
   `\`cosa enable jarvis\` — separate toggle, swaps Cosa's whole persona to Jarvis and enables the same natural-language commands. \`cosa disable jarvis\` to end it.\n\n` +
   `**🗣️ Just talk to me**\n` +

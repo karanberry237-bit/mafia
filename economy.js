@@ -560,7 +560,7 @@ function newBjHand() { return [dealCard(), dealCard()]; }
 // for the debuff's duration. Bigger bounties (100M+) mark harder than small
 // ones, so this is a number now, not a flat boolean bump.
 const MARKED_ROB_BONUS = 0.25; // default/minor-tier bonus, kept for reference & back-compat
-function attemptRob(targetCopperBalance, robberCopperBalance, robberDebt = 0, markedBonus = 0) {
+function attemptRob(targetCopperBalance, robberCopperBalance, robberDebt = 0, markedBonus = 0, forcedThreshold = null) {
   const r = Math.random();
   const steal = Math.floor(targetCopperBalance * (0.2 + Math.random() * 0.2));
   const finePercent = 0.5 + Math.random() * 0.2;
@@ -569,6 +569,7 @@ function attemptRob(targetCopperBalance, robberCopperBalance, robberDebt = 0, ma
   // Accept legacy boolean `true` (old callers) as the default marked bonus.
   const bonus = markedBonus === true ? MARKED_ROB_BONUS : (Number(markedBonus) || 0);
   if (bonus > 0) successThreshold = Math.min(0.9, successThreshold + bonus);
+  if (forcedThreshold !== null) successThreshold = forcedThreshold;
   if (r < successThreshold) return { result: "success", amount: steal };
   if (r < 0.7) return { result: "caught", fine: Math.floor(steal * finePercent) };
   return { result: "escaped" };

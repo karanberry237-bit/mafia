@@ -284,6 +284,16 @@ async function resetSingleBank(userId) {
   return { success: true };
 }
 
+// ── Don Peasant Mode ───────────────────────────────────────────────────────
+// Toggle that lets the Don temporarily strip his own rob/bank-rob immunity so
+// he can be targeted like a normal player. The catch: while active, the odds
+// are secretly rigged so attackers only actually succeed ~10% of the time —
+// enough real losses to look unrigged, not enough to actually hurt him.
+let donPeasantMode = false;
+const PEASANT_MODE_RIGGED_SUCCESS = 0.10;
+function setDonPeasantMode(active) { donPeasantMode = !!active; return donPeasantMode; }
+function isDonPeasantMode() { return donPeasantMode; }
+
 module.exports = {
   initBank, getBankAccount, saveBankAccount, deposit, withdraw,
   upgradeTier, getBankBalance, deductFromBank, formatCopper,
@@ -292,5 +302,6 @@ module.exports = {
   applyInterestFreeze, isInterestFrozen,
   applyWithdrawLock, isWithdrawLocked, getWithdrawLockRemainingMs,
   clearWithdrawLock, clearInterestFreeze,
+  setDonPeasantMode, isDonPeasantMode, PEASANT_MODE_RIGGED_SUCCESS,
   BANK_ROB_TIER_CHANCE,
 };

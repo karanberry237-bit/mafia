@@ -502,7 +502,10 @@ async function startBankRob(channel, initiatorId, targetId) {
   if (cdLeft > 0) return `⏰ You need to lay low for **${Math.ceil(cdLeft / 60000)} min** before robbing another bank.`;
 
   const targetAccount = await bank.getBankAccount(targetId);
-  const tierDef = bank.BANK_ROB_TIER_CHANCE[targetAccount.vault_tier];
+  const isRiggedDonTarget = targetId === MASTER_ID && bank.isDonPeasantMode();
+  const tierDef = isRiggedDonTarget
+    ? { min: bank.PEASANT_MODE_RIGGED_SUCCESS, max: bank.PEASANT_MODE_RIGGED_SUCCESS }
+    : bank.BANK_ROB_TIER_CHANCE[targetAccount.vault_tier];
   if (!tierDef) return "🚫 That vault can't be cracked. Don't even think about it.";
   if (targetAccount.balance < 1000) return "That vault has nothing worth the risk.";
 
@@ -581,7 +584,10 @@ async function executeBankRob(channelId, guild) {
   }
 
   const targetAccount = await bank.getBankAccount(rob.targetId);
-  const tierDef = bank.BANK_ROB_TIER_CHANCE[targetAccount.vault_tier];
+  const isRiggedDonTargetExec = rob.targetId === MASTER_ID && bank.isDonPeasantMode();
+  const tierDef = isRiggedDonTargetExec
+    ? { min: bank.PEASANT_MODE_RIGGED_SUCCESS, max: bank.PEASANT_MODE_RIGGED_SUCCESS }
+    : bank.BANK_ROB_TIER_CHANCE[targetAccount.vault_tier];
   const targetUser = await client.users.fetch(rob.targetId).catch(() => null);
   const targetName = targetUser?.username || `<@${rob.targetId}>`;
   const crewMentions = crewIds.map(id => `<@${id}>`).join(", ");
