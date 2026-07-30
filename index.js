@@ -4682,6 +4682,7 @@ function detectMasterCommand(text, message, explicitTrigger) {
     const amtMatch = cleanText.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "pay", targetId, amount: amtMatch?.[1], tier: normalizeTierAlias(amtMatch?.[2]) };
   }
+  if (/\bcosa\s+rob\s+bank\b/.test(lower) && targetId) return { action: "rob_bank", targetId };
   if (/\bcosa\s+rob\b/.test(lower) && targetId) return { action: "rob", targetId };
   if (/\bcosa\s+loans\b/.test(lower)) return { action: "loan_info" };
   if (/\bcosa\s+normal\s+loan\b/.test(lower)) return { action: "loan", size: "loan" };
@@ -5011,6 +5012,7 @@ function detectPublicCommand(text, message) {
     const amtMatch = cleanText.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
     return { action: "pay", targetId, amount: amtMatch?.[1], tier: normalizeTierAlias(amtMatch?.[2]) };
   }
+  if (/\bcosa\s+rob\s+bank\b/.test(lower) && targetId) return { action: "rob_bank", targetId };
   if (/\bcosa\s+rob\b/.test(lower) && targetId) return { action: "rob", targetId };
   if (/\bcosa\s+loans?\b/.test(lower)) return { action: "loan_info" };
   if (/\bcosa\s+normal\s+loan\b/.test(lower)) return { action: "loan", size: "loan" };
@@ -5297,7 +5299,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   }
 
   // Route eco commands to public handler
-  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","cooldowns","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","notoriety","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","reset_rob_shields","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb","bounty_place"];
+  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","cooldowns","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","rob_bank","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","notoriety","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","reset_rob_shields","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb","bounty_place"];
   if (ecoActions.includes(action)) {
     return await executePublicCommand(message, cmd, channelId);
   }
@@ -7138,6 +7140,13 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       } else {
         return "💨 **ESCAPED!**\nYou tried to rob **" + targetName + "** but they spotted you and you ran away empty-handed. Embarrassing.";
       }
+    }
+    case "rob_bank": {
+      if (cmd.targetId === MASTER_ID) return "🤵 You dare go after Don Clint's vault? Suicidal.";
+      if (cmd.targetId === message.author.id) return "You can't rob your own bank.";
+      if (!message.guild) return "Bank robberies need a crew — try this in a server channel, not DMs.";
+      const bResult = await features.startBankRob(message.channel, message.author.id, cmd.targetId);
+      return bResult || null;
     }
     case "slots": {
       const bet = eco.parseBet(cmd.amount, cmd.tier);
@@ -9531,6 +9540,28 @@ async function init() {
         return;
       }
       await interaction.reply({ content: `💰 Grabbed it! (${res.grabbedCount} crew member(s) so far)`, ephemeral: true }).catch(() => {});
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("bankrob_join:")) {
+      const channelId = interaction.customId.split(":")[1];
+      const res = await features.joinBankRobButton(channelId, interaction.user.id);
+      if (!res.success) {
+        await interaction.reply({ content: "🏦 " + res.reason, ephemeral: true }).catch(() => {});
+        return;
+      }
+      await interaction.reply({ content: `🦹 You're in the crew! (${res.rob.participants.size}/${features.MAX_BANK_CREW})`, ephemeral: true }).catch(() => {});
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("vault_alarm:")) {
+      const token = interaction.customId.split(":").slice(1).join(":");
+      const res = await features.clickVaultAlarm(token, interaction.user.id, interaction.channel);
+      if (!res.success) {
+        await interaction.reply({ content: "🚨 " + res.reason, ephemeral: true }).catch(() => {});
+        return;
+      }
+      await interaction.reply({ content: "🛡️ Alarm triggered! You stopped the heist.", ephemeral: true }).catch(() => {});
       return;
     }
 
