@@ -1,3 +1,4 @@
+// build: bank-robbery + vault-alarm v2 — 2026-07-30
 const { createClient } = require("@supabase/supabase-js");
 const ws = require("ws");
 const { fmt } = require("./economy");
@@ -73,6 +74,12 @@ function applyWithdrawLock(userId, durationMs) {
 function isWithdrawLocked(userId) {
   const exp = withdrawLockedUsers.get(userId);
   return !!exp && exp > Date.now();
+}
+function clearWithdrawLock(userId) {
+  return withdrawLockedUsers.delete(userId);
+}
+function clearInterestFreeze(userId) {
+  return frozenInterestUsers.delete(userId);
 }
 function getWithdrawLockRemainingMs(userId) {
   const exp = withdrawLockedUsers.get(userId);
@@ -284,5 +291,6 @@ module.exports = {
   isVaultSkipUsed, markVaultSkipUsed, resetBanksByTier, resetSingleBank,
   applyInterestFreeze, isInterestFrozen,
   applyWithdrawLock, isWithdrawLocked, getWithdrawLockRemainingMs,
+  clearWithdrawLock, clearInterestFreeze,
   BANK_ROB_TIER_CHANCE,
 };
