@@ -1553,9 +1553,7 @@ async function useShopItem(userId, itemId, quantity = 1) {
   if (!owned) return `🔫 You don't own **${item.name}**. Buy it with **Cosa shop buy ${itemId}**.`;
 
   if (owned.expiresAt && owned.expiresAt > Date.now()) {
-    // Rob shield can't be extended — one at a time only
-    if (itemId === "rob_shield") return `🔫 **${item.name}** is already active! Expires <t:${Math.floor(owned.expiresAt / 1000)}:R>`;
-    // Other timed items — extend duration
+    // Timed items — extend duration
     if (quantity > 1 && item.duration) {
       owned.expiresAt += item.duration * (quantity - 1);
       await saveInventory(userId, inv);
