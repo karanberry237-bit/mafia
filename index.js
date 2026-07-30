@@ -1,3 +1,4 @@
+// build: bank-robbery + vault-alarm v2 — 2026-07-30
 require("dotenv").config();
 const { Client, GatewayIntentBits, Events, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle, StringSelectMenuBuilder } = require("discord.js");
 const Groq = require("groq-sdk");
