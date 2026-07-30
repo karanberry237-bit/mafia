@@ -431,24 +431,35 @@ const SLOT_SYMBOLS = [
   { emoji: "💀", weight: 8,  multiplier: 0   }, // loss, further reduced
 ];
 
-function spinSlot() {
-  const totalWeight = SLOT_SYMBOLS.reduce((a, s) => a + s.weight, 0);
+// Loaded Dice luck buff: shifts 10% of the two losing symbols' combined
+// weight (💀 and 💵) over to the winning symbols, proportionally. This is a
+// flat probability shift, not a reroll/dodge — a bad spin can still happen,
+// it's just 10% less likely than normal.
+const LUCK_BUFF_PCT = 0.10;
+let _luckySlotTable = null;
+function getLuckySlotTable() {
+  if (_luckySlotTable) return _luckySlotTable;
+  const losing = SLOT_SYMBOLS.filter(s => s.multiplier <= 0.5);
+  const winning = SLOT_SYMBOLS.filter(s => s.multiplier > 0.5);
+  const losingWeight = losing.reduce((a, s) => a + s.weight, 0);
+  const winningWeight = winning.reduce((a, s) => a + s.weight, 0);
+  const shift = losingWeight * LUCK_BUFF_PCT;
+  _luckySlotTable = SLOT_SYMBOLS.map(s => {
+    if (s.multiplier <= 0.5) return { ...s, weight: s.weight - (s.weight / losingWeight) * shift };
+    return { ...s, weight: s.weight + (s.weight / winningWeight) * shift };
+  });
+  return _luckySlotTable;
+}
+function spinSlot(charmActive = false) {
+  const table = charmActive ? getLuckySlotTable() : SLOT_SYMBOLS;
+  const totalWeight = table.reduce((a, s) => a + s.weight, 0);
   let r = Math.random() * totalWeight;
-  for (const s of SLOT_SYMBOLS) { r -= s.weight; if (r <= 0) return s; }
-  return SLOT_SYMBOLS[SLOT_SYMBOLS.length - 1];
+  for (const s of table) { r -= s.weight; if (r <= 0) return s; }
+  return table[table.length - 1];
 }
 
 function playSlots(bet, charmActive = false, houseFavorActive = false) {
-  const reels = [spinSlot(), spinSlot(), spinSlot()];
-  // Loaded dice: reroll the worst reel once if no match
-  if (charmActive) {
-    const hasMatch = reels[0].emoji === reels[1].emoji || reels[1].emoji === reels[2].emoji || reels[0].emoji === reels[2].emoji;
-    if (!hasMatch) {
-      // Find the odd one out and reroll it
-      const idx = reels[0].emoji === reels[1].emoji ? 2 : reels[1].emoji === reels[2].emoji ? 0 : 1;
-      reels[idx] = spinSlot();
-    }
-  }
+  const reels = [spinSlot(charmActive), spinSlot(charmActive), spinSlot(charmActive)];
   // House Favor: guarantee no 💀 (total-loss) symbol makes it into the final result
   if (houseFavorActive) {
     for (let i = 0; i < reels.length; i++) {
@@ -477,7 +488,7 @@ function playSlots(bet, charmActive = false, houseFavorActive = false) {
 }
 
 // ── Wheel ─────────────────────────────────────────────────────────────────────
-// Max is now 5x. 0.5x counts as a loss (loaded dice reroll it).
+// Max is now 5x. 0.5x counts as a loss (loaded dice shifts weight away from it).
 // 3x and 5x are rare but reachable. Total weight = 1000 for clean math.
 const WHEEL_SEGMENTS = [
   { label: "💀 WIPED OUT",  multiplier: 0,   weight: 180 },
@@ -489,12 +500,32 @@ const WHEEL_SEGMENTS = [
   { label: "5x ⚡",         multiplier: 5,   weight: 30  },
 ];
 
-function spinWheel(houseFavorActive = false) {
+// Same flat-shift approach as the slots luck buff: moves 10% of the losing
+// segments' (0x, 0x, 0.5x) combined weight over to the winning segments
+// (1x+), proportionally. No dodging/rerolling a bad spin — just 10% less
+// likely to land on one.
+let _luckyWheelTable = null;
+function getLuckyWheelTable() {
+  if (_luckyWheelTable) return _luckyWheelTable;
+  const losing = WHEEL_SEGMENTS.filter(s => s.multiplier <= 0.5);
+  const winning = WHEEL_SEGMENTS.filter(s => s.multiplier > 0.5);
+  const losingWeight = losing.reduce((a, s) => a + s.weight, 0);
+  const winningWeight = winning.reduce((a, s) => a + s.weight, 0);
+  const shift = losingWeight * LUCK_BUFF_PCT;
+  _luckyWheelTable = WHEEL_SEGMENTS.map(s => {
+    if (s.multiplier <= 0.5) return { ...s, weight: s.weight - (s.weight / losingWeight) * shift };
+    return { ...s, weight: s.weight + (s.weight / winningWeight) * shift };
+  });
+  return _luckyWheelTable;
+}
+
+function spinWheel(houseFavorActive = false, charmActive = false) {
   function roll() {
-    const total = WHEEL_SEGMENTS.reduce((a, s) => a + s.weight, 0);
+    const table = charmActive ? getLuckyWheelTable() : WHEEL_SEGMENTS;
+    const total = table.reduce((a, s) => a + s.weight, 0);
     let r = Math.random() * total;
-    for (const s of WHEEL_SEGMENTS) { r -= s.weight; if (r <= 0) return s; }
-    return WHEEL_SEGMENTS[0];
+    for (const s of table) { r -= s.weight; if (r <= 0) return s; }
+    return table[0];
   }
   let seg = roll();
   // House Favor: a would-be wipeout becomes a straight 1x instead of a
@@ -585,12 +616,56 @@ async function giftCopper(fromId, toId, amount, addToTreasury, masterId) {
   const tax = Math.floor(amount * GIFT_TAX_PCT);
   const net = amount - tax;
   await addCopper(toId, net);
+  markTainted(toId, net);
   if (tax > 0 && addToTreasury) await addToTreasury(masterId, tax);
 
   return { success: true, net, tax };
 }
 
+// ── Anti-Alt-Farming: Tainted Balance Tracking ──────────────────────────────
+// Any balance-scaled reward (e.g. a daily bonus scaled off bank balance) is
+// vulnerable to: claim the scaled reward, ship the balance to an alt via
+// pay/gift, alt claims a scaled reward off the SAME money. Since wallets here
+// are a single number (no discrete "coins" to tag individually), we tag the
+// TRANSFER instead: money that arrived via pay/gift is "tainted" for 24h and
+// excluded from scaling math on the receiving end.
+// NOTE: in-memory (resets on bot restart) — move to a DB column if that
+// becomes a real problem.
+const taintedBalances = new Map(); // userId -> { amount, expiresAt }
+const TAINT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function markTainted(userId, amount) {
+  if (!amount || amount <= 0) return;
+  const now = Date.now();
+  const existing = taintedBalances.get(userId);
+  const carried = (existing && existing.expiresAt > now) ? existing.amount : 0;
+  taintedBalances.set(userId, { amount: carried + amount, expiresAt: now + TAINT_WINDOW_MS });
+}
+
+function getTaintedAmount(userId) {
+  const entry = taintedBalances.get(userId);
+  if (!entry) return 0;
+  if (entry.expiresAt <= Date.now()) { taintedBalances.delete(userId); return 0; }
+  return entry.amount;
+}
+
+function getScalableBalance(userId, rawBalance) {
+  return Math.max(0, rawBalance - getTaintedAmount(userId));
+}
+
+// While a user has ANY tainted balance sitting on their account, cap what
+// they can gamble in a single bet at TAINT_GAMBLE_CAP — regardless of how
+// much of the bet would technically come from clean vs tainted funds
+// (balances are fungible, so there's no way to prove which dollars funded
+// the bet). This is what stops "gift 100M to alt, alt gambles it all in one
+// shot" — the alt can still gamble, just capped at 5M until the taint clears.
+const TAINT_GAMBLE_CAP = 5_000_000;
+function getMaxBet(userId, normalMax) {
+  return getTaintedAmount(userId) > 0 ? Math.min(normalMax, TAINT_GAMBLE_CAP) : normalMax;
+}
+
 module.exports = {
+  markTainted, getTaintedAmount, getScalableBalance, getMaxBet, TAINT_GAMBLE_CAP,
   giftCopper, GIFT_TAX_PCT, GIFT_DAILY_CAP,
   fromCopper, formatWallet, walletToCopper, parseBet, fmt,
   initEconomy, getWallet, saveWallet, addCopper, deductCopper, getLeaderboard, claimDaily,

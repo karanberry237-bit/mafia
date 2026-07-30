@@ -383,5 +383,5 @@ module.exports = {
   addToGangTreasury, deductFromGangTreasury, depositToGang, formatGangCard,
   withdrawFromTreasury, getWithdrawCooldownRemaining, WITHDRAW_COOLDOWN_MS, getAllGangs,
   getGangFlag, getGangLeaderboard, formatGangLeaderboard,
-  offerBribe,
+  offerBribe, acceptBribe, declineBribe, getBribeOffer,
 };

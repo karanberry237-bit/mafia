@@ -1306,7 +1306,7 @@ const SHOP_ITEMS = {
   lucky_charm: {
     id: "lucky_charm",
     name: "🎲 Loaded Dice",
-    desc: "Better odds for 5 minutes — rerolls bad spins on slots (no match) & bad wheel spins (<1x), +5% coinflip win chance. No payout boost. Max 3 per day.",
+    desc: "Better odds for 5 minutes — flat +10% luck buff on slots, wheel & coinflip. No rerolls, no dodging bad outcomes, no payout boost — just shifted odds. Buy up to 12 per day; no cap on stacking/using them, so buy 12 and pop them whenever you like.",
     price: 5000000,      // 5,000,000 Cash — expensive for a reason
     duration: 5 * 60 * 1000,
     rarity: "epic",
@@ -1496,7 +1496,7 @@ async function buyShopItem(userId, itemId, quantity = 1) {
   }
 
   // Daily purchase limits
-  const DAILY_LIMITS = { lucky_charm: 3 };
+  const DAILY_LIMITS = { lucky_charm: 12 };
   if (DAILY_LIMITS[itemId] !== undefined) {
     const alreadyBought = getDailyPurchaseCount(userId, itemId);
     const limit = DAILY_LIMITS[itemId];

@@ -4829,6 +4829,8 @@ function detectPublicCommand(text, message) {
     const name = text.replace(/.*\bgang\s+info\b/i, "").trim();
     return { action: "gang_info", gangName: name, targetId };
   }
+  if (/\bcosa\s+gang\s+bribe\s+accept\b/.test(lower)) return { action: "gang_bribe_accept" };
+  if (/\bcosa\s+gang\s+bribe\s+decline\b/.test(lower)) return { action: "gang_bribe_decline" };
   if (/\bcosa\s+gang\s+bribe\b/.test(lower) && targetId) {
     const cleanText = text.replace(/<@!?\d+>/g, "").trim();
     const amtMatch = cleanText.match(/(\d+(?:\.\d+)?\s*[kmb]?)\s*(stellar|diamonds?|gold|chips?|silver|cash|copper)?/i);
@@ -6030,7 +6032,17 @@ async function executePublicCommand(message, cmd, channelId) {
       if (!bribeAmt) return "Invalid amount. Try **Cosa gang bribe @user 200k**.";
       const res = await gangs.offerBribe(message.author.id, cmd.targetId, bribeAmt, eco.deductCopper, eco.addCopper);
       if (!res.success) return "❌ " + res.reason;
-      return `💵 Paid <@${cmd.targetId}> **${eco.fmt(bribeAmt)} Cash** — they've left **${res.oldGangName}** and joined **${res.newGangName}**.`;
+      return `💵 Offered <@${cmd.targetId}> **${eco.fmt(bribeAmt)} Cash** to leave **${res.targetGang.name}** and join **${res.actorGang.name}**. They have 15 minutes to **Cosa gang bribe accept** or **Cosa gang bribe decline** — if they don't respond, you're refunded automatically.`;
+    }
+    case "gang_bribe_accept": {
+      const res = await gangs.acceptBribe(message.author.id, eco.addCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `🕴️ You took the **${eco.fmt(res.amount)} Cash** and left **${res.oldGangName}** to join **${res.newGangName}**.`;
+    }
+    case "gang_bribe_decline": {
+      const res = await gangs.declineBribe(message.author.id, eco.addCopper);
+      if (!res.success) return "❌ " + res.reason;
+      return `🚫 You declined the bribe from **${res.fromGangName}**. Their **${eco.fmt(res.amount)} Cash** was refunded to them. No gang change.`;
     }
 
     // ── Turf Wars ────────────────────────────────────────────────────────
@@ -6884,14 +6896,25 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       // Notoriety bonus stacks flat on top of the rank/marriage/boost cut.
       const notorietyTier = eco.getNotorietyTier(eco.getXP(message.author.id));
       const notorietyBonus = notorietyTier.dailyBonus || 0;
-      const finalReward = Math.floor(reward * (1 + marriageBonus) * boostMult) + notorietyBonus;
+
+      // Bank-scaled bonus — kicks in ONLY once your bank balance clears the
+      // threshold, then gives a flat % of the whole (scalable) balance.
+      // Below the threshold, no bonus at all — ranks/notoriety still apply as normal.
+      const BANK_DAILY_SCALE_THRESHOLD = 100_000_000; // 100M minimum
+      const BANK_DAILY_SCALE_PCT = 0.08; // 8% of scalable bank balance, once threshold is met
+      const rawBankBal = await bank.getBankBalance(message.author.id).catch(() => 0);
+      const scalableBankBal = eco.getScalableBalance(message.author.id, rawBankBal);
+      const bankBonus = scalableBankBal >= BANK_DAILY_SCALE_THRESHOLD ? Math.floor(scalableBankBal * BANK_DAILY_SCALE_PCT) : 0;
+
+      const finalReward = Math.floor(reward * (1 + marriageBonus) * boostMult) + notorietyBonus + bankBonus;
       const newW = await eco.claimDaily(message.author.id, finalReward);
       if (!newW) return "❌ Something went wrong saving your daily. Try again in a moment.";
       const marriageLine = marriageBonus > 0 ? `\n💍 **Marriage bonus:** +${Math.round(marriageBonus * 100)}% applied!${marriageBonus > 0.10 ? " (Honeymoon Fund active)" : ""}` : "";
       const boostLine = hasBoost ? `\n💎 **Daily Boost:** 2x applied!` : "";
       const notorietyLine = notorietyBonus > 0 ? `\n${notorietyTier.emoji} **${notorietyTier.name} bonus:** +💵 ${eco.fmt(notorietyBonus)} Cash` : "";
+      const bankLine = bankBonus > 0 ? `\n🏦 **Bank bonus:** +💵 ${eco.fmt(bankBonus)} Cash (8% of bank — 100M+ threshold met)` : "";
       const secondWindLine = secondWindUsed ? `\n💰 **Second Wind** let you claim early — this window's used up now.` : "";
-      return "📅 **Daily Cut Claimed!**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou received: " + eco.formatWallet(eco.fromCopper(finalReward)) + marriageLine + boostLine + notorietyLine + secondWindLine + "\nNew balance: " + eco.formatWallet(newW) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Higher rank + notoriety = better daily cut.*" + debtReminderSuffix;
+      return "📅 **Daily Cut Claimed!**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nYou received: " + eco.formatWallet(eco.fromCopper(finalReward)) + marriageLine + boostLine + notorietyLine + bankLine + secondWindLine + "\nNew balance: " + eco.formatWallet(newW) + "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Higher rank + notoriety + bank balance = better daily cut.*" + debtReminderSuffix;
     }
     case "work":
     case "crime":
@@ -7044,6 +7067,7 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       const deducted = await eco.deductCopper(message.author.id, copperAmt);
       if (!deducted) return "Insufficient funds.";
       await eco.addCopper(cmd.targetId, copperAmt);
+      eco.markTainted(cmd.targetId, copperAmt);
       const targetUser = await client.users.fetch(cmd.targetId).catch(() => null);
       return `💸 You sent **${eco.fmt(copperAmt)} Cash** to **${targetUser?.username || `<@${cmd.targetId}>`}**.`;
     }
@@ -7112,8 +7136,8 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (!bet) return "Invalid bet.";
       const cooldownMsgSL = await checkGambleCooldown(message.author.id);
       if (cooldownMsgSL) return cooldownMsgSL;
-      const MAX_BET = 100000000; // 100 "Diamonds" equivalent, pre-flatten
-      if (bet > MAX_BET && message.author.id !== MASTER_ID) return "Max bet is **💵 100,000,000 Cash** per spin. The house has limits.";
+      const MAX_BET = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
+      if (bet > MAX_BET && message.author.id !== MASTER_ID) return `Max bet is **💵 ${eco.fmt(MAX_BET)} Cash** per spin.` + (MAX_BET < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : " The house has limits.");
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds. Check your balance with **Cosa balance**.";
@@ -7143,15 +7167,15 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (!bet) return "Invalid bet.";
       const cooldownMsgCO = await checkGambleCooldown(message.author.id);
       if (cooldownMsgCO) return cooldownMsgCO;
-      const MAX_CF = 100000000; // 100 "Diamonds" equivalent, pre-flatten
-      if (bet > MAX_CF && message.author.id !== MASTER_ID) return "Max bet is **💵 100,000,000 Cash** per flip.";
+      const MAX_CF = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
+      if (bet > MAX_CF && message.author.id !== MASTER_ID) return `Max bet is **💵 ${eco.fmt(MAX_CF)} Cash** per flip.` + (MAX_CF < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : "");
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds.";
       }
-      // Lucky charm: 55% win chance instead of 50%
+      // Lucky charm: flat +10% win chance, consistent with slots/wheel
       const cfCharmActive = features.hasEffect(message.author.id, "lucky_charm");
-      const flip = Math.random() < (cfCharmActive ? 0.55 : 0.5) ? cmd.choice : (cmd.choice === "heads" ? "tails" : "heads");
+      const flip = Math.random() < (cfCharmActive ? 0.60 : 0.5) ? cmd.choice : (cmd.choice === "heads" ? "tails" : "heads");
       const won = flip === cmd.choice;
       if (won && message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, bet * 2);
       const charmLineCF = cfCharmActive ? " 🍀" : "";
@@ -7167,19 +7191,15 @@ ${botStatus}`, files: [botAtt] }).catch(() => {});
       if (!bet) return "Invalid bet.";
       const cooldownMsgWH = await checkGambleCooldown(message.author.id);
       if (cooldownMsgWH) return cooldownMsgWH;
-      const MAX_WHEEL = 100000000; // 100 "Diamonds" equivalent, pre-flatten
-      if (bet > MAX_WHEEL && message.author.id !== MASTER_ID) return "Max bet is **💵 100,000,000 Cash** per spin. The Family controls the wheel.";
+      const MAX_WHEEL = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
+      if (bet > MAX_WHEEL && message.author.id !== MASTER_ID) return `Max bet is **💵 ${eco.fmt(MAX_WHEEL)} Cash** per spin.` + (MAX_WHEEL < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : " The Family controls the wheel.");
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds.";
       }
       const wheelCharmActive = features.hasEffect(message.author.id, "lucky_charm");
       const wheelHouseFavorActive = features.isHouseFavorArmed(message.author.id);
-      let seg = eco.spinWheel(wheelHouseFavorActive);
-      // Lucky charm: reroll once if bankrupt or 0.5x (both count as losses)
-      if (wheelCharmActive && seg.multiplier <= 0.5) {
-        seg = eco.spinWheel(wheelHouseFavorActive);
-      }
+      let seg = eco.spinWheel(wheelHouseFavorActive, wheelCharmActive);
       if (wheelHouseFavorActive) features.clearHouseFavorArmed(message.author.id);
       const winnings = Math.floor(bet * seg.multiplier);
       if (winnings > 0 && message.author.id !== MASTER_ID) await eco.addCopper(message.author.id, winnings);
@@ -7271,8 +7291,8 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       if (!bet) return "Invalid bet.";
       const cooldownMsgRA = await checkGambleCooldown(message.author.id);
       if (cooldownMsgRA) return cooldownMsgRA;
-      const MAX_RACE = 100000000; // 100 "Diamonds" equivalent, pre-flatten
-      if (bet > MAX_RACE && message.author.id !== MASTER_ID) return "Max race bet is **💵 100,000,000 Cash**.";
+      const MAX_RACE = eco.getMaxBet(message.author.id, 100000000); // 100 "Diamonds" equivalent, pre-flatten; capped lower while tainted funds are on the account
+      if (bet > MAX_RACE && message.author.id !== MASTER_ID) return `Max race bet is **💵 ${eco.fmt(MAX_RACE)} Cash**.` + (MAX_RACE < 100000000 ? " (Recently-received Cash is capped at 5M/bet for 24h.)" : "");
       if (message.author.id !== MASTER_ID) {
         const deducted = await eco.deductCopper(message.author.id, bet);
         if (!deducted) return "Insufficient funds.";
