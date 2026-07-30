@@ -549,6 +549,18 @@ async function joinBankRobButton(channelId, userId) {
   return { success: true, rob };
 }
 
+// Consumes one Vault Alarm charge from userId's inventory, if they own one.
+// Returns true if a charge was found and consumed, false otherwise.
+async function consumeVaultAlarm(userId) {
+  const inv = userInventories.get(userId) || {};
+  const owned = inv.vault_alarm;
+  if (!owned || (owned.uses || 0) <= 0) return false;
+  owned.uses -= 1;
+  if (owned.uses <= 0) delete inv.vault_alarm;
+  await saveInventory(userId, inv);
+  return true;
+}
+
 async function executeBankRob(channelId, guild) {
   const rob = activeBankRobs.get(channelId);
   if (!rob || rob.launched) return;
@@ -585,10 +597,22 @@ async function executeBankRob(channelId, guild) {
   const roll = Math.random();
 
   if (roll <= successChance) {
-    // ── SUCCESS — but the vault alarm gets one last chance to stop it ──
+    // ── SUCCESS — only a held Vault Alarm gets one last chance to stop it ──
     const takePct = BANK_ROB_MIN_TAKE_PCT + Math.random() * (BANK_ROB_MAX_TAKE_PCT - BANK_ROB_MIN_TAKE_PCT);
     const takeAmount = Math.floor(targetAccount.balance * takePct);
-    await triggerVaultAlarm(channel, rob.targetId, crewIds, takeAmount, targetAccount.vault_tier, targetName);
+    const hasAlarm = await consumeVaultAlarm(rob.targetId);
+    if (hasAlarm) {
+      await triggerVaultAlarm(channel, rob.targetId, crewIds, takeAmount, targetAccount.vault_tier, targetName);
+    } else {
+      const deducted = await bank.deductFromBank(rob.targetId, takeAmount).catch(() => 0);
+      const cut = deducted > 0 ? Math.floor(deducted / crewIds.length) : 0;
+      for (const id of crewIds) {
+        if (cut > 0) await eco.addCopper(id, cut).catch(() => {});
+      }
+      await channel.send(
+        `💰 **VAULT CRACKED!**\n${crewMentions}\nNo alarm to stop them — the crew made off with **${bank.formatCopper(deducted)}** from **${targetName}'s** vault (**${bank.formatCopper(cut)}** each) before they even knew what hit them. 😈`
+      ).catch(() => {});
+    }
   } else {
     // ── FAILURE — everyone eats their own fine ──
     const finePct = BANK_ROB_FINE_MIN_PCT + Math.random() * (BANK_ROB_FINE_MAX_PCT - BANK_ROB_FINE_MIN_PCT);
@@ -1597,6 +1621,14 @@ const SHOP_ITEMS = {
     duration: null,
     rarity: "legendary",
   },
+  vault_alarm: {
+    id: "vault_alarm",
+    name: "🚨 Vault Alarm",
+    desc: "Passive protection against bank robbery. If a crew successfully cracks your vault while you hold one, it auto-arms and gives you a 5-minute window to hit the alarm and block the heist entirely. Consumed the moment it triggers — win or lose, it's a one-shot. No alarm = crew walks the second they crack it.",
+    price: 25000000,     // 25,000,000 Cash — expensive insurance for a reason
+    duration: null,
+    rarity: "legendary",
+  },
   honeymoon_fund: {
     id: "honeymoon_fund",
     name: "💍 Honeymoon Fund",
@@ -1892,6 +1924,14 @@ async function useShopItem(userId, itemId, quantity = 1) {
 
     lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*This intel expires after 1 minute. Act fast.*`);
     return lines.join("\n");
+  }
+
+  // vault_alarm: passive protection, not manually activated — it auto-arms
+  // and consumes itself only when it actually triggers, from executeBankRob.
+  if (itemId === "vault_alarm") {
+    const available = owned.uses || 0;
+    if (available <= 0) return `🔫 You have no **🚨 Vault Alarm** left.`;
+    return `🚨 **Vault Alarm armed** — you have **${available}** in reserve. It triggers automatically the moment a crew cracks your vault; nothing to do until then.`;
   }
 
   if (itemId === "kings_call") {
