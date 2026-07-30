@@ -7850,6 +7850,7 @@ function buildEcoHelpText() {
     "  Cosa bank / bank tiers / bank upgrade",
     "  Cosa bank deposit [amt]",
     "  Cosa bank withdraw [amt]",
+    "  Cosa rob bank @user  ← 3-10 crew, 6h cooldown, high risk/reward",
     "",
     "🎰  GAMBLING",
     "  Cosa slots [amt]",
