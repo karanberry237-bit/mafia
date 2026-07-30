@@ -681,9 +681,13 @@ function splitBlackWhite(userId, pots) {
   });
 }
 
+function clearTaint(userId) {
+  taintedBalances.delete(userId);
+}
+
 module.exports = {
   markTainted, getTaintedAmount, getScalableBalance, getMaxBet, TAINT_GAMBLE_CAP,
-  splitBlackWhite,
+  splitBlackWhite, clearTaint,
   giftCopper, GIFT_TAX_PCT, GIFT_DAILY_CAP,
   fromCopper, formatWallet, walletToCopper, parseBet, fmt,
   initEconomy, getWallet, saveWallet, addCopper, deductCopper, getLeaderboard, claimDaily,
