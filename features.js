@@ -439,6 +439,244 @@ async function grabHeistCash(channelId, userId) {
   return { success: true, grabbedCount: heist.grabbers.size };
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ── BANK ROBBERY (crew heist against a player's vault) ───────────
+// Requires a 3–10 person crew (more crew = better odds, per vault-tier
+// table in bank.js). On SUCCESS the victim gets a 5-minute Vault Alarm
+// window with a button to freeze the heist before any money moves — miss
+// it, the transfer goes through. On FAILURE every crew member individually
+// pays a fine (2% of the target's bank balance each) — half to the victim,
+// half to the Don as "protection money." Cooldown applies to the whole
+// crew, win or lose, so a crew can't just retry back-to-back.
+// ═══════════════════════════════════════════════════════════════
+const activeBankRobs = new Map(); // channelId -> rob state
+const pendingVaultAlarms = new Map(); // token -> alarm state
+const bankRobCooldowns = new Map(); // userId -> last attempt timestamp
+
+const MIN_BANK_CREW = 3;
+const MAX_BANK_CREW = 10;
+const BANK_ROB_JOIN_WINDOW_MS = 90000;
+const BANK_ROB_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const VAULT_ALARM_WINDOW_MS = 5 * 60 * 1000;
+const BANK_ROB_FINE_MIN_PCT = 0.20; // per person, on failure
+const BANK_ROB_FINE_MAX_PCT = 0.30;
+const BANK_ROB_MIN_TAKE_PCT = 0.10;
+const BANK_ROB_MAX_TAKE_PCT = 0.20;
+
+function getBankRobCooldownRemaining(userId) {
+  const last = bankRobCooldowns.get(userId) || 0;
+  return Math.max(0, BANK_ROB_COOLDOWN_MS - (Date.now() - last));
+}
+
+function bankRobJoinRow(channelId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`bankrob_join:${channelId}`).setLabel("🦹 Join Crew").setStyle(ButtonStyle.Primary).setDisabled(disabled)
+  );
+}
+
+function vaultAlarmRow(token, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`vault_alarm:${token}`).setLabel("🚨 TRIGGER ALARM").setStyle(ButtonStyle.Danger).setDisabled(disabled)
+  );
+}
+
+function buildBankRobJoinText(rob, targetName) {
+  const secondsLeft = Math.max(0, Math.ceil((rob.joinDeadline - Date.now()) / 1000));
+  const crewMentions = [...rob.participants.keys()].map(id => `<@${id}>`).join(", ");
+  return (
+    `🏦 **BANK ROBBERY FORMING** 🏦\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `🎯 **Target:** ${targetName}'s vault\n` +
+    `👥 **Crew (${rob.participants.size}/${MAX_BANK_CREW}, need ${MIN_BANK_CREW}+):** ${crewMentions}\n\n` +
+    `Click **🦹 Join Crew** below to jump in!\n` +
+    `**Launching in ${secondsLeft}s...**\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `*Need at least ${MIN_BANK_CREW} to attempt it — more crew = better odds. If you fail, EVERYONE pays their own fine. Cooldown is 6h either way.*`
+  );
+}
+
+async function startBankRob(channel, initiatorId, targetId) {
+  if (activeBankRobs.has(channel.id)) return "🔫 A bank robbery is already being planned in this channel.";
+  const cdLeft = getBankRobCooldownRemaining(initiatorId);
+  if (cdLeft > 0) return `⏰ You need to lay low for **${Math.ceil(cdLeft / 60000)} min** before robbing another bank.`;
+
+  const targetAccount = await bank.getBankAccount(targetId);
+  const tierDef = bank.BANK_ROB_TIER_CHANCE[targetAccount.vault_tier];
+  if (!tierDef) return "🚫 That vault can't be cracked. Don't even think about it.";
+  if (targetAccount.balance < 1000) return "That vault has nothing worth the risk.";
+
+  const rob = {
+    channelId: channel.id,
+    guildId: channel.guild?.id,
+    initiatorId,
+    targetId,
+    participants: new Map([[initiatorId, true]]),
+    joinDeadline: Date.now() + BANK_ROB_JOIN_WINDOW_MS,
+    launched: false,
+    messageId: null,
+  };
+  activeBankRobs.set(channel.id, rob);
+
+  const targetUser = await client.users.fetch(targetId).catch(() => null);
+  const targetName = targetUser?.username || `<@${targetId}>`;
+
+  const msg = await channel.send({ content: buildBankRobJoinText(rob, targetName), components: [bankRobJoinRow(channel.id)] }).catch(() => null);
+  if (msg) rob.messageId = msg.id;
+
+  const tickInterval = setInterval(async () => {
+    const r = activeBankRobs.get(channel.id);
+    if (!r || r.launched) { clearInterval(tickInterval); return; }
+    if (!r.messageId) return;
+    const message = await channel.messages.fetch(r.messageId).catch(() => null);
+    if (message) await message.edit({ content: buildBankRobJoinText(r, targetName), components: [bankRobJoinRow(channel.id)] }).catch(() => {});
+  }, 10000);
+
+  setTimeout(() => executeBankRob(channel.id, channel.guild).catch(e => console.error("[BANK ROB EXECUTE]", e.message)), BANK_ROB_JOIN_WINDOW_MS);
+  return null;
+}
+
+async function joinBankRobButton(channelId, userId) {
+  const rob = activeBankRobs.get(channelId);
+  if (!rob) return { success: false, reason: "No bank robbery forming here anymore." };
+  if (rob.launched) return { success: false, reason: "The crew already launched — too late." };
+  if (userId === rob.targetId) return { success: false, reason: "You can't rob your own bank." };
+  if (rob.participants.has(userId)) return { success: false, reason: "You're already in the crew." };
+  if (rob.participants.size >= MAX_BANK_CREW) return { success: false, reason: `Crew is full (${MAX_BANK_CREW} max).` };
+  const cdLeft = getBankRobCooldownRemaining(userId);
+  if (cdLeft > 0) return { success: false, reason: `You need to lay low for ${Math.ceil(cdLeft / 60000)} min before robbing another bank.` };
+
+  rob.participants.set(userId, true);
+  return { success: true, rob };
+}
+
+async function executeBankRob(channelId, guild) {
+  const rob = activeBankRobs.get(channelId);
+  if (!rob || rob.launched) return;
+  rob.launched = true;
+  activeBankRobs.delete(channelId);
+
+  const channel = guild?.channels.cache.get(channelId);
+  if (!channel) return;
+
+  const crewIds = [...rob.participants.keys()];
+  // set cooldown for the whole crew immediately — win or lose, they're laying low after this
+  for (const id of crewIds) bankRobCooldowns.set(id, Date.now());
+
+  if (crewIds.length < MIN_BANK_CREW) {
+    await channel.send(`😬 **Not enough crew.** Only ${crewIds.length} showed up — need at least ${MIN_BANK_CREW}. Robbery called off.`).catch(() => {});
+    return;
+  }
+
+  const targetAccount = await bank.getBankAccount(rob.targetId);
+  const tierDef = bank.BANK_ROB_TIER_CHANCE[targetAccount.vault_tier];
+  const targetUser = await client.users.fetch(rob.targetId).catch(() => null);
+  const targetName = targetUser?.username || `<@${rob.targetId}>`;
+  const crewMentions = crewIds.map(id => `<@${id}>`).join(", ");
+
+  if (!tierDef || targetAccount.balance < 1000) {
+    await channel.send(`😬 **${targetName}'s vault isn't worth it anymore.** Robbery called off — crew's cooldowns still burned though.`).catch(() => {});
+    return;
+  }
+
+  await channel.send(`🚨 **CRACKING ${targetName.toUpperCase()}'S VAULT** 🚨\n*${crewIds.length} crew member(s) breaching. Get ready...*`).catch(() => {});
+  await new Promise(r => setTimeout(r, 3000));
+
+  const successChance = tierDef.min + (tierDef.max - tierDef.min) * ((crewIds.length - MIN_BANK_CREW) / (MAX_BANK_CREW - MIN_BANK_CREW));
+  const roll = Math.random();
+
+  if (roll <= successChance) {
+    // ── SUCCESS — but the vault alarm gets one last chance to stop it ──
+    const takePct = BANK_ROB_MIN_TAKE_PCT + Math.random() * (BANK_ROB_MAX_TAKE_PCT - BANK_ROB_MIN_TAKE_PCT);
+    const takeAmount = Math.floor(targetAccount.balance * takePct);
+    await triggerVaultAlarm(channel, rob.targetId, crewIds, takeAmount, targetAccount.vault_tier, targetName);
+  } else {
+    // ── FAILURE — everyone eats their own fine ──
+    const finePct = BANK_ROB_FINE_MIN_PCT + Math.random() * (BANK_ROB_FINE_MAX_PCT - BANK_ROB_FINE_MIN_PCT);
+    const finePerPerson = Math.max(1, Math.floor(targetAccount.balance * finePct));
+    let totalToVictim = 0;
+    let totalToVig = 0;
+    const brokeCrew = [];
+    for (const id of crewIds) {
+      const wallet = await eco.getWallet(id);
+      const bal = eco.walletToCopper(wallet);
+      const paid = Math.min(bal, finePerPerson);
+      if (paid > 0) await eco.deductCopper(id, paid).catch(() => {});
+      if (paid < finePerPerson) brokeCrew.push(id);
+      const half = Math.floor(paid / 2);
+      totalToVictim += half;
+      totalToVig += paid - half;
+    }
+    if (totalToVictim > 0) await eco.addCopper(rob.targetId, totalToVictim).catch(() => {});
+    if (totalToVig > 0) await eco.addCopper(MASTER_ID, totalToVig).catch(() => {});
+
+    const brokeLine = brokeCrew.length > 0 ? `\n💸 ${brokeCrew.map(id => `<@${id}>`).join(", ")} couldn't cover the full fine and paid what they had.` : "";
+    await channel.send(
+      `🚔 **BUSTED!**\n${crewMentions}\nThe crew got made trying to crack **${targetName}'s** vault. Each member ate a fine of **${bank.formatCopper(finePerPerson)}** — half to **${targetName}**, half to the Don as protection money.${brokeLine}`
+    ).catch(() => {});
+  }
+}
+
+async function triggerVaultAlarm(channel, targetId, crewIds, takeAmount, vaultTier, targetName) {
+  const token = `${targetId}_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+  const deadline = Date.now() + VAULT_ALARM_WINDOW_MS;
+  const alarm = { token, channelId: channel.id, targetId, crewIds, takeAmount, vaultTier, resolved: false, messageId: null, deadline };
+  pendingVaultAlarms.set(token, alarm);
+
+  const crewMentions = crewIds.map(id => `<@${id}>`).join(", ");
+  const minutesLeft = Math.round(VAULT_ALARM_WINDOW_MS / 60000);
+  const msg = await channel.send({
+    content:
+      `🚨 **VAULT ALARM TRIPPED** 🚨\n${crewMentions} cracked **${targetName}'s** vault and are about to walk with **${bank.formatCopper(takeAmount)}**!\n\n` +
+      `<@${targetId}> — you have **${minutesLeft} minutes** to hit the alarm below and stop them cold!`,
+    components: [vaultAlarmRow(token)],
+  }).catch(() => null);
+  if (msg) alarm.messageId = msg.id;
+
+  const timeout = setTimeout(() => resolveVaultAlarm(token, channel, false).catch(e => console.error("[VAULT ALARM TIMEOUT]", e.message)), VAULT_ALARM_WINDOW_MS);
+  alarm.timeout = timeout;
+}
+
+// defused = true if the victim clicked in time, false if the window expired
+async function resolveVaultAlarm(token, channel, defused) {
+  const alarm = pendingVaultAlarms.get(token);
+  if (!alarm || alarm.resolved) return { success: false, reason: "That alarm's already been dealt with." };
+  alarm.resolved = true;
+  pendingVaultAlarms.delete(token);
+  if (alarm.timeout) clearTimeout(alarm.timeout);
+
+  const targetUser = await client.users.fetch(alarm.targetId).catch(() => null);
+  const targetName = targetUser?.username || `<@${alarm.targetId}>`;
+  const crewMentions = alarm.crewIds.map(id => `<@${id}>`).join(", ");
+
+  if (alarm.messageId) {
+    const msg = await channel.messages.fetch(alarm.messageId).catch(() => null);
+    if (msg) await msg.edit({ components: [vaultAlarmRow(token, true)] }).catch(() => {});
+  }
+
+  if (defused) {
+    await channel.send(`🛡️ **ALARM TRIGGERED!** <@${alarm.targetId}> caught the crew in time — the vault stays locked. Nobody gets a cut.`).catch(() => {});
+    return { success: true, defused: true };
+  }
+
+  const deducted = await bank.deductFromBank(alarm.targetId, alarm.takeAmount).catch(() => 0);
+  const cut = deducted > 0 ? Math.floor(deducted / alarm.crewIds.length) : 0;
+  for (const id of alarm.crewIds) {
+    if (cut > 0) await eco.addCopper(id, cut).catch(() => {});
+  }
+  await channel.send(
+    `💰 **VAULT CRACKED!**\n${crewMentions}\nNo alarm in time — the crew made off with **${bank.formatCopper(deducted)}** from **${targetName}'s** vault (**${bank.formatCopper(cut)}** each). 😈`
+  ).catch(() => {});
+  return { success: true, defused: false, deducted, cut };
+}
+
+// Called from the vault_alarm button interaction — the victim clicking it.
+async function clickVaultAlarm(token, userId, channel) {
+  const alarm = pendingVaultAlarms.get(token);
+  if (!alarm || alarm.resolved) return { success: false, reason: "That alarm window has already closed." };
+  if (userId !== alarm.targetId) return { success: false, reason: "This isn't your vault alarm to hit." };
+  return resolveVaultAlarm(token, channel, true);
+}
+
 async function executeHeist(channelId, guild) {
   const heist = activeHeists.get(channelId);
   if (!heist || heist.launched) return;
@@ -1479,6 +1717,12 @@ function recordDailyPurchase(userId, itemId, quantity) {
   }
 }
 
+// Items bought as timed buffs but which sit in inventory as stored "charges"
+// until the person manually activates them — the duration timer only starts
+// on use, not on purchase. (Everything else with item.duration auto-starts
+// its clock the moment it's bought.)
+const MANUAL_ACTIVATION_ITEMS = { lucky_charm: true };
+
 async function buyShopItem(userId, itemId, quantity = 1) {
   const item = SHOP_ITEMS[itemId];
   if (!item) return `🔫 Item not found. Check **Cosa shop** for available items.`;
@@ -1514,8 +1758,8 @@ async function buyShopItem(userId, itemId, quantity = 1) {
   if (!userInventories.has(userId)) userInventories.set(userId, {});
   const inv = userInventories.get(userId);
 
-  if (item.duration) {
-    // Timed items — stack duration
+  if (item.duration && !MANUAL_ACTIVATION_ITEMS[itemId]) {
+    // Timed items — stack duration, active immediately on purchase
     const currentExpiry = inv[itemId]?.expiresAt || Date.now();
     const addedDuration = item.duration * quantity;
     const newExpiry = Math.max(Date.now(), currentExpiry) + addedDuration;
@@ -1526,13 +1770,13 @@ async function buyShopItem(userId, itemId, quantity = 1) {
       if (i && i[itemId]?.expiresAt <= Date.now()) delete i[itemId];
     }, timeLeft);
   } else {
-    // One-use items — stack uses
+    // One-use items, and manual-activation timed items — stack uses, timer starts on use
     inv[itemId] = { uses: (inv[itemId]?.uses || 0) + quantity };
   }
 
   await saveInventory(userId, inv);
 
-  const totalDuration = item.duration ? item.duration * quantity : null;
+  const totalDuration = item.duration && !MANUAL_ACTIVATION_ITEMS[itemId] ? item.duration * quantity : null;
   return (
     `🛒 **PURCHASED!** ${quantity}x ${item.name}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -1564,6 +1808,21 @@ async function useShopItem(userId, itemId, quantity = 1) {
   if (owned.uses !== undefined) {
     if (owned.uses <= 0) return `🔫 You have no **${item.name}** uses left. Buy more with **Cosa shop buy ${itemId}**.`;
     if (quantity > owned.uses) return `🔫 You only have **${owned.uses}** use(s) of **${item.name}**.`;
+  }
+
+  // Manual-activation timed items (e.g. Loaded Dice) — buying just banks a
+  // charge; the duration clock only starts here, on actual use.
+  if (item.duration && MANUAL_ACTIVATION_ITEMS[itemId] && owned.uses !== undefined) {
+    owned.uses -= quantity;
+    const newExpiry = Date.now() + item.duration * quantity;
+    owned.expiresAt = newExpiry;
+    if (owned.uses <= 0) delete owned.uses;
+    await saveInventory(userId, inv);
+    setTimeout(() => {
+      const i = userInventories.get(userId);
+      if (i && i[itemId]?.expiresAt <= Date.now()) delete i[itemId];
+    }, newExpiry - Date.now());
+    return `✅ **${item.name}** activated! Active for **${Math.round((item.duration * quantity) / 60000)} minutes**. (${owned.uses || 0} charge(s) left)`;
   }
 
   // Special case: Vault Skip — one-time-ever free tier upgrade
@@ -1898,6 +2157,10 @@ module.exports = {
   activeTournaments, startTriviaRound, getScoreBoard, endTriviaTournament, TRIVIA_QUESTIONS,
   // Heist
   activeHeists, startHeist, joinHeistButton, grabHeistCash, executeHeist,
+  // Bank Robbery
+  activeBankRobs, startBankRob, joinBankRobButton, executeBankRob,
+  clickVaultAlarm, getBankRobCooldownRemaining,
+  MIN_BANK_CREW, MAX_BANK_CREW, BANK_ROB_COOLDOWN_MS,
   // Stocks
   STOCKS, stockPrices,
   get stockCandles() { return stockCandles; },
