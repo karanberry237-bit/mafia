@@ -8468,10 +8468,11 @@ const commands = [
     .toJSON(),
   new SlashCommandBuilder()
     .setName("hangman")
-    .setDescription("Classic hangman — you pick the word, everyone else guesses")
+    .setDescription("Queue-based hangman — join to play, first solver wins the prize")
     .addSubcommand(sub => sub.setName("start").setDescription("Start a new hangman game (opens a private word entry popup)")
+      .addIntegerOption(opt => opt.setName("prize").setDescription("Cash prize for whoever solves the word (default 0)").setMinValue(0))
       .addStringOption(opt => opt.setName("category").setDescription("Optional hint category shown to guessers (e.g. 'Movies')")))
-    .addSubcommand(sub => sub.setName("guess").setDescription("Guess a letter")
+    .addSubcommand(sub => sub.setName("guess").setDescription("Guess a letter (only the active player can guess)")
       .addStringOption(opt => opt.setName("letter").setDescription("A single letter A-Z").setRequired(true)))
     .addSubcommand(sub => sub.setName("stop").setDescription("Stop the current game (host or Don only)"))
     .toJSON(),
@@ -9835,19 +9836,46 @@ async function init() {
     const isDonInteraction = interaction.user?.id === MASTER_ID;
     runGuildEvent(interaction.guild?.id, async () => {
 
-    // ── Hangman: private word entry modal ──────────────────────────────────────
-    if (interaction.isModalSubmit() && interaction.customId.startsWith("hangman_word:")) {
-      const category = interaction.customId.split(":").slice(1).join(":") || null;
-      const rawWord = interaction.fields.getTextInputValue("word");
-      const res = hangman.startHangman(interaction.channelId, interaction.user.id, rawWord, category || null);
+    // ── Hangman: private word-list entry modal ──────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("hangman_setup:")) {
+      const [, category, prizeRaw] = interaction.customId.split(":");
+      const prize = Math.max(0, parseInt(prizeRaw, 10) || 0);
+      const rawWords = interaction.fields.getTextInputValue("words");
+      const words = rawWords.split(/[,\n]/).map(w => w.trim()).filter(Boolean);
+      const res = hangman.startHangman(interaction.channelId, interaction.user.id, words, category || null, prize);
       if (!res.success) {
         await interaction.reply({ content: res.reason, ephemeral: true }).catch(() => {});
         return;
       }
-      await interaction.reply({ content: "🪢 Word locked in — game starting!", ephemeral: true }).catch(() => {});
-      await interaction.channel.send(
-        `🪢 **HANGMAN STARTED** by <@${interaction.user.id}>\n` + hangman.getGameDisplay(interaction.channelId)
-      ).catch(() => {});
+      await interaction.reply({ content: `🪢 ${words.length} word(s) locked in — queue is open!`, ephemeral: true }).catch(() => {});
+      const joinRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`hangman_join:${interaction.channelId}`).setLabel("🎯 Join & Play").setStyle(ButtonStyle.Success)
+      );
+      await interaction.channel.send({
+        content:
+          `🪢 **HANGMAN QUEUE OPEN** — hosted by <@${interaction.user.id}>\n` +
+          (prize > 0 ? `💰 Prize for solving: **${eco.fmt(prize)}**\n` : ``) +
+          `Click below to join. First click plays first — miss too many letters and the next person in line takes over with a fresh word.`,
+        components: [joinRow],
+      }).catch(() => {});
+      return;
+    }
+
+    // ── Hangman: join queue / claim turn button ──────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith("hangman_join:")) {
+      const res = hangman.joinQueue(interaction.channelId, interaction.user.id);
+      if (!res.success) {
+        await interaction.reply({ content: res.reason, ephemeral: true }).catch(() => {});
+        return;
+      }
+      if (res.started) {
+        await interaction.reply({ content: "🪢 You're up! Guess with `/hangman guess`.", ephemeral: true }).catch(() => {});
+        await interaction.channel.send(
+          `🎯 <@${interaction.user.id}> is up first!\n` + hangman.getGameDisplay(interaction.channelId)
+        ).catch(() => {});
+      } else {
+        await interaction.reply({ content: `🪢 You're in the queue — position **${res.position}**.`, ephemeral: true }).catch(() => {});
+      }
       return;
     }
 
@@ -10561,17 +10589,19 @@ async function init() {
             return;
           }
           const category = interaction.options.getString("category") || "";
+          const prize = interaction.options.getInteger("prize") || 0;
           const modal = new ModalBuilder()
-            .setCustomId(`hangman_word:${category}`)
-            .setTitle("Set the Hangman Word (private)");
-          const wordInput = new TextInputBuilder()
-            .setCustomId("word")
-            .setLabel("Secret word or phrase")
-            .setStyle(TextInputStyle.Short)
+            .setCustomId(`hangman_setup:${category}:${prize}`)
+            .setTitle("Set Hangman Words (private)");
+          const wordsInput = new TextInputBuilder()
+            .setCustomId("words")
+            .setLabel("Word(s) — comma or newline separated")
+            .setPlaceholder("HORSE, TIGER, EAGLE")
+            .setStyle(TextInputStyle.Paragraph)
             .setMinLength(3)
-            .setMaxLength(30)
+            .setMaxLength(500)
             .setRequired(true);
-          modal.addComponents(new ActionRowBuilder().addComponents(wordInput));
+          modal.addComponents(new ActionRowBuilder().addComponents(wordsInput));
           await interaction.showModal(modal).catch(() => {});
           return;
         }
@@ -10582,8 +10612,14 @@ async function init() {
             await interaction.reply({ content: res.reason, ephemeral: true }).catch(() => {});
             return;
           }
+          if (res.won && res.prize > 0) {
+            eco.addCopper(interaction.user.id, res.prize);
+          }
           await interaction.reply({ content: res.hit ? `✅ **${letter.toUpperCase()}** is in the word!` : `❌ **${letter.toUpperCase()}** isn't in the word.` }).catch(() => {});
           await interaction.channel.send(res.text).catch(() => {});
+          if (res.nextPlayerId) {
+            await interaction.channel.send(`🎯 <@${res.nextPlayerId}> is up! New word loaded.\n` + hangman.getGameDisplay(interaction.channelId)).catch(() => {});
+          }
           return;
         }
         if (sub === "stop") {
