@@ -1,6 +1,6 @@
 // build: bank-robbery + vault-alarm v2 — 2026-07-30
 require("dotenv").config();
-const { Client, GatewayIntentBits, Events, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle, StringSelectMenuBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, Events, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
 const Groq = require("groq-sdk");
 const { AttachmentBuilder } = require("discord.js");
 const chessModule = require("./chess.js");
@@ -23,6 +23,8 @@ const bounties = require("./bounties.js");
 const auditlog = require("./auditlog.js");
 const commission = require("./commission.js");
 const adventure = require("./adventure.js");
+const raffle = require("./raffle.js");
+const hangman = require("./hangman.js");
 const poster = require("./poster.js");
 const rivalnpc = require("./rivalnpc.js");
 // chessCooldowns, gambleCooldowns: per-guild, see the guildDataStore accessor
@@ -5499,7 +5501,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   }
 
   // Route eco commands to public handler
-  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","cooldowns","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","rob_bank","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","notoriety","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","launder","launder_status","explore","explore_cancel","explore_choose","treasures","sell_treasure","afk","afk_back","bank_wipe_all","reset_rob_shields","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb","bounty_place"];
+  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","cooldowns","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","rob_bank","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","notoriety","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","launder","launder_status","explore","explore_cancel","explore_choose","treasures","sell_treasure","afk","afk_back","bank_wipe_all","reset_rob_shields","reset_all_cooldowns","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb","bounty_place"];
   if (ecoActions.includes(action)) {
     return await executePublicCommand(message, cmd, channelId);
   }
@@ -8060,6 +8062,9 @@ function buildHelpText() {
     "  Cosa rps rock/paper/scissors",
     "  Cosa roll [sides]",
     "  Cosa quiz  ← trivia question",
+    "  /trivia start / stop  ← Don-only tournament, 55+ questions",
+    "  /hangman start / guess / stop  ← you set the word privately",
+    "  /raffle start / end  ← Don-only, custom prize + claim button",
     "  Cosa truth / dare / truth or dare",
     "  Cosa ship @user1 @user2",
     "  Cosa debate [topic]",
@@ -8214,7 +8219,9 @@ function buildEcoHelpText() {
     "",
     "🎉  EVENTS",
     "  Cosa giveaway [amt] [duration]  ← Don only",
-    "  Cosa trivia start [rounds] [prize]      ← Don only",
+    "  /trivia start [rounds] [prize]  ← Don only, slash command",
+    "  /raffle start [prize] [minutes] [cash]  ← Don only, slash command",
+    "  /hangman start / guess / stop  ← anyone can host, slash command",
     "```",
     firms.FIRM_HELP,
   ].join("\n");
@@ -8345,9 +8352,11 @@ function buildRankHelpText(userId) {
     modLines.push("  Cosa unblacklist @user  ← remove gambling ban");
     modLines.push("  Cosa clear taint @user  ← clear Black/White split, unlock full gambling limit");
     modLines.push("  Cosa clear wanted @user  ← clear Marked/Most Wanted tag + unlock withdrawals + un-freeze interest");
+    modLines.push("  Cosa reset rob shields  ← strip every active/stored Rob Shield, server-wide");
     modLines.push("  Cosa eco stats  ← economy overview");
     modLines.push("  Cosa eco wipe rich  ← ⚠️ wipe all wallets with 💵 10,000,000+ Cash");
     modLines.push("  Cosa bank wipe all  ← ⚠️ wipe ALL bank balances");
+    modLines.push("  Cosa reset cooldowns  ← ⚠️ resets EVERYONE's daily/work/crime/scavenge/smuggle/explore/gamble/rob/coinflip/chess cooldowns — use after an economy wipe");
     modLines.push("");
     modLines.push("📊  STOCK MARKET  (Don only)");
     modLines.push("  Cosa market tick         ← force instant tick + new candle");
@@ -8366,8 +8375,11 @@ function buildRankHelpText(userId) {
     modLines.push("🎉  EVENTS  (Don only)");
     modLines.push("  Cosa giveaway [amt] [duration]  ← start giveaway");
     modLines.push("  Cosa greroll [messageId]               ← reroll winner");
-    modLines.push("  Cosa trivia start [rounds] [prize]     ← start trivia");
-    modLines.push("  Cosa trivia stop                       ← end early");
+    modLines.push("  /trivia start [rounds] [prize]         ← slash command, 55+ questions");
+    modLines.push("  /trivia stop                           ← end early");
+    modLines.push("  /raffle start [prize] [minutes] [cash] ← slash command, custom prize + claim button");
+    modLines.push("  /raffle end                            ← force-draw the raffle in this channel");
+    modLines.push("  /hangman start [category]              ← anyone can host — you, not just Don — private word popup");
     modLines.push("");
     modLines.push("🏢  FIRM MOD COMMANDS  (Don only)");
     modLines.push("  Cosa firm delete [TICKER] [reason]       ← dissolve firm, refund shareholders");
@@ -8441,6 +8453,38 @@ const commands = [
   new SlashCommandBuilder()
     .setName("eco")
     .setDescription("Show all economy commands — wallet, bank, gambling, shop (visible only to you)")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("raffle")
+    .setDescription("Host a Family raffle with a custom prize (Don Clint only)")
+    .addSubcommand(sub =>
+      sub.setName("start")
+        .setDescription("Start a raffle")
+        .addStringOption(opt => opt.setName("prize").setDescription("What the winner gets (e.g. '5,000,000 Cash', 'Nitro Boost')").setRequired(true))
+        .addIntegerOption(opt => opt.setName("minutes").setDescription("How long entries stay open").setRequired(true).setMinValue(1).setMaxValue(1440))
+        .addIntegerOption(opt => opt.setName("cash").setDescription("Cash amount to auto-pay the winner on claim (optional)").setMinValue(1))
+    )
+    .addSubcommand(sub => sub.setName("end").setDescription("Force-draw the raffle in this channel right now"))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("hangman")
+    .setDescription("Classic hangman — you pick the word, everyone else guesses")
+    .addSubcommand(sub => sub.setName("start").setDescription("Start a new hangman game (opens a private word entry popup)")
+      .addStringOption(opt => opt.setName("category").setDescription("Optional hint category shown to guessers (e.g. 'Movies')")))
+    .addSubcommand(sub => sub.setName("guess").setDescription("Guess a letter")
+      .addStringOption(opt => opt.setName("letter").setDescription("A single letter A-Z").setRequired(true)))
+    .addSubcommand(sub => sub.setName("stop").setDescription("Stop the current game (host or Don only)"))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("trivia")
+    .setDescription("Run a Family trivia tournament (Don Clint only)")
+    .addSubcommand(sub =>
+      sub.setName("start")
+        .setDescription("Start a trivia tournament")
+        .addIntegerOption(opt => opt.setName("rounds").setDescription("Number of rounds (default 5, max 20)").setMinValue(1).setMaxValue(20))
+        .addIntegerOption(opt => opt.setName("prize").setDescription("Total prize pool in Cash (default 10,000)").setMinValue(100))
+    )
+    .addSubcommand(sub => sub.setName("stop").setDescription("End the tournament early"))
     .toJSON(),
   new SlashCommandBuilder()
     .setName("shop")
@@ -9791,6 +9835,22 @@ async function init() {
     const isDonInteraction = interaction.user?.id === MASTER_ID;
     runGuildEvent(interaction.guild?.id, async () => {
 
+    // ── Hangman: private word entry modal ──────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("hangman_word:")) {
+      const category = interaction.customId.split(":").slice(1).join(":") || null;
+      const rawWord = interaction.fields.getTextInputValue("word");
+      const res = hangman.startHangman(interaction.channelId, interaction.user.id, rawWord, category || null);
+      if (!res.success) {
+        await interaction.reply({ content: res.reason, ephemeral: true }).catch(() => {});
+        return;
+      }
+      await interaction.reply({ content: "🪢 Word locked in — game starting!", ephemeral: true }).catch(() => {});
+      await interaction.channel.send(
+        `🪢 **HANGMAN STARTED** by <@${interaction.user.id}>\n` + hangman.getGameDisplay(interaction.channelId)
+      ).catch(() => {});
+      return;
+    }
+
     // ── "cosa remove channel" select menu ─────────────────────────────────────
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("removechan:")) {
       const token = interaction.customId.split(":")[1];
@@ -9864,6 +9924,30 @@ async function init() {
         return;
       }
       await interaction.reply({ content: `💰 Grabbed it! (${res.grabbedCount} crew member(s) so far)`, ephemeral: true }).catch(() => {});
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("raffle_enter:")) {
+      const id = interaction.customId.split(":").slice(1).join(":");
+      const res = await raffle.enterRaffle(id, interaction.user.id);
+      if (!res.success) {
+        await interaction.reply({ content: res.reason, ephemeral: true }).catch(() => {});
+        return;
+      }
+      await interaction.reply({ content: `🎟️ You're entered! (${res.count} total entries)`, ephemeral: true }).catch(() => {});
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("raffle_claim:")) {
+      const id = interaction.customId.split(":").slice(1).join(":");
+      const res = await raffle.claimRaffle(id, interaction.user.id);
+      if (!res.success) {
+        await interaction.reply({ content: res.reason, ephemeral: true }).catch(() => {});
+        return;
+      }
+      await interaction.reply({
+        content: `🎁 **Claimed!** ${res.prizeText}${res.cashAmount > 0 ? ` — **💵 ${eco.fmt(res.cashAmount)} Cash** deposited.` : " — reach out to Don Clint to collect it."}`,
+      }).catch(() => {});
       return;
     }
 
@@ -10432,6 +10516,131 @@ async function init() {
         const embed = new EmbedBuilder().setColor(0xF1C40F).setDescription(shopText.slice(0, 4096));
         await interaction.reply({ embeds: [embed], ephemeral: true }).catch(() => {});
         return;
+      }
+      if (interaction.commandName === "raffle") {
+        const sub = interaction.options.getSubcommand();
+        if (sub === "start") {
+          if (interaction.user.id !== MASTER_ID) {
+            await interaction.reply({ content: "🔫 Only Don Clint can start raffles.", ephemeral: true }).catch(() => {});
+            return;
+          }
+          const prize = interaction.options.getString("prize", true);
+          const minutes = interaction.options.getInteger("minutes", true);
+          const cash = interaction.options.getInteger("cash") || 0;
+          if (cash > 0) {
+            const deducted = await eco.deductCopper(MASTER_ID, cash).catch(() => null);
+            if (!deducted) {
+              await interaction.reply({ content: "🔫 Insufficient funds to back that raffle's Cash prize.", ephemeral: true }).catch(() => {});
+              return;
+            }
+          }
+          await interaction.reply({ content: "🎟️ Raffle started!", ephemeral: true }).catch(() => {});
+          await raffle.startRaffle(interaction.channel, interaction.user.id, prize, minutes * 60 * 1000, cash);
+          return;
+        }
+        if (sub === "end") {
+          if (interaction.user.id !== MASTER_ID) {
+            await interaction.reply({ content: "🔫 Only Don Clint can force-end a raffle.", ephemeral: true }).catch(() => {});
+            return;
+          }
+          const active = [...raffle.activeRaffles.values()].find(r => r.channelId === interaction.channelId && !r.ended);
+          if (!active) {
+            await interaction.reply({ content: "🔫 No active raffle in this channel.", ephemeral: true }).catch(() => {});
+            return;
+          }
+          await interaction.reply({ content: "🎟️ Drawing now...", ephemeral: true }).catch(() => {});
+          await raffle.endRaffleEarly(active.messageId, interaction.channel);
+          return;
+        }
+      }
+      if (interaction.commandName === "hangman") {
+        const sub = interaction.options.getSubcommand();
+        if (sub === "start") {
+          if (hangman.games.has(interaction.channelId)) {
+            await interaction.reply({ content: "🪢 A hangman game is already running in this channel.", ephemeral: true }).catch(() => {});
+            return;
+          }
+          const category = interaction.options.getString("category") || "";
+          const modal = new ModalBuilder()
+            .setCustomId(`hangman_word:${category}`)
+            .setTitle("Set the Hangman Word (private)");
+          const wordInput = new TextInputBuilder()
+            .setCustomId("word")
+            .setLabel("Secret word or phrase")
+            .setStyle(TextInputStyle.Short)
+            .setMinLength(3)
+            .setMaxLength(30)
+            .setRequired(true);
+          modal.addComponents(new ActionRowBuilder().addComponents(wordInput));
+          await interaction.showModal(modal).catch(() => {});
+          return;
+        }
+        if (sub === "guess") {
+          const letter = interaction.options.getString("letter", true);
+          const res = await hangman.guessLetter(interaction.channelId, interaction.user.id, letter);
+          if (!res.success) {
+            await interaction.reply({ content: res.reason, ephemeral: true }).catch(() => {});
+            return;
+          }
+          await interaction.reply({ content: res.hit ? `✅ **${letter.toUpperCase()}** is in the word!` : `❌ **${letter.toUpperCase()}** isn't in the word.` }).catch(() => {});
+          await interaction.channel.send(res.text).catch(() => {});
+          return;
+        }
+        if (sub === "stop") {
+          const isDon = interaction.user.id === MASTER_ID;
+          const res = hangman.stopHangman(interaction.channelId, interaction.user.id, isDon);
+          if (!res.success) {
+            await interaction.reply({ content: res.reason, ephemeral: true }).catch(() => {});
+            return;
+          }
+          await interaction.reply({ content: `🪢 Game stopped. The word was **${res.word}**.` }).catch(() => {});
+          return;
+        }
+      }
+      if (interaction.commandName === "trivia") {
+        const sub = interaction.options.getSubcommand();
+        if (interaction.user.id !== MASTER_ID) {
+          await interaction.reply({ content: "🔫 Only Don Clint can control trivia tournaments.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        if (sub === "start") {
+          if (features.activeTournaments.has(interaction.channelId)) {
+            await interaction.reply({ content: "🧠 A tournament is already running here.", ephemeral: true }).catch(() => {});
+            return;
+          }
+          const tournament = {
+            channelId: interaction.channelId,
+            totalRounds: Math.min(interaction.options.getInteger("rounds") || 5, 20),
+            currentRound: 1,
+            prizeCash: interaction.options.getInteger("prize") || 10000,
+            scores: {},
+            currentQuestion: null,
+            answered: new Set(),
+            roundStarted: 0,
+            roundTimeout: null,
+            usedQuestions: new Set(),
+          };
+          features.activeTournaments.set(interaction.channelId, tournament);
+          await interaction.reply({
+            content:
+              `🧠 **TRIVIA TOURNAMENT STARTING!**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+              `📋 **Rounds:** ${tournament.totalRounds}\n💰 **Prize Pool:** ${eco.formatWallet(eco.fromCopper(tournament.prizeCash))}\n` +
+              `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*First round starts in 5 seconds...*`,
+          }).catch(() => {});
+          setTimeout(() => features.startTriviaRound(interaction.channelId, interaction.guild, tournament), 5000);
+          return;
+        }
+        if (sub === "stop") {
+          const t = features.activeTournaments.get(interaction.channelId);
+          if (!t) {
+            await interaction.reply({ content: "🧠 No trivia tournament running here.", ephemeral: true }).catch(() => {});
+            return;
+          }
+          if (t.roundTimeout) clearTimeout(t.roundTimeout);
+          await interaction.reply({ content: "🧠 Ending tournament..." }).catch(() => {});
+          await features.endTriviaTournament(interaction.channelId, interaction.guild, t);
+          return;
+        }
       }
       if (interaction.commandName === "rank-help") {
         const uid = interaction.user.id;
