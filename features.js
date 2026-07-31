@@ -1686,6 +1686,125 @@ const SHOP_ITEMS = {
 // Higher weight = more likely to drop from a completed quest board. Legendary is
 // the jackpot (the 10M Don's Call), epic close behind (the 5M Loaded Dice).
 const RARITY_WEIGHT = { common: 100, uncommon: 45, rare: 20, epic: 6, legendary: 2 };
+
+// ═══════════════════════════════════════════════════════════════
+// ── TREASURE / ADVENTURE LOOT ───────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// Collectible flex items found while exploring (see adventure.js). Stored
+// in the SAME per-user inventory blob as shop items, but under a "t_"
+// prefixed key so they never collide with a SHOP_ITEMS id. They're not
+// buyable — no `price` field — only obtainable as adventure loot, and are
+// sellable for Cash via "Cosa sell [id]".
+const TREASURE_ITEMS = {
+  rusty_locket: {
+    id: "rusty_locket", name: "🔓 Rusty Locket", desc: "A tarnished locket with someone else's photo inside. Still worth something to the right buyer.",
+    rarity: "common", value: 15_000,
+  },
+  silver_flask: {
+    id: "silver_flask", name: "🥃 Engraved Silver Flask", desc: "Initials worn smooth from decades of handling.",
+    rarity: "common", value: 22_000,
+  },
+  old_revolver: {
+    id: "old_revolver", name: "🔫 Rusted Revolver", desc: "Non-functional, but collectors pay for the history.",
+    rarity: "uncommon", value: 45_000,
+  },
+  gold_pocket_watch: {
+    id: "gold_pocket_watch", name: "⏱️ Gold Pocket Watch", desc: "Still ticking. Stopped time for whoever owned it.",
+    rarity: "uncommon", value: 80_000,
+  },
+  jade_statuette: {
+    id: "jade_statuette", name: "🗿 Jade Statuette", desc: "Smuggled through three ports before it ended up buried.",
+    rarity: "rare", value: 180_000,
+  },
+  diamond_ring: {
+    id: "diamond_ring", name: "💍 Unmarked Diamond Ring", desc: "No inscription. No paperwork. No questions asked.",
+    rarity: "rare", value: 250_000,
+  },
+  masterwork_painting: {
+    id: "masterwork_painting", name: "🖼️ Masterwork Painting", desc: "Reported stolen decades ago. Nobody's still looking.",
+    rarity: "epic", value: 900_000,
+  },
+  ancient_idol: {
+    id: "ancient_idol", name: "🏺 Ancient Idol", desc: "Museums would kill for this. Literally, maybe.",
+    rarity: "epic", value: 1_400_000,
+  },
+  crown_jewel: {
+    id: "crown_jewel", name: "👑 Lost Crown Jewel", desc: "A single stone pried from a crown that isn't supposed to exist anymore.",
+    rarity: "legendary", value: 5_000_000,
+  },
+  dons_lost_ledger: {
+    id: "dons_lost_ledger", name: "📕 The Don's Lost Ledger", desc: "Decades of buried Family secrets in one waterlogged book. Priceless — if you know who to sell it to.",
+    rarity: "legendary", value: 8_000_000,
+  },
+};
+const TREASURE_RARITY_LABEL = { common: "⚪ Common", uncommon: "🟢 Uncommon", rare: "🔵 Rare", epic: "🟣 Epic", legendary: "🟡 Legendary" };
+
+function treasureKey(id) { return `t_${id}`; }
+
+function grantTreasure(userId, treasureId, quantity = 1) {
+  const item = TREASURE_ITEMS[treasureId];
+  if (!item) return null;
+  if (!userInventories.has(userId)) userInventories.set(userId, {});
+  const inv = userInventories.get(userId);
+  const key = treasureKey(treasureId);
+  inv[key] = { uses: (inv[key]?.uses || 0) + quantity };
+  saveInventory(userId, inv).catch(() => {});
+  return item;
+}
+
+function getTreasureCount(userId, treasureId) {
+  const inv = userInventories.get(userId) || {};
+  return inv[treasureKey(treasureId)]?.uses || 0;
+}
+
+// Sells `quantity` of a treasure (default: all owned) for its Cash value.
+// Returns { success, name, quantity, total } or { success:false, reason }.
+async function sellTreasure(userId, treasureId, quantity = null) {
+  const item = TREASURE_ITEMS[treasureId];
+  if (!item) return { success: false, reason: `🔫 Unknown treasure. Check **Cosa treasures**.` };
+  const inv = userInventories.get(userId) || {};
+  const key = treasureKey(treasureId);
+  const owned = inv[key]?.uses || 0;
+  if (owned <= 0) return { success: false, reason: `🔫 You don't have any **${item.name}** to sell.` };
+  const qty = quantity == null ? owned : Math.min(quantity, owned);
+  if (qty <= 0) return { success: false, reason: `🔫 Nothing to sell.` };
+  const total = item.value * qty;
+  inv[key].uses -= qty;
+  if (inv[key].uses <= 0) delete inv[key];
+  await saveInventory(userId, inv);
+  await eco.addCopper(userId, total);
+  return { success: true, name: item.name, quantity: qty, total };
+}
+
+function getTreasureDisplay(userId) {
+  const inv = userInventories.get(userId) || {};
+  const owned = Object.entries(inv).filter(([k, v]) => k.startsWith("t_") && v.uses > 0);
+  if (!owned.length) return "🗺️ You haven't found any treasures yet. Go explore with **Cosa explore**!";
+  const lines = [`🗺️ **YOUR TREASURES**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`];
+  let totalValue = 0;
+  for (const [key, data] of owned) {
+    const id = key.slice(2);
+    const item = TREASURE_ITEMS[id];
+    if (!item) continue;
+    totalValue += item.value * data.uses;
+    lines.push(`${item.name} x${data.uses} — ${TREASURE_RARITY_LABEL[item.rarity]}\n  *${item.desc}*\n  Worth: **💵 ${eco.fmt(item.value)} Cash** each — ID: \`${id}\``);
+  }
+  lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💰 Total collection value: **💵 ${eco.fmt(totalValue)} Cash**\n*Sell with **Cosa sell [id] [qty]***`);
+  return lines.join("\n");
+}
+
+// Weighted random treasure pick — used by the adventure system when a run
+// succeeds and yields loot.
+function pickRandomTreasure() {
+  const ids = Object.keys(TREASURE_ITEMS);
+  const weighted = ids.map(id => ({ id, w: RARITY_WEIGHT[TREASURE_ITEMS[id].rarity] || 10 }));
+  const total = weighted.reduce((a, x) => a + x.w, 0);
+  let r = Math.random() * total;
+  let chosenId = weighted[weighted.length - 1].id;
+  for (const x of weighted) { r -= x.w; if (r <= 0) { chosenId = x.id; break; } }
+  return TREASURE_ITEMS[chosenId];
+}
+
 const RARITY_LABEL  = {
   common:    "⚪ Common",
   uncommon:  "🟢 Uncommon",
@@ -1769,8 +1888,10 @@ const MANUAL_ACTIVATION_ITEMS = { lucky_charm: true };
 async function buyShopItem(userId, itemId, quantity = 1) {
   const item = SHOP_ITEMS[itemId];
   if (!item) return `🔫 Item not found. Check **Cosa shop** for available items.`;
+  quantity = Math.floor(Number(quantity));
+  if (!Number.isFinite(quantity)) quantity = 1;
   if (itemId === "rob_shield" && quantity > 1) return `🔫 **Snitch Insurance** can only be held one at a time. Buy 1.`;
-  if (quantity < 1 || quantity > 100) return `🔫 Buy between 1 and 100 at a time.`;
+  if (quantity < 1 || quantity > 25) return `🔫 Buy between 1 and 25 at a time.`;
 
   // Vault Skip — permanent, once-per-account-ever. Blocked from re-purchase both
   // after it's been used (checked against the permanent DB flag in bank.js) and
@@ -1831,9 +1952,18 @@ async function buyShopItem(userId, itemId, quantity = 1) {
   );
 }
 
+const ROB_SHIELD_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour between uses/extensions
+
 async function useShopItem(userId, itemId, quantity = 1) {
   const item = SHOP_ITEMS[itemId];
   if (!item) return `🔫 Unknown item.`;
+
+  // Sanitize quantity — reject non-finite / absurd values so a huge typed
+  // number (e.g. "9999999999999999999999999999") can't blow up duration math
+  // into Infinity or bypass caps.
+  quantity = Math.floor(Number(quantity));
+  if (!Number.isFinite(quantity) || quantity < 1) quantity = 1;
+  quantity = Math.min(quantity, 10);
 
   const inv = userInventories.get(userId) || {};
   const owned = inv[itemId];
@@ -1842,11 +1972,33 @@ async function useShopItem(userId, itemId, quantity = 1) {
   if (owned.expiresAt && owned.expiresAt > Date.now()) {
     // Timed items — extend duration
     if (quantity > 1 && item.duration) {
+      if (itemId === "rob_shield") {
+        const lastUsed = owned.lastUsedAt || 0;
+        if (Date.now() - lastUsed < ROB_SHIELD_COOLDOWN_MS) {
+          const waitMs = ROB_SHIELD_COOLDOWN_MS - (Date.now() - lastUsed);
+          return `🔫 **${item.name}** can only be used/extended once per hour. Try again in **${Math.ceil(waitMs / 60000)} minute(s)**.`;
+        }
+        // Only ever extend by a single item's worth of duration, regardless
+        // of the quantity typed — prevents stacking infinite shield time.
+        owned.expiresAt = Date.now() + item.duration;
+        owned.lastUsedAt = Date.now();
+        await saveInventory(userId, inv);
+        return `✅ **${item.name}** extended! Now active for **${Math.round((owned.expiresAt - Date.now()) / 60000)} more minutes**.`;
+      }
       owned.expiresAt += item.duration * (quantity - 1);
       await saveInventory(userId, inv);
       return `✅ **${item.name}** extended! Now active for **${Math.round((owned.expiresAt - Date.now()) / 60000)} more minutes**.`;
     }
     return `🔫 **${item.name}** is already active! Expires <t:${Math.floor(owned.expiresAt / 1000)}:R>`;
+  }
+
+  if (itemId === "rob_shield") {
+    const lastUsed = owned.lastUsedAt || 0;
+    if (Date.now() - lastUsed < ROB_SHIELD_COOLDOWN_MS) {
+      const waitMs = ROB_SHIELD_COOLDOWN_MS - (Date.now() - lastUsed);
+      return `🔫 **${item.name}** can only be used once per hour. Try again in **${Math.ceil(waitMs / 60000)} minute(s)**.`;
+    }
+    owned.lastUsedAt = Date.now();
   }
   if (owned.uses !== undefined) {
     if (owned.uses <= 0) return `🔫 You have no **${item.name}** uses left. Buy more with **Cosa shop buy ${itemId}**.`;
@@ -2235,4 +2387,7 @@ module.exports = {
   getShopDisplay, getInventoryDisplay, loadInventories, resetAllRobShields,
   grantItem, grantRandomQuestItem, RARITY_LABEL,
   getItemCooldownRemaining, resetInventory, isHouseFavorArmed, clearHouseFavorArmed,
+  // Treasures / adventure loot
+  TREASURE_ITEMS, grantTreasure, getTreasureCount, sellTreasure, getTreasureDisplay,
+  pickRandomTreasure, RARITY_WEIGHT,
 };

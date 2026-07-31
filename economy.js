@@ -172,6 +172,17 @@ async function claimDaily(userId, copperAmount) {
   });
 }
 
+// Bulk-clears last_daily for every wallet in one shot — used by the Don-only
+// "reset economy cooldowns" command so everyone can claim their daily again
+// right after a full economy wipe.
+async function resetAllDailyCooldowns() {
+  try {
+    const { error } = await supabase.from("wallets").update({ last_daily: null }).not("user_id", "is", null);
+    if (error) throw error;
+    return true;
+  } catch (e) { console.error("[RESET DAILY CD]", e.message); return false; }
+}
+
 async function getLeaderboard(limit = 10) {
   // Order by "copper" as a first-pass filter (cheap on the DB side), but pull
   // extra rows and re-sort in JS by TRUE current balance (walletToCopper —
@@ -686,9 +697,53 @@ function clearTaint(userId) {
   taintedBalances.delete(userId);
 }
 
+// ── Money Laundering — "The Alibi Room" ────────────────────────────────────
+// A back-room bar that washes ALL of a person's Black Money clean, no matter
+// how much is on the books. Takes 30 minutes start-to-finish; only one run
+// at a time per person. Unlike gambling's TAINT_GAMBLE_CAP workaround, this
+// is a full, uncapped clear — it just costs time instead of a fee.
+const LAUNDER_DURATION_MS = 30 * 60 * 1000;
+const pendingLaunders = new Map(); // userId -> { expiresAt, amount }
+
+function startLaundering(userId) {
+  const taint = getTaintedAmount(userId);
+  if (taint <= 0) return { success: false, reason: "You've got no Black Money on the books — you're already clean." };
+
+  const existing = pendingLaunders.get(userId);
+  if (existing && existing.expiresAt > Date.now()) {
+    return { success: false, reason: `Already running money through **The Alibi Room** — ready <t:${Math.floor(existing.expiresAt / 1000)}:R>.` };
+  }
+
+  const expiresAt = Date.now() + LAUNDER_DURATION_MS;
+  pendingLaunders.set(userId, { expiresAt, amount: taint });
+  setTimeout(() => {
+    const entry = pendingLaunders.get(userId);
+    if (entry && entry.expiresAt <= Date.now()) {
+      clearTaint(userId);
+      pendingLaunders.delete(userId);
+    }
+  }, LAUNDER_DURATION_MS);
+
+  return { success: true, amount: taint, expiresAt };
+}
+
+// Returns null if nothing pending. If the timer's up but the setTimeout
+// hasn't fired yet (bot restart, timing edge), resolves it immediately.
+function getLaunderStatus(userId) {
+  const entry = pendingLaunders.get(userId);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    clearTaint(userId);
+    pendingLaunders.delete(userId);
+    return { done: true, amount: entry.amount };
+  }
+  return { done: false, expiresAt: entry.expiresAt, amount: entry.amount };
+}
+
 module.exports = {
   markTainted, getTaintedAmount, getScalableBalance, getMaxBet, TAINT_GAMBLE_CAP,
   splitBlackWhite, clearTaint,
+  startLaundering, getLaunderStatus, LAUNDER_DURATION_MS,
   giftCopper, GIFT_TAX_PCT, GIFT_DAILY_CAP,
   fromCopper, formatWallet, walletToCopper, parseBet, fmt,
   initEconomy, getWallet, saveWallet, addCopper, deductCopper, getLeaderboard, claimDaily,
@@ -702,4 +757,5 @@ module.exports = {
   getXP, addXP, setXP, setNotorietyTier, resolveNotorietyTier, formatTierList,
   getNotorietyTier, getNextNotorietyTier, getNotorietyBonus,
   isEcoBanned, setEcoBan,
+  resetAllDailyCooldowns,
 };

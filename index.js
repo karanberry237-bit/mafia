@@ -22,6 +22,7 @@ const alliances = require("./alliances.js");
 const bounties = require("./bounties.js");
 const auditlog = require("./auditlog.js");
 const commission = require("./commission.js");
+const adventure = require("./adventure.js");
 const poster = require("./poster.js");
 const rivalnpc = require("./rivalnpc.js");
 // chessCooldowns, gambleCooldowns: per-guild, see the guildDataStore accessor
@@ -4712,6 +4713,7 @@ function detectMasterCommand(text, message, explicitTrigger) {
 
   if (/\bcosa\s+bank\s+wipe\s+all\b/.test(lower)) return { action: "bank_wipe_all" };
   if (/\bcosa\s+reset\s+rob\s+shields?\b/.test(lower)) return { action: "reset_rob_shields" };
+  if (/\bcosa\s+reset\s+(all\s+)?cooldowns?\b/.test(lower)) return { action: "reset_all_cooldowns" };
 
   if (/\bcosa\s+market\s+tick\b/.test(lower)) return { action: "market_tick" };
   if (/\bcosa\s+market\s+(open|close)\b/.test(lower)) return { action: "market_toggle", open: lower.includes("open") };
@@ -5142,6 +5144,26 @@ function detectPublicCommand(text, message) {
     return m ? { action: "shop_buy", itemId: m[1], quantity: parseInt(m[2] || "1") } : { action: "shop" };
   }
   if (/\bcosa\s+shop\b/.test(lower)) return { action: "shop" };
+
+  // ── Money Laundering ──────────────────────────────────────────────────────
+  if (/\bcosa\s+launder\s+status\b/.test(lower)) return { action: "launder_status" };
+  if (/\bcosa\s+launder\b/.test(lower)) return { action: "launder" };
+
+  // ── Adventure / Exploring ────────────────────────────────────────────────
+  if (/\bcosa\s+explore\s+cancel\b/.test(lower)) return { action: "explore_cancel" };
+  if (/\bcosa\s+explore\b/.test(lower)) {
+    const m = text.match(/explore\s+(\w+)/i);
+    return { action: "explore", locationId: m ? m[1].toLowerCase() : null };
+  }
+  if (/\bcosa\s+choose\s+(1|2)\b/.test(lower)) {
+    const m = lower.match(/choose\s+(1|2)/);
+    return { action: "explore_choose", choiceNum: parseInt(m[1]) };
+  }
+  if (/\bcosa\s+treasures?\b/.test(lower)) return { action: "treasures" };
+  if (/\bcosa\s+sell\s+(\w+)(?:\s+(\d+))?\b/.test(lower)) {
+    const m = text.match(/sell\s+(\w+)(?:\s+(\d+))?/i);
+    return { action: "sell_treasure", treasureId: m[1].toLowerCase(), quantity: m[2] ? parseInt(m[2]) : null };
+  }
   if (/\bcosa\s+use\s+(\w+)/.test(lower)) {
     const m = text.match(/cosa\s+use\s+(\w+)(?:\s+([A-Za-z]+))?(?:\s+(\d+))?/i);
     return m ? { action: "shop_use", itemId: m[1], itemArg: m[2] || null, quantity: parseInt(m[3] || "1") } : null;
@@ -5477,7 +5499,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   }
 
   // Route eco commands to public handler
-  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","cooldowns","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","rob_bank","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","notoriety","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","afk","afk_back","bank_wipe_all","reset_rob_shields","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb","bounty_place"];
+  const ecoActions = ["balance","daily","work","crime","scavenge","smuggle","quests","quest_claim","jobs_help","cooldowns","check_debt","pay_debt","pay_loan","loan","loan_info","bank_balance","bank_deposit","bank_withdraw","bank_upgrade","bank_tiers","leaderboard","pay","rob","rob_bank","slots","coinflip","wheel","blackjack","bj_hit","bj_stand","race","show_mood","notoriety","chess_challenge","chess_bot","chess_accept","chess_decline","chess_resign","chess_board","chess_timer","chess_end","chess_queue","prophecy","8ball","rps","roll","truth","dare","truth_or_dare","ship","debate","quiz","serverinfo","userinfo","poll","remind","help","eco_help","rank_help","stocks","market_panel","penny_panel","stock_buy","stock_sell","stock_portfolio","stock_history","stock_single","market_tick","market_toggle","market_pump","market_crash","giveaway","giveaway_help","greroll","trivia_start","trivia_stop","heist_start","heist_join","marry","marry_accept","marry_decline","divorce","marriage_status","shop","shop_buy","shop_use","inventory","launder","launder_status","explore","explore_cancel","explore_choose","treasures","sell_treasure","afk","afk_back","bank_wipe_all","reset_rob_shields","firm_create","firm_create_help","firm_confirm","firm_cancel","firm_issue","firm_price_set","firm_deposit","firm_dividends","firm_buy","firm_sell","firm_info","firm_list","firm_portfolio","firm_delete","firm_crash","firm_sanction","firm_escalate","firm_unsanction","firm_registry","stock_firm","firm_pump","firm_bomb","bounty_place"];
   if (ecoActions.includes(action)) {
     return await executePublicCommand(message, cmd, channelId);
   }
@@ -7780,6 +7802,43 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       // The shop menu is long — route to the ephemeral /shop slash command so it
       // only shows to the person who asked, instead of dumping it in the channel.
       return "🛒 The Family shop is big — pull it up privately with **/shop** (only you'll see it).";
+    case "launder": {
+      const res = eco.startLaundering(message.author.id);
+      if (!res.success) return `🥃 ${res.reason}`;
+      return (
+        `🥃 **THE ALIBI ROOM**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `You slide **💵 ${eco.fmt(res.amount)} Cash** in Black Money across the bar.\n` +
+        `The bartender nods — it'll come back clean in **30 minutes**, no limit on the amount. Ready <t:${Math.floor(res.expiresAt / 1000)}:R>.\n` +
+        `Check on it anytime with **Cosa launder status**.`
+      );
+    }
+    case "launder_status": {
+      const status = eco.getLaunderStatus(message.author.id);
+      if (!status) return "🥃 You're not running anything through **The Alibi Room** right now. Start with **Cosa launder**.";
+      if (status.done) return `✅ **THE ALIBI ROOM** — your **💵 ${eco.fmt(status.amount)} Cash** just came back clean. Squeaky clean White Money now.`;
+      return `🥃 **THE ALIBI ROOM** — **💵 ${eco.fmt(status.amount)} Cash** is still in the wash. Ready <t:${Math.floor(status.expiresAt / 1000)}:R>.`;
+    }
+    case "explore": {
+      if (!cmd.locationId) return adventure.getLocationsDisplay();
+      const res = adventure.startExploring(message.author.id, cmd.locationId);
+      if (!res.success) return res.reason;
+      return res.text;
+    }
+    case "explore_cancel": {
+      const res = adventure.cancelExploring(message.author.id);
+      return res.success ? res.text : res.reason;
+    }
+    case "explore_choose": {
+      const res = await adventure.makeChoice(message.author.id, cmd.choiceNum);
+      return res.success ? res.text : res.reason;
+    }
+    case "treasures":
+      return features.getTreasureDisplay(message.author.id);
+    case "sell_treasure": {
+      const res = await features.sellTreasure(message.author.id, cmd.treasureId, cmd.quantity);
+      if (!res.success) return res.reason;
+      return `💰 Sold **${res.quantity}x ${res.name}** for **💵 ${eco.fmt(res.total)} Cash**.`;
+    }
     case "shop_buy":
       return await features.buyShopItem(message.author.id, cmd.itemId, cmd.quantity || 1);
     case "shop_use": {
@@ -7875,6 +7934,38 @@ Say **Cosa hit** to draw or **Cosa stand** to hold.`;
       return shieldCount > 0
         ? `🤐 **ALL SNITCH INSURANCE CLEARED** — ${shieldCount} player(s) had their Rob Shield stripped, active or not. Nobody's protected anymore. 🤵`
         : `🔫 Nobody currently has a Rob Shield to clear.`;
+    }
+    case "reset_all_cooldowns": {
+      if (message.author.id !== MASTER_ID) return "Don only.";
+
+      // Daily — bulk clear on the wallets table.
+      const dailyOk = await eco.resetAllDailyCooldowns();
+
+      // Jobs (work/crime/scavenge/smuggle) — in-memory Maps in jobs.js.
+      jobs.resetAllCooldowns();
+
+      // Adventure explore cooldown + any mid-run sessions.
+      adventure.resetAllCooldowns();
+
+      // Gamble/rob/coinflip/chess cooldowns — per-guild Maps, clear across
+      // every guild the bot has touched, not just the active one.
+      let guildsCleared = 0;
+      for (const data of guildDataStore.values()) {
+        data.chessCooldowns?.clear();
+        data.gambleCooldowns?.clear();
+        data.robCooldowns?.clear();
+        data.coinflipCooldowns?.clear();
+        guildsCleared++;
+      }
+
+      return (
+        `⏰ **ALL COOLDOWNS RESET** by order of Don Clint.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `${dailyOk ? "✅" : "⚠️"} Daily claim timers\n` +
+        `✅ Work / Crime / Scavenge / Smuggle\n` +
+        `✅ Adventure exploring\n` +
+        `✅ Gambling / Rob / Coinflip / Chess (${guildsCleared} guild config(s))\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nEverybody's clear to go again. 🤵`
+      );
     }
     case "rival_diss": {
       if (!RIVAL_BOT_ID) return "No rival bot configured. Set RIVAL_BOT_ID in the environment first.";
@@ -8005,6 +8096,13 @@ function buildHelpText() {
     "  Items: rob_shield / lucky_charm / xp_boost",
     "         noble_pass / heist_boost / stock_tip / kings_call",
     "",
+    "🥃  LAUNDERING",
+    "  Cosa launder / Cosa launder status  ← wash Black Money clean, 30m, no limit",
+    "",
+    "🗺️  ADVENTURE",
+    "  Cosa explore [location]  ← choice-based expedition for Cash + treasure",
+    "  Cosa choose 1/2  •  Cosa treasures  •  Cosa sell [id]",
+    "",
     "📊  SERVER",
     "  Cosa serverinfo / userinfo [@user]",
     "  Cosa poll [question]",
@@ -8043,9 +8141,9 @@ function buildEcoHelpText() {
     "  Cosa daily rates  ← reward by rank",
     "",
     "💼  JOBS & HUSTLES  (pay Cash, scale with rank)",
-    "  Cosa work       ← safe pay, 30m cooldown",
-    "  Cosa crime      ← risky, bigger score, 45m",
-    "  Cosa scavenge   ← pocket change, 10m",
+    "  Cosa work       ← safe pay, 10m cooldown",
+    "  Cosa crime      ← risky, bigger score, 10m",
+    "  Cosa scavenge   ← pocket change, 1m",
     "  Cosa smuggle    ← high stakes, 90m",
     "",
     "📋  QUESTS",
@@ -8065,6 +8163,19 @@ function buildEcoHelpText() {
     "  Cosa race [amt]",
     "  Cosa blackjack [amt]  → hit / stand",
     "  *Black Money caps bets at 5M for 24h — if White Money covers a bigger bet, you'll get a button to confirm using White Money only (still capped at 100M).*",
+    "",
+    "🥃  MONEY LAUNDERING",
+    "  Cosa launder          ← wash ALL your Black Money clean, no limit, 30 min",
+    "  Cosa launder status   ← check on it",
+    "  *The Alibi Room — one run at a time.*",
+    "",
+    "🗺️  ADVENTURE",
+    "  Cosa explore                ← pick a location",
+    "  Cosa explore [location]     ← start expedition (3 stages, 45m cd)",
+    "  Cosa choose 1 / Cosa choose 2  ← safe vs risky each stage",
+    "  Cosa explore cancel         ← bail early, keep what you've earned",
+    "  Cosa treasures               ← view collected loot + value",
+    "  Cosa sell [id] [qty]         ← cash out a treasure",
     "",
     "💸  LOANS",
     "  Cosa loans / normal loan / elite loan / ultra loan",
@@ -9764,8 +9875,14 @@ async function init() {
       pendingWhiteMoneyGambles.delete(token);
       await interaction.deferUpdate().catch(() => {});
 
-      const cdMsg = await checkGambleCooldown(req.userId);
-      if (cdMsg) { await interaction.channel.send(cdMsg).catch(() => {}); return; }
+      // White Money confirm is instant — no extra cooldown wait — but it
+      // still counts as a gamble, so the normal 15s cooldown gets set
+      // AFTER this resolves, same as any other bet.
+      if (!donExempt(req.userId)) {
+        if (gamblingBlacklist.has(req.userId)) { await interaction.channel.send("⛔ You are blacklisted from gambling by Don Clint.").catch(() => {}); return; }
+        const debt = await eco.getDebt(req.userId);
+        if (debt > 0) { await interaction.channel.send("🔴 You're **in debt** (💵 " + eco.fmt(debt) + " Cash). Pay it off first before gambling.").catch(() => {}); return; }
+      }
 
       const wallet = await eco.getWallet(req.userId);
       const total = eco.walletToCopper(wallet);
@@ -9777,6 +9894,7 @@ async function init() {
         if (!deducted) { await interaction.channel.send("Insufficient funds.").catch(() => {}); return; }
       }
       const resultMsg = await runGambleGame(req.userId, req.gameType, req.bet, req.choice);
+      if (!donExempt(req.userId)) gambleCooldowns.set(req.userId, Date.now());
       await interaction.channel.send(`💵 **Using White Money only:**\n${resultMsg}`).catch(() => {});
       return;
     }

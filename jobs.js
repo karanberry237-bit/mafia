@@ -9,9 +9,9 @@ const eco = require("./economy");
 const features = require("./features");
 
 // ── Cooldowns ──────────────────────────────────────────────────────────────────
-const WORK_COOLDOWN_MS     = 30 * 60 * 1000;      // 30 min
-const CRIME_COOLDOWN_MS    = 22.5 * 60 * 1000;    // 22.5 min (halved from 45)
-const SCAVENGE_COOLDOWN_MS = 5 * 60 * 1000;       // 5 min (halved from 10)
+const WORK_COOLDOWN_MS     = 10 * 60 * 1000;      // 10 min
+const CRIME_COOLDOWN_MS    = 10 * 60 * 1000;      // 10 min
+const SCAVENGE_COOLDOWN_MS = 1 * 60 * 1000;       // 1 min
 const SMUGGLE_COOLDOWN_MS  = 90 * 60 * 1000;      // 90 min
 
 const cooldowns = {
@@ -34,6 +34,12 @@ function checkCooldown(kind, userId, ms, isDon) {
   return null;
 }
 function setCooldown(kind, userId) { cooldowns[kind].set(userId, Date.now()); }
+
+// Wipes every in-memory job cooldown for every user — used by the Don-only
+// "reset economy" command after a full economy wipe.
+function resetAllCooldowns() {
+  for (const kind of Object.keys(cooldowns)) cooldowns[kind].clear();
+}
 
 // Fast Hands: if active, halve the cooldown this job action sets and consume
 // the item. Works by back-dating the "last used" timestamp by half the
@@ -384,9 +390,9 @@ async function claimQuest(userId) {
 const JOBS_HELP = [
   "```",
   "💼  JOBS & HUSTLES  (all pay Cash, scale with your rank)",
-  "  Cosa work       ← safe pay, 30m cooldown",
-  "  Cosa crime      ← risky, bigger score, 45m cooldown",
-  "  Cosa scavenge   ← quick pocket change, 10m cooldown",
+  "  Cosa work       ← safe pay, 10m cooldown",
+  "  Cosa crime      ← risky, bigger score, 10m cooldown",
+  "  Cosa scavenge   ← quick pocket change, 1m cooldown",
   "  Cosa smuggle    ← high stakes, 90m cooldown",
   "",
   "📋  QUESTS",
@@ -400,6 +406,6 @@ const JOBS_HELP = [
 module.exports = {
   doWork, doCrime, doScavenge, doSmuggle,
   getQuestBoard, claimQuest, recordQuest,
-  getCooldownStatus,
+  getCooldownStatus, resetAllCooldowns,
   JOBS_HELP,
 };
