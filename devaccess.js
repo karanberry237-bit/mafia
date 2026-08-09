@@ -29,10 +29,26 @@ const CONFIRM_TIMEOUT_MS = 60 * 1000;
 let supabase;
 let MASTER_ID;
 
-function initDevAccess(masterId, supabaseUrl, supabaseKey) {
+// In-memory cache so permission checks elsewhere in the bot (canDo, isModUser,
+// isMaster, etc.) can do a synchronous lookup instead of awaiting a DB call
+// on every single message/command. Loaded at boot, kept in sync on every
+// grant/revoke.
+let devIdCache = new Set();
+
+async function _refreshCache() {
+  const ids = await _getList();
+  devIdCache = new Set(ids.map(e => e.userId));
+}
+
+function isDeveloperSync(userId) {
+  return devIdCache.has(userId);
+}
+
+async function initDevAccess(masterId, supabaseUrl, supabaseKey) {
   MASTER_ID = masterId;
   supabase = createClient(supabaseUrl, supabaseKey, { realtime: { transport: ws } });
-  console.log("🛠️ Dev access system initialized (private, master-only)");
+  await _refreshCache().catch(e => console.error("[DEVACCESS CACHE INIT]", e.message));
+  console.log("🛠️ Dev access system initialized (private, master-only) —", devIdCache.size, "developer(s) loaded");
 }
 
 // ── Storage helpers ──────────────────────────────────────────────────────
@@ -53,8 +69,7 @@ async function _saveList(ids) {
 // ── Public permission check — plug into your command gating alongside isDon ─
 async function isDeveloper(userId) {
   if (userId === MASTER_ID) return true;
-  const ids = await _getList();
-  return ids.some(e => e.userId === userId);
+  return devIdCache.has(userId);
 }
 
 async function listDevelopers() {
@@ -67,6 +82,7 @@ async function _grant(userId) {
   if (ids.some(e => e.userId === userId)) return { success: false, reason: "Already has dev access." };
   ids.push({ userId, grantedAt: new Date().toISOString() });
   await _saveList(ids);
+  await _refreshCache();
   return { success: true };
 }
 
@@ -74,6 +90,7 @@ async function _revoke(userId) {
   const ids = await _getList();
   if (!ids.some(e => e.userId === userId)) return { success: false, reason: "That user doesn't have dev access." };
   await _saveList(ids.filter(e => e.userId !== userId));
+  await _refreshCache();
   return { success: true };
 }
 
@@ -175,6 +192,6 @@ async function executeConfirmedAction(action, targetId) {
 }
 
 module.exports = {
-  initDevAccess, isDeveloper, listDevelopers,
+  initDevAccess, isDeveloper, isDeveloperSync, listDevelopers,
   beginGrantFlow, beginRevokeFlow, advanceConfirmation, cancelConfirmation, executeConfirmedAction,
 };

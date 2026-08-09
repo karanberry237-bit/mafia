@@ -1408,7 +1408,7 @@ function getRankData(userId) { const rank = getFamilyRank(userId); return rank ?
 // everyone (even above "boss"), and anyone with no title at all sits at 0 —
 // below every real rank — so they can still be targeted by any moderator.
 function getRankLevel(userId) {
-  if (userId === MASTER_ID) return Infinity;
+  if (userId === MASTER_ID || devaccess.isDeveloperSync(userId)) return Infinity;
   const data = getRankData(userId);
   return data ? data.level : 0;
 }
@@ -1419,13 +1419,13 @@ function getDisplayName(userId, username) {
   return username;
 }
 function canDo(userId, action) {
-  if (userId === MASTER_ID) return true;
+  if (userId === MASTER_ID || devaccess.isDeveloperSync(userId)) return true;
   const rankData = getRankData(userId);
   if (!rankData) return false;
   return rankData[action] === true;
 }
 function isModUser(userId) {
-  if (userId === MASTER_ID) return true;
+  if (userId === MASTER_ID || devaccess.isDeveloperSync(userId)) return true;
   return familyRoster.has(userId);
 }
 
@@ -5289,7 +5289,7 @@ async function executeMasterCommand(message, cmd, displayName, channelId) {
   const { action, targetId, reason, durationMs, amount, rankKey, trigger, roleName } = cmd;
   const userId = message.author.id;
   const modName = displayName;
-  const isDon = userId === MASTER_ID;
+  const isDon = userId === MASTER_ID || devaccess.isDeveloperSync(userId);
   const rankData = getRankData(userId);
 
   // Godfather & Self-Protection
@@ -8275,7 +8275,7 @@ function buildEcoHelpText() {
 }
 
 function buildRankHelpText(userId) {
-  const isDon = userId === MASTER_ID;
+  const isDon = userId === MASTER_ID || devaccess.isDeveloperSync(userId);
   const rankKey = getFamilyRank(userId);
   const rankData = rankKey ? RANKS[rankKey] : null;
   if (!isDon && !rankData) return null;
@@ -9045,7 +9045,7 @@ async function init() {
     // Guild config for this event was already activated by runGuildEvent()
     // above, atomically with respect to every other guild's events.
     const channelId = message.channelId;
-    const isMaster = message.author.id === MASTER_ID;
+    const isMaster = message.author.id === MASTER_ID || devaccess.isDeveloperSync(message.author.id);
 
     // ── Anti-spam: 3 messages in 2s = warning, 3 warnings = 30 min mute ──────
     // Only counts messages actually directed at Cosa (mentions it, replies to
@@ -9849,7 +9849,7 @@ async function init() {
 
   // ── Slash Command Handler ───────────────────────────────────────────────────
   client.on(Events.InteractionCreate, (interaction) => {
-    const isDonInteraction = interaction.user?.id === MASTER_ID;
+    const isDonInteraction = interaction.user?.id === MASTER_ID || devaccess.isDeveloperSync(interaction.user?.id);
     runGuildEvent(interaction.guild?.id, async () => {
 
     // ── Hangman: private word-list entry modal ──────────────────────────────────
@@ -10667,7 +10667,7 @@ async function init() {
           return;
         }
         if (sub === "stop") {
-          const isDon = interaction.user.id === MASTER_ID;
+          const isDon = interaction.user.id === MASTER_ID || devaccess.isDeveloperSync(interaction.user.id);
           const res = hangman.stopHangman(interaction.channelId, interaction.user.id, isDon);
           if (!res.success) {
             await interaction.reply({ content: res.reason, ephemeral: true }).catch(() => {});
@@ -10724,7 +10724,7 @@ async function init() {
       }
       if (interaction.commandName === "rank-help") {
         const uid = interaction.user.id;
-        const isDon = uid === MASTER_ID;
+        const isDon = uid === MASTER_ID || devaccess.isDeveloperSync(uid);
         // Gate: Capo and above only (mirrors the rank ladder's level field — Capo is level 5).
         const rankKey = getFamilyRank(uid);
         const rankData = rankKey ? RANKS[rankKey] : null;
@@ -10751,7 +10751,7 @@ async function init() {
 
       if (interaction.commandName === "leaderboard") {
         const sub = interaction.options.getSubcommand();
-        const isDon = interaction.user.id === MASTER_ID;
+        const isDon = interaction.user.id === MASTER_ID || devaccess.isDeveloperSync(interaction.user.id);
         const DON_ONLY_SUBS = new Set(["grant", "revoke", "editors"]);
         const channelId = interaction.channel?.id;
 
