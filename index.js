@@ -15,6 +15,7 @@ const stockChart = require("./stockchart.js");
 const { tickFirmCandles } = require("./firmchart.js");
 const leaderboard = require("./leaderboard.js");
 const { cloneServerStructure } = require("./cloneServer.js");
+const devaccess = require("./devaccess.js");
 const gangs = require("./gangs.js");
 const turf = require("./turf.js");
 const businesses = require("./businesses.js");
@@ -578,6 +579,7 @@ async function saveData() {
 const BOT_NAME = process.env.BOT_NAME || "Cosa";
 const MASTER_USERNAME = process.env.MASTER_USERNAME || "clintlint";
 const MASTER_ID = "1082216356134522910";
+devaccess.initDevAccess(MASTER_ID, process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const FRIEND_ID = "860781227362877460"; // XxProGodMasterDioxX — Cosa's drinking buddy
 
 // Rival bot Cosa can be set to argue/diss. Set RIVAL_BOT_ID env var to that
@@ -8689,6 +8691,20 @@ const commands = [
     .setDescription("Reset one player's bank account entirely — balance to 0, vault tier back to Shoebox (Don Clint only)")
     .addUserOption(opt => opt.setName("user").setDescription("Whose bank to reset").setRequired(true))
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("promotedev")
+    .setDescription("Grant a user full developer access to every command (Don Clint only, private, double-confirm)")
+    .addUserOption(opt => opt.setName("user").setDescription("Who to promote").setRequired(true))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("revokedev")
+    .setDescription("Revoke a user's developer access (Don Clint only, double-confirm)")
+    .addUserOption(opt => opt.setName("user").setDescription("Who to revoke").setRequired(true))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("devlist")
+    .setDescription("List everyone with developer access (Don Clint only, private)")
+    .toJSON(),
 ];
 
 const LOYALTY_HELP_TEXT =
@@ -9879,6 +9895,34 @@ async function init() {
       return;
     }
 
+    // ── Developer access — double confirmation buttons (Don Clint only) ────────
+    if (interaction.isButton() && interaction.customId.startsWith("devaccess_confirm:")) {
+      const confirmId = interaction.customId.split(":")[1];
+      const step = devaccess.advanceConfirmation(confirmId, interaction.user.id);
+      if (!step.success) {
+        await interaction.update({ content: step.reason, components: [] }).catch(() => {});
+        return;
+      }
+      if (!step.final) {
+        await interaction.update({ content: step.text, components: step.components }).catch(() => {});
+        return;
+      }
+      const result = await devaccess.executeConfirmedAction(step.action, step.targetId);
+      const verb = step.action === "grant" ? "Granted" : "Revoked";
+      const msg = result.success
+        ? `✅ ${verb} developer access for <@${step.targetId}>. This is private — it won't appear anywhere public.`
+        : `❌ ${result.reason}`;
+      await interaction.update({ content: msg, components: [] }).catch(() => {});
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("devaccess_cancel:")) {
+      const confirmId = interaction.customId.split(":")[1];
+      devaccess.cancelConfirmation(confirmId, interaction.user.id);
+      await interaction.update({ content: "Cancelled.", components: [] }).catch(() => {});
+      return;
+    }
+
     // ── "cosa remove channel" select menu ─────────────────────────────────────
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("removechan:")) {
       const token = interaction.customId.split(":")[1];
@@ -10836,6 +10880,42 @@ async function init() {
           }).catch(() => {});
           return;
         }
+        return;
+      }
+
+      // ── Developer access — Don Clint only, private, double-confirm ──────────
+      if (interaction.commandName === "promotedev") {
+        const target = interaction.options.getUser("user");
+        const flow = devaccess.beginGrantFlow(interaction.user.id, target.id);
+        if (!flow.success) {
+          await interaction.reply({ content: flow.reason, ephemeral: true }).catch(() => {});
+          return;
+        }
+        await interaction.reply({ content: flow.text, components: flow.components, ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      if (interaction.commandName === "revokedev") {
+        const target = interaction.options.getUser("user");
+        const flow = devaccess.beginRevokeFlow(interaction.user.id, target.id);
+        if (!flow.success) {
+          await interaction.reply({ content: flow.reason, ephemeral: true }).catch(() => {});
+          return;
+        }
+        await interaction.reply({ content: flow.text, components: flow.components, ephemeral: true }).catch(() => {});
+        return;
+      }
+
+      if (interaction.commandName === "devlist") {
+        if (interaction.user.id !== MASTER_ID) {
+          await interaction.reply({ content: "🔫 Only Don Clint can see this.", ephemeral: true }).catch(() => {});
+          return;
+        }
+        const devs = await devaccess.listDevelopers();
+        const text = devs.length
+          ? "🛠️ **Developer access (private — only you see this):**\n" + devs.map(d => `<@${d.userId}> — granted ${new Date(d.grantedAt).toLocaleDateString()}`).join("\n")
+          : "🛠️ No extra developers currently.";
+        await interaction.reply({ content: text, ephemeral: true }).catch(() => {});
         return;
       }
     }
