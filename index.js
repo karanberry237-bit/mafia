@@ -2399,7 +2399,7 @@ const groqKeys = [
 // the problem. Live Groq docs (checked 2026-07-24) still list this as a current
 // production model. Parse stays on the reasoning model — it's internal JSON
 // command parsing, never user-facing, so its stricter alignment is harmless.
-const AI_MODEL_CHAT  = "llama-3.1-8b-instant";
+const AI_MODEL_CHAT  = "openai/gpt-oss-20b";
 const AI_MODEL_PARSE = process.env.GROQ_MODEL_PARSE || "openai/gpt-oss-120b";
 
 // Only genuine reasoning models accept the `reasoning_format` parameter. Sending
